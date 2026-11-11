@@ -1,16 +1,33 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import type { JobProgress } from '../../shared/contracts'
+import type { DownloadHistoryEntry, JobProgress, TrackerNovel } from '../../shared/contracts'
 import { suggestEpubFilename } from '../../shared/epubFilename'
+import LibraryView from './components/LibraryView.vue'
 import { useDownloadStore } from './stores/download'
+import { useLibraryStore } from './stores/library'
 
 const store = useDownloadStore()
+const libraryState = useLibraryStore()
+const {
+  scanning: libraryScanning,
+  cancelling: libraryCancelling,
+  progress: libraryProgress,
+  cancelError: libraryCancelError
+} = storeToRefs(libraryState)
+const activeView = ref<'create' | 'library'>('create')
+const trackerVisible = ref(false)
+const trackerLoading = ref(false)
+const trackerNovels = ref<TrackerNovel[]>([])
+const trackerSearch = ref('')
+const trackerSources = ref<Record<string, string>>({})
+const trackerCsvPath = ref('')
+const downloadHistory = ref<DownloadHistoryEntry[]>([])
 const {
   url,
   title,
@@ -22,6 +39,7 @@ const {
   parserName,
   outputDirectory,
   busy,
+  creating,
   progress,
   error,
   success,
@@ -33,11 +51,37 @@ const filenamePreview = computed(() => {
   if (selected.length === 0) return suggestEpubFilename(title.value, '', '')
   return suggestEpubFilename(title.value, selected[0].title, selected[selected.length - 1].title)
 })
+const filteredTrackerNovels = computed(() => {
+  const query = trackerSearch.value.trim().toLocaleLowerCase()
+  if (!query) return trackerNovels.value.slice(0, 100)
+  return trackerNovels.value
+    .filter((novel) =>
+      `${novel.title} ${novel.siteTitle} ${novel.author} ${novel.alternativeNames}`
+        .toLocaleLowerCase()
+        .includes(query)
+    )
+    .slice(0, 100)
+})
 const progressValue = computed(() => {
   const currentProgress = progress.value
   return currentProgress && currentProgress.total > 0
     ? Math.round((currentProgress.current / currentProgress.total) * 100)
     : 0
+})
+const libraryScanProgressValue = computed(() => {
+  const currentProgress = libraryState.progress
+  return currentProgress && currentProgress.total > 0
+    ? Math.round((currentProgress.current / currentProgress.total) * 100)
+    : 0
+})
+const libraryScanCountLabel = computed(() => {
+  const currentProgress = libraryState.progress
+  if (!currentProgress) return 'Preparing the scan…'
+  if (currentProgress.stage === 'scan') {
+    return `${currentProgress.discoveredFiles.toLocaleString()} files found · indexing will begin after discovery`
+  }
+  if (currentProgress.totalFiles === 0) return 'No supported files found'
+  return `${currentProgress.indexedFiles.toLocaleString()} of ${currentProgress.totalFiles.toLocaleString()} indexed · ${currentProgress.discoveredFiles.toLocaleString()} found`
 })
 
 watch(url, (value) => {
@@ -51,12 +95,27 @@ watch(url, (value) => {
     store.success = ''
     store.progress = null
   }
+  if (store.trackerRow && value.trim() !== store.trackerSourceUrl) {
+    store.trackerRow = null
+    store.trackerSourceUrl = ''
+  }
 })
 
 let removeProgressListener: (() => void) | undefined
 
 onMounted(() => {
   removeProgressListener = window.novelTracker.onProgress((progress: JobProgress) => store.setProgress(progress))
+  void window.novelTracker.getSettings().then((settings) => {
+    if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
+    trackerCsvPath.value = settings.trackerCsvPath
+  }).catch((error: unknown) => {
+    store.error = error instanceof Error ? error.message : String(error)
+  })
+  void window.novelTracker.getDownloadHistory().then((history) => {
+    downloadHistory.value = history
+  }).catch((error: unknown) => {
+    store.error = error instanceof Error ? error.message : String(error)
+  })
 })
 
 onUnmounted(() => removeProgressListener?.())
@@ -82,6 +141,26 @@ async function discover(): Promise<void> {
   }
 }
 
+async function cancelEpubGeneration(): Promise<void> {
+  try {
+    await window.novelTracker.cancelEpubGeneration()
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function cancelLibraryScan(): Promise<void> {
+  if (libraryState.cancelling || libraryState.progress?.stage === 'save') return
+  libraryState.cancelling = true
+  libraryState.cancelError = ''
+  try {
+    await window.novelTracker.cancelLibraryScan()
+  } catch (error) {
+    libraryState.cancelError = error instanceof Error ? error.message : String(error)
+    libraryState.cancelling = false
+  }
+}
+
 async function chooseOutputDirectory(): Promise<void> {
   store.error = ''
   try {
@@ -92,33 +171,105 @@ async function chooseOutputDirectory(): Promise<void> {
   }
 }
 
+async function openTrackerPicker(): Promise<void> {
+  trackerVisible.value = true
+  trackerSearch.value = ''
+  store.error = ''
+  trackerLoading.value = true
+  try {
+    const result = await window.novelTracker.getTrackerNovels()
+    if (!result.ok) {
+      store.error = result.error
+      return
+    }
+    trackerNovels.value = result.value
+    trackerSources.value = Object.fromEntries(
+      result.value.map((novel) => [
+        novel.stableId,
+        novel.sources.find((source) => source.valid)?.url ?? novel.sources[0]?.url ?? ''
+      ])
+    )
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    trackerLoading.value = false
+  }
+}
+
+async function openCreateView(): Promise<void> {
+  activeView.value = 'create'
+  try {
+    const settings = await window.novelTracker.getSettings()
+    if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
+    trackerCsvPath.value = settings.trackerCsvPath
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  }
+}
+
+function useTrackerNovel(novel: TrackerNovel): void {
+  const sourceUrl = trackerSources.value[novel.stableId] ?? ''
+  const source = novel.sources.find((candidate) => candidate.url === sourceUrl)
+  if (source && !source.valid) {
+    store.error = 'This tracker row has an invalid URL. Enter a valid URL manually.'
+    return
+  }
+
+  store.sourceUrl = ''
+  store.chapters = []
+  store.parserName = ''
+  store.filename = ''
+  store.title = novel.siteTitle || novel.title
+  store.author = novel.author
+  store.url = sourceUrl
+  store.trackerRow = {
+    stableId: novel.stableId,
+    rowNumber: novel.rowNumber,
+    title: novel.title,
+    csvPath: trackerCsvPath.value
+  }
+  store.trackerSourceUrl = sourceUrl
+  store.error = sourceUrl ? '' : 'This tracker row has no source URL. Enter a URL manually.'
+  store.success = ''
+  trackerVisible.value = false
+}
+
 async function createEpub(): Promise<void> {
   store.error = ''
   store.success = ''
   store.progress = null
   store.busy = true
+  store.creating = true
   try {
     const result = await window.novelTracker.generateEpub({
       title: store.title,
       author: store.author,
       language: store.language,
       filename: store.filename.trim() || filenamePreview.value,
+      sourceUrl: store.sourceUrl,
       outputDirectory: store.outputDirectory,
       chapters: store.chapters
         .filter((chapter) => chapter.selected)
-        .map(({ id, title, url }) => ({ id, title, url }))
+        .map(({ id, title, url }) => ({ id, title, url })),
+      trackerRow: store.trackerRow ?? undefined
     })
     if (!result.ok) {
       store.error = result.error
       return
     }
     const filename = result.value.outputPath.split(/[\\/]/).pop() ?? result.value.outputPath
-    store.success = result.value.createdNumberedCopy
-      ? `Saved ${filename}. The original file was kept unchanged because it already existed.`
+    store.success = result.value.overwroteExistingFile
+      ? `Saved ${filename}, overwriting the existing file.`
       : `Saved ${filename}.`
   } catch (error) {
     store.error = error instanceof Error ? error.message : String(error)
   } finally {
+    try {
+      downloadHistory.value = await window.novelTracker.getDownloadHistory()
+    } catch (error) {
+      if (!store.error) store.error = error instanceof Error ? error.message : String(error)
+    }
+    store.creating = false
     store.busy = false
   }
 }
@@ -129,16 +280,22 @@ function toggleAll(selected: boolean): void {
 </script>
 
 <template>
-  <main class="shell">
+  <div class="app-frame">
+  <main class="shell" :inert="libraryScanning">
     <header class="topbar">
       <div class="brand-mark" aria-hidden="true">N</div>
       <div>
         <p class="eyebrow">NOVEL TRACKER</p>
         <h1>EPUB Builder</h1>
       </div>
+      <nav class="main-navigation" aria-label="Main navigation">
+        <button :class="{ active: activeView === 'create' }" @click="openCreateView">Create EPUB</button>
+        <button :class="{ active: activeView === 'library' }" @click="activeView = 'library'">Library</button>
+      </nav>
       <span class="phase-badge">Text-first EPUB</span>
     </header>
 
+    <template v-if="activeView === 'create'">
     <section class="intro">
       <p class="eyebrow">FROM WEBSITE TO EPUB</p>
       <h2>Make a personal EPUB from a novel URL</h2>
@@ -164,6 +321,49 @@ function toggleAll(selected: boolean): void {
           @keydown.enter="discover"
         />
         <Button label="Discover chapters" icon="pi pi-search" :loading="busy" :disabled="busy || !url.trim()" @click="discover" />
+      </div>
+      <div class="tracker-picker-toggle">
+        <Button label="Browse tracker CSV" icon="pi pi-list" severity="secondary" text size="small" :disabled="busy" @click="openTrackerPicker" />
+      </div>
+      <div v-if="trackerVisible" class="tracker-picker">
+        <div class="tracker-picker-heading">
+          <div>
+            <h4>Add from Tracker</h4>
+            <p>Browsing is local and read-only. Network requests start only when you choose Discover chapters.</p>
+          </div>
+          <Button icon="pi pi-times" aria-label="Close tracker picker" severity="secondary" text rounded @click="trackerVisible = false" />
+        </div>
+        <InputText v-model="trackerSearch" class="full-input" placeholder="Search title, author, or alternate name" />
+        <div v-if="trackerLoading" class="help-text">Reading the configured CSV…</div>
+        <div v-else class="tracker-results">
+          <div v-for="novel in filteredTrackerNovels" :key="novel.stableId" class="tracker-row">
+            <div class="tracker-title">
+              <strong>{{ novel.title }}</strong>
+              <span>{{ novel.author || 'Author unknown' }}<template v-if="novel.siteTitle && novel.siteTitle !== novel.title"> · {{ novel.siteTitle }}</template></span>
+            </div>
+            <div class="tracker-source">
+              <select v-if="novel.sources.length" v-model="trackerSources[novel.stableId]" aria-label="Select novel source">
+                <option v-for="source in novel.sources" :key="source.label" :value="source.url" :disabled="!source.valid">
+                  {{ source.label }}{{ source.valid ? '' : ' (invalid URL)' }}
+                </option>
+              </select>
+              <span v-else class="help-text">No source URL</span>
+              <Button
+                :label="novel.sources.length ? 'Use' : 'Use details'"
+                size="small"
+                severity="secondary"
+                outlined
+                @click="useTrackerNovel(novel)"
+              />
+            </div>
+          </div>
+          <p v-if="!trackerLoading && filteredTrackerNovels.length === 0" class="empty-state">
+            {{ trackerNovels.length ? 'No matching tracker rows.' : 'No tracker rows loaded. Configure a CSV in Library settings.' }}
+          </p>
+          <p v-if="trackerNovels.length > filteredTrackerNovels.length" class="help-text">
+            Showing up to 100 matches. Refine the search to find other rows.
+          </p>
+        </div>
       </div>
       <p v-if="parserName === 'NovelFull'" class="help-text">
         {{ parserName }} index pages are collected in reading order. Chapter text is fetched when you create the EPUB.
@@ -253,14 +453,16 @@ function toggleAll(selected: boolean): void {
           <Button label="Choose folder" icon="pi pi-folder-open" severity="secondary" outlined :disabled="busy" @click="chooseOutputDirectory" />
         </div>
         <div class="create-row">
-          <p class="help-text">Existing files are kept; a numbered copy is saved if the name is already in use.</p>
+          <p class="help-text">If an EPUB with this name already exists, it will be overwritten.</p>
           <Button
+            v-if="!creating"
             label="Create EPUB"
             icon="pi pi-book"
             :loading="busy"
             :disabled="busy || selectedCount === 0 || !title.trim() || !outputDirectory || !hasCurrentDiscovery"
             @click="createEpub"
           />
+          <Button v-else label="Cancel creation" severity="danger" outlined @click="cancelEpubGeneration" />
         </div>
         <div v-if="progress" class="progress-block" aria-live="polite">
           <div class="progress-caption">
@@ -272,7 +474,63 @@ function toggleAll(selected: boolean): void {
       </section>
     </template>
 
+    <section v-if="downloadHistory.length" class="card history-card" aria-label="Recent EPUB jobs">
+      <div class="section-heading">
+        <div>
+          <p class="step-label">LOCAL JOB HISTORY</p>
+          <h3>Recent EPUB jobs</h3>
+        </div>
+      </div>
+      <div v-for="job in downloadHistory.slice(0, 8)" :key="job.id" class="history-row">
+        <div class="history-summary">
+          <strong>{{ job.title }}</strong>
+          <span>{{ job.completedChapters }} / {{ job.selectedChapterCount }} chapters · {{ new Date(job.updatedAt).toLocaleString() }}</span>
+        </div>
+        <span class="history-status" :class="`status-${job.status}`">{{ job.status }}</span>
+        <span v-if="job.error" class="history-error">{{ job.error }}</span>
+        <span v-else-if="job.outputPath" class="history-error">{{ job.outputPath }}</span>
+      </div>
+    </section>
+
     <Message v-if="error" severity="error" :closable="false" class="feedback">{{ error }}</Message>
     <Message v-if="success" severity="success" :closable="false" class="feedback">{{ success }}</Message>
+    </template>
+    <LibraryView v-else />
   </main>
+  <div
+    v-if="libraryScanning"
+    class="scan-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="scan-dialog-title"
+    aria-live="polite"
+  >
+    <section class="scan-dialog">
+      <span class="scan-spinner" aria-hidden="true"></span>
+      <p class="eyebrow">LIBRARY INDEX</p>
+      <h2 id="scan-dialog-title">Indexing your library</h2>
+      <p class="scan-message">
+        {{ libraryCancelling ? 'Cancelling scan…' : libraryProgress?.message ?? 'Preparing the scan…' }}
+      </p>
+      <ProgressBar
+        v-if="!libraryProgress || libraryProgress.stage === 'scan'"
+        mode="indeterminate"
+        :show-value="false"
+      />
+      <ProgressBar v-else :value="libraryScanProgressValue" :show-value="false" />
+      <p class="scan-count">{{ libraryScanCountLabel }}</p>
+      <Message v-if="libraryCancelError" severity="error" :closable="false">
+        {{ libraryCancelError }}
+      </Message>
+      <Button
+        :label="libraryProgress?.stage === 'save' ? 'Saving index…' : 'Cancel scan'"
+        severity="secondary"
+        outlined
+        :disabled="libraryCancelling || libraryProgress?.stage === 'save'"
+        @click="cancelLibraryScan"
+      />
+      <p class="help-text">The app is locked while the index is updated. Keep this window open.</p>
+    </section>
+  </div>
+  </div>
 </template>

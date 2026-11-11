@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { link, unlink, writeFile } from 'node:fs/promises'
+import { lstat, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import JSZip from 'jszip'
 import { XMLValidator } from 'fast-xml-parser'
@@ -161,29 +161,36 @@ export async function validateEpubBuffer(buffer: Buffer, chapterCount: number): 
   }
 }
 
-async function publishWithoutOverwrite(directory: string, filename: string, contents: Buffer): Promise<{
-  outputPath: string
-  createdNumberedCopy: boolean
-}> {
-  const base = filename.replace(/\.epub$/i, '')
-  const temporaryPath = join(directory, `.novel-tracker-${randomUUID()}.tmp`)
-  await writeFile(temporaryPath, contents, { flag: 'wx' })
-
+async function targetFileExists(path: string): Promise<boolean> {
   try {
-    for (let suffix = 1; suffix <= 1000; suffix += 1) {
-      const numbered = suffix > 1
-      const candidate = join(directory, `${base}${numbered ? ` (${suffix})` : ''}.epub`)
-      try {
-        await link(temporaryPath, candidate)
-        return { outputPath: candidate, createdNumberedCopy: numbered }
-      } catch (error) {
-        if (error instanceof Error && 'code' in error && error.code === 'EEXIST') continue
-        throw error
-      }
+    const details = await lstat(path)
+    if (!details.isFile() && !details.isSymbolicLink()) {
+      throw new Error('A folder or other item already uses this EPUB filename.')
     }
-    throw new Error('Could not find an unused EPUB filename in the selected folder.')
+    return true
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function publishEpub(
+  directory: string,
+  filename: string,
+  contents: Buffer,
+  signal?: AbortSignal
+): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
+  const temporaryPath = join(directory, `.novel-tracker-${randomUUID()}.tmp`)
+  try {
+    await writeFile(temporaryPath, contents, { flag: 'wx' })
+    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    const outputPath = join(directory, filename)
+    const overwroteExistingFile = await targetFileExists(outputPath)
+    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    await rename(temporaryPath, outputPath)
+    return { outputPath, overwroteExistingFile }
   } finally {
-    await unlink(temporaryPath)
+    await rm(temporaryPath, { force: true })
   }
 }
 
@@ -193,9 +200,11 @@ export async function writeEpub(
   author: string,
   language: string,
   chapters: ChapterContent[],
-  requestedFilename?: string
-): Promise<{ outputPath: string; createdNumberedCopy: boolean }> {
+  requestedFilename?: string,
+  signal?: AbortSignal
+): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   const buffer = await buildEpubBuffer(title, author, language, chapters)
+  if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
   const filename = createEpubFilename(title, chapters, requestedFilename)
-  return publishWithoutOverwrite(outputDirectory, filename, buffer)
+  return publishEpub(outputDirectory, filename, buffer, signal)
 }

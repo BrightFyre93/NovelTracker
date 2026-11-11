@@ -31,11 +31,14 @@ export function validateHttpUrl(value: unknown): string {
   return url.href
 }
 
-async function fetchHtml(url: string): Promise<{ html: string; finalUrl: string }> {
+async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ html: string; finalUrl: string }> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const abortOperation = () => controller.abort()
+  operationSignal?.addEventListener('abort', abortOperation, { once: true })
 
   try {
+    if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
     const response = await fetch(url, {
       headers: {
         Accept: 'text/html,application/xhtml+xml',
@@ -88,12 +91,14 @@ async function fetchHtml(url: string): Promise<{ html: string; finalUrl: string 
 
     return { html: new TextDecoder().decode(bytes), finalUrl }
   } catch (error) {
+    if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('The page request timed out.')
     }
     throw error
   } finally {
     clearTimeout(timeout)
+    operationSignal?.removeEventListener('abort', abortOperation)
   }
 }
 
@@ -397,8 +402,8 @@ export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTi
   }
 }
 
-export async function fetchChapterContent(chapter: ChapterLink): Promise<ChapterContent> {
+export async function fetchChapterContent(chapter: ChapterLink, signal?: AbortSignal): Promise<ChapterContent> {
   const url = validateHttpUrl(chapter.url)
-  const { html, finalUrl } = await fetchHtml(url)
+  const { html, finalUrl } = await fetchHtml(url, signal)
   return extractChapterFromHtml(html, finalUrl, chapter.title)
 }
