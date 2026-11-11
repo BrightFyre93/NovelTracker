@@ -14,6 +14,7 @@ export const useDownloadStore = defineStore('download', {
     filename: '',
     trackerRow: null as { stableId: string; rowNumber: number; title: string; csvPath: string } | null,
     trackerSourceUrl: '',
+    queueItemId: '',
     sourceUrl: '',
     parserName: '',
     chapters: [] as SelectableChapter[],
@@ -29,6 +30,7 @@ export const useDownloadStore = defineStore('download', {
   },
   actions: {
     applyDiscovery(result: DiscoveryResult) {
+      this.queueItemId = ''
       this.sourceUrl = result.sourceUrl
       this.url = result.sourceUrl
       this.title = result.title || 'Untitled'

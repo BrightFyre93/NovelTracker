@@ -6,9 +6,10 @@ import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import type { DownloadHistoryEntry, JobProgress, TrackerNovel } from '../../shared/contracts'
+import type { DiscoveryQueueItem, DownloadHistoryEntry, JobProgress, TrackerNovel } from '../../shared/contracts'
 import { suggestEpubFilename } from '../../shared/epubFilename'
 import LibraryView from './components/LibraryView.vue'
+import QueueView from './components/QueueView.vue'
 import { useDownloadStore } from './stores/download'
 import { useLibraryStore } from './stores/library'
 
@@ -20,7 +21,7 @@ const {
   progress: libraryProgress,
   cancelError: libraryCancelError
 } = storeToRefs(libraryState)
-const activeView = ref<'create' | 'library'>('create')
+const activeView = ref<'create' | 'queue' | 'library'>('create')
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
@@ -86,6 +87,7 @@ const libraryScanCountLabel = computed(() => {
 
 watch(url, (value) => {
   if (sourceUrl.value && value.trim() !== sourceUrl.value) {
+    store.queueItemId = ''
     sourceUrl.value = ''
     chapters.value = []
     title.value = ''
@@ -215,6 +217,7 @@ function useTrackerNovel(novel: TrackerNovel): void {
     return
   }
 
+  store.queueItemId = ''
   store.sourceUrl = ''
   store.chapters = []
   store.parserName = ''
@@ -234,10 +237,60 @@ function useTrackerNovel(novel: TrackerNovel): void {
   trackerVisible.value = false
 }
 
+function openQueueItem(item: DiscoveryQueueItem): void {
+  store.queueItemId = ''
+  store.url = item.sourceUrl
+  store.sourceUrl = item.sourceUrl
+  store.title = item.title
+  store.author = item.author
+  store.parserName = item.parserName
+  store.chapters = item.chapters.map((chapter) => ({ ...chapter }))
+  store.queueItemId = item.id
+  store.filename = ''
+  store.trackerRow = item.trackerRow ? { ...item.trackerRow } : null
+  store.trackerSourceUrl = item.trackerRow ? item.sourceUrl : ''
+  store.progress = null
+  store.error = ''
+  store.success = ''
+  activeView.value = 'create'
+}
+
+async function persistQueueSelection(
+  id = store.queueItemId,
+  selectedUrls = store.chapters.filter((chapter) => chapter.selected).map((chapter) => chapter.url)
+): Promise<boolean> {
+  if (!id) return true
+  try {
+    const result = await window.novelTracker.updateDiscoveryQueueSelection(id, selectedUrls)
+    if (!result.ok) throw new Error(result.error)
+    return true
+  } catch (reason) {
+    store.error = reason instanceof Error ? reason.message : String(reason)
+    return false
+  }
+}
+
+let queueSelectionTimer: ReturnType<typeof setTimeout> | undefined
+watch(chapters, (updatedChapters) => {
+  const id = store.queueItemId
+  if (!id) return
+  const selectedUrls = updatedChapters.filter((chapter) => chapter.selected).map((chapter) => chapter.url)
+  if (queueSelectionTimer) clearTimeout(queueSelectionTimer)
+  queueSelectionTimer = setTimeout(() => {
+    queueSelectionTimer = undefined
+    void persistQueueSelection(id, selectedUrls)
+  }, 250)
+}, { deep: true })
+
 async function createEpub(): Promise<void> {
   store.error = ''
   store.success = ''
   store.progress = null
+  if (queueSelectionTimer) {
+    clearTimeout(queueSelectionTimer)
+    queueSelectionTimer = undefined
+  }
+  if (!(await persistQueueSelection())) return
   store.busy = true
   store.creating = true
   try {
@@ -290,6 +343,7 @@ function toggleAll(selected: boolean): void {
       </div>
       <nav class="main-navigation" aria-label="Main navigation">
         <button :class="{ active: activeView === 'create' }" @click="openCreateView">Create EPUB</button>
+        <button :class="{ active: activeView === 'queue' }" @click="activeView = 'queue'">Queue</button>
         <button :class="{ active: activeView === 'library' }" @click="activeView = 'library'">Library</button>
       </nav>
       <span class="phase-badge">Text-first EPUB</span>
@@ -495,6 +549,7 @@ function toggleAll(selected: boolean): void {
     <Message v-if="error" severity="error" :closable="false" class="feedback">{{ error }}</Message>
     <Message v-if="success" severity="success" :closable="false" class="feedback">{{ success }}</Message>
     </template>
+    <QueueView v-else-if="activeView === 'queue'" @open-item="openQueueItem" />
     <LibraryView v-else />
   </main>
   <div

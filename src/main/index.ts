@@ -6,6 +6,8 @@ import { Worker } from 'node:worker_threads'
 import type {
   AppSettings,
   ChapterLink,
+  DiscoveryQueueInput,
+  DiscoveryQueueItem,
   DownloadHistoryEntry,
   GenerateEpubInput,
   GenerateEpubResult,
@@ -16,11 +18,13 @@ import type {
 } from '../shared/contracts'
 import {
   markInterruptedDownloadJobs,
+  readDiscoveryQueue,
   readDownloadHistory,
   readLibraryIndex,
   readSettings,
   saveDownloadHistoryEntry,
   writeLibraryCorrection,
+  writeDiscoveryQueue,
   writeSettings
 } from './services/localStore'
 import { readTrackerCsv } from './services/trackerCsv'
@@ -41,6 +45,11 @@ type LibraryScanWorkerMessage =
 
 let activeLibraryScan: ActiveLibraryScan | null = null
 let activeEpubGeneration: AbortController | null = null
+let discoveryQueue: DiscoveryQueueItem[] = []
+let discoveryQueueWrites = Promise.resolve()
+const pendingDiscoveries: string[] = []
+let activeDiscoveries = 0
+const MAX_ACTIVE_DISCOVERIES = 2
 
 function dataDirectory(): string {
   return app.getPath('userData')
@@ -48,6 +57,144 @@ function dataDirectory(): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function copyDiscoveryQueue(): DiscoveryQueueItem[] {
+  return discoveryQueue.map((item) => ({
+    ...item,
+    trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
+    chapters: item.chapters.map((chapter) => ({ ...chapter }))
+  }))
+}
+
+function persistDiscoveryQueue(): Promise<void> {
+  const snapshot = copyDiscoveryQueue()
+  const write = discoveryQueueWrites.then(() => writeDiscoveryQueue(dataDirectory(), snapshot))
+  discoveryQueueWrites = write.then(() => undefined, () => undefined)
+  return write
+}
+
+function notifyDiscoveryQueueChanged(): void {
+  const items = copyDiscoveryQueue()
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.webContents.isDestroyed()) window.webContents.send('discovery-queue:update', items)
+  }
+}
+
+async function discoverQueueItem(id: string): Promise<void> {
+  const item = discoveryQueue.find((candidate) => candidate.id === id)
+  if (!item || item.status !== 'discovering') return
+  const previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
+  const previousByUrl = new Map(previousChapters.map((chapter) => [chapter.url, chapter]))
+  const hadPreviousSnapshot = Boolean(item.discoveredAt && previousChapters.length > 0)
+
+  try {
+    const result = await discoverChapters(item.sourceUrl)
+    if (item.status !== 'discovering') return
+    item.title = result.title || item.title
+    item.author = result.author || item.author
+    item.parserName = result.parserName
+    const newUrls = new Set(result.chapters.map((chapter) => chapter.url))
+    const addedCount = result.chapters.filter((chapter) => !previousByUrl.has(chapter.url)).length
+    const removedCount = previousChapters.filter((chapter) => !newUrls.has(chapter.url)).length
+    const orderChanged =
+      previousChapters.length === result.chapters.length &&
+      previousChapters.some((chapter, index) => chapter.url !== result.chapters[index].url)
+    item.chapters = result.chapters.map((chapter) => ({
+      ...chapter,
+      selected: previousByUrl.get(chapter.url)?.selected ?? true
+    }))
+    item.discoveryChanges =
+      hadPreviousSnapshot && (addedCount > 0 || removedCount > 0 || orderChanged)
+        ? `Chapter list changed: ${addedCount} added, ${removedCount} removed${orderChanged ? ', order changed' : ''}. Review your selection.`
+        : ''
+    item.status = 'needs-review'
+    item.error = ''
+    item.discoveredAt = new Date().toISOString()
+    item.updatedAt = item.discoveredAt
+  } catch (error) {
+    item.status = 'failed'
+    item.error = errorMessage(error)
+    item.updatedAt = new Date().toISOString()
+  }
+
+  try {
+    await persistDiscoveryQueue()
+  } catch (error) {
+    console.error(`Discovery queue item ${id} could not be saved:`, error)
+    item.status = 'failed'
+    item.error = `Discovery result could not be saved: ${errorMessage(error)}`
+    item.updatedAt = new Date().toISOString()
+    try {
+      await persistDiscoveryQueue()
+    } catch (saveError) {
+      console.error(`Discovery queue item ${id} failure state could not be saved:`, saveError)
+    }
+  }
+  notifyDiscoveryQueueChanged()
+}
+
+function pumpDiscoveryQueue(): void {
+  while (activeDiscoveries < MAX_ACTIVE_DISCOVERIES && pendingDiscoveries.length > 0) {
+    const id = pendingDiscoveries.shift()!
+    activeDiscoveries += 1
+    void discoverQueueItem(id).finally(() => {
+      activeDiscoveries -= 1
+      pumpDiscoveryQueue()
+    })
+  }
+}
+
+function parseDiscoveryQueueInputs(value: unknown): DiscoveryQueueInput[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new Error('Add between 1 and 100 tracker novels or URLs at a time.')
+  }
+
+  return value.map((rawItem, index) => {
+    if (typeof rawItem !== 'object' || rawItem === null) {
+      throw new Error(`Queue item ${index + 1} is invalid.`)
+    }
+    const input = rawItem as Record<string, unknown>
+    const title = typeof input.title === 'string' ? input.title.trim() : ''
+    const author = typeof input.author === 'string' ? input.author.trim() : ''
+    const origin = input.origin
+    if (!title || title.length > 300) throw new Error(`Queue item ${index + 1} needs a title of 1–300 characters.`)
+    if (author.length > 300) throw new Error(`Queue item ${index + 1} has an author longer than 300 characters.`)
+    if (origin !== 'tracker' && origin !== 'manual') throw new Error(`Queue item ${index + 1} has an invalid origin.`)
+
+    let trackerRow: DiscoveryQueueInput['trackerRow']
+    if (input.trackerRow !== undefined) {
+      if (typeof input.trackerRow !== 'object' || input.trackerRow === null) {
+        throw new Error(`Queue item ${index + 1} has an invalid tracker association.`)
+      }
+      const row = input.trackerRow as Record<string, unknown>
+      if (
+        typeof row.stableId !== 'string' || !row.stableId.trim() || row.stableId.length > 200 ||
+        typeof row.rowNumber !== 'number' || !Number.isSafeInteger(row.rowNumber) || row.rowNumber < 2 ||
+        typeof row.title !== 'string' || !row.title.trim() || row.title.length > 300 ||
+        typeof row.csvPath !== 'string' || !row.csvPath.trim() || row.csvPath.length > 2048
+      ) {
+        throw new Error(`Queue item ${index + 1} has an invalid tracker association.`)
+      }
+      trackerRow = {
+        stableId: row.stableId.trim(),
+        rowNumber: row.rowNumber,
+        title: row.title.trim(),
+        csvPath: row.csvPath
+      }
+    }
+    if (origin === 'tracker' && !trackerRow) {
+      throw new Error(`Queue item ${index + 1} is missing its tracker association.`)
+    }
+
+    return {
+      title,
+      author,
+      sourceUrl: validateHttpUrl(input.sourceUrl),
+      origin,
+      trackerRow
+    }
+  })
 }
 
 function runLibraryScanWorker(
@@ -280,6 +427,180 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('download-history:list', async () => readDownloadHistory(dataDirectory()))
 
+  ipcMain.handle('discovery-queue:list', () => copyDiscoveryQueue())
+
+  ipcMain.handle('discovery-queue:add', async (_event, rawItems: unknown): Promise<Result<DiscoveryQueueItem[]>> => {
+    try {
+      const inputs = parseDiscoveryQueueInputs(rawItems)
+      const existingUrls = new Set(discoveryQueue.map((item) => item.sourceUrl))
+      const added: DiscoveryQueueItem[] = []
+      for (const input of inputs) {
+        if (existingUrls.has(input.sourceUrl)) continue
+        existingUrls.add(input.sourceUrl)
+        const now = new Date().toISOString()
+        added.push({
+          id: randomUUID(),
+          title: input.title,
+          author: input.author,
+          sourceUrl: input.sourceUrl,
+          origin: input.origin,
+          trackerRow: input.trackerRow ?? null,
+          status: 'discovering',
+          parserName: '',
+          chapters: [],
+          discoveryChanges: '',
+          error: '',
+          discoveredAt: '',
+          updatedAt: now
+        })
+      }
+
+      if (added.length > 0) {
+        discoveryQueue.push(...added)
+        await persistDiscoveryQueue()
+        notifyDiscoveryQueueChanged()
+        pendingDiscoveries.push(...added.map((item) => item.id))
+        pumpDiscoveryQueue()
+      }
+      return { ok: true, value: added }
+    } catch (error) {
+      console.error('Discovery queue update failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:retry', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item) throw new Error('The selected discovery queue item no longer exists.')
+      if (item.status !== 'failed') throw new Error('Only failed discovery items can be retried.')
+      const previousError = item.error
+      const previousUpdatedAt = item.updatedAt
+      item.status = 'discovering'
+      item.error = ''
+      item.updatedAt = new Date().toISOString()
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        item.status = 'failed'
+        item.error = previousError
+        item.updatedAt = previousUpdatedAt
+        throw error
+      }
+      notifyDiscoveryQueueChanged()
+      pendingDiscoveries.push(item.id)
+      pumpDiscoveryQueue()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Discovery queue retry failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:refresh', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item) throw new Error('The selected discovery queue item no longer exists.')
+      if (item.status !== 'needs-review') throw new Error('Only reviewed discovery items can be refreshed.')
+      const previousUpdatedAt = item.updatedAt
+      item.status = 'discovering'
+      item.updatedAt = new Date().toISOString()
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        item.status = 'needs-review'
+        item.updatedAt = previousUpdatedAt
+        throw error
+      }
+      notifyDiscoveryQueueChanged()
+      pendingDiscoveries.push(item.id)
+      pumpDiscoveryQueue()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Discovery queue refresh failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:remove', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
+      const index = discoveryQueue.findIndex((candidate) => candidate.id === rawId)
+      if (index < 0) throw new Error('The selected discovery queue item no longer exists.')
+      if (discoveryQueue[index].status === 'discovering') {
+        throw new Error('Wait for discovery to finish before removing this item.')
+      }
+      const [removedItem] = discoveryQueue.splice(index, 1)
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        discoveryQueue.splice(index, 0, removedItem)
+        throw error
+      }
+      notifyDiscoveryQueueChanged()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Discovery queue item removal failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:clear', async (): Promise<Result<void>> => {
+    try {
+      if (discoveryQueue.some((item) => item.status === 'discovering')) {
+        throw new Error('Wait for all discoveries to finish before clearing the queue.')
+      }
+      const previousQueue = discoveryQueue
+      discoveryQueue = []
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        discoveryQueue = previousQueue
+        throw error
+      }
+      notifyDiscoveryQueueChanged()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Discovery queue clear failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle(
+    'discovery-queue:update-selection',
+    async (_event, rawId: unknown, rawSelectedUrls: unknown): Promise<Result<void>> => {
+      try {
+        if (typeof rawId !== 'string' || !Array.isArray(rawSelectedUrls) || rawSelectedUrls.length > 10_000) {
+          throw new Error('Invalid chapter selection update.')
+        }
+        const selectedUrls = new Set(
+          rawSelectedUrls.map((url) => {
+            if (typeof url !== 'string') throw new Error('Invalid chapter selection update.')
+            return validateHttpUrl(url)
+          })
+        )
+        const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+        if (!item || item.status !== 'needs-review') {
+          throw new Error('The selected discovery queue item is no longer ready for review.')
+        }
+        const availableUrls = new Set(item.chapters.map((chapter) => chapter.url))
+        if ([...selectedUrls].some((url) => !availableUrls.has(url))) {
+          throw new Error('The chapter selection no longer matches the saved discovery snapshot.')
+        }
+        for (const chapter of item.chapters) chapter.selected = selectedUrls.has(chapter.url)
+        item.updatedAt = new Date().toISOString()
+        await persistDiscoveryQueue()
+        notifyDiscoveryQueueChanged()
+        return { ok: true, value: undefined }
+      } catch (error) {
+        console.error('Discovery queue selection update failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
   ipcMain.handle('library:index', async () => readLibraryIndex(dataDirectory()))
 
   ipcMain.handle('library:scan', async (event): Promise<Result<LibraryIndex>> => {
@@ -467,6 +788,17 @@ function registerIpcHandlers(): void {
 app.whenReady().then(async () => {
   registerIpcHandlers()
   await markInterruptedDownloadJobs(dataDirectory())
+  discoveryQueue = await readDiscoveryQueue(dataDirectory())
+  let interruptedDiscoveries = false
+  for (const item of discoveryQueue) {
+    if (item.status === 'discovering') {
+      item.status = 'failed'
+      item.error = 'Discovery was interrupted when the app closed. Retry to refresh the chapter list.'
+      item.updatedAt = new Date().toISOString()
+      interruptedDiscoveries = true
+    }
+  }
+  if (interruptedDiscoveries) await persistDiscoveryQueue()
   const settings = await readSettings(dataDirectory())
   if (settings.outputDirectory) {
     try {

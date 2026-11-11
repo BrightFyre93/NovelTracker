@@ -73,6 +73,32 @@ export interface TrackerNovel {
   sources: TrackerSource[]
 }
 
+export type DiscoveryQueueStatus = 'discovering' | 'needs-review' | 'failed'
+
+export interface DiscoveryQueueItem {
+  id: string
+  title: string
+  author: string
+  sourceUrl: string
+  origin: 'tracker' | 'manual'
+  trackerRow: GenerateEpubInput['trackerRow'] | null
+  status: DiscoveryQueueStatus
+  parserName: string
+  chapters: Array<ChapterLink & { selected: boolean }>
+  discoveryChanges: string
+  error: string
+  discoveredAt: string
+  updatedAt: string
+}
+
+export interface DiscoveryQueueInput {
+  title: string
+  author: string
+  sourceUrl: string
+  origin: DiscoveryQueueItem['origin']
+  trackerRow?: GenerateEpubInput['trackerRow']
+}
+
 export type LibraryFolderState = 'Completed' | 'Downloaded' | 'Sent' | 'Old'
 export type LibraryFileFormat = 'EPUB' | 'PDF'
 export type PdfClassification = 'individual-chapter' | 'compiled-candidate' | 'unknown'
@@ -149,6 +175,14 @@ export interface NovelTrackerApi {
   chooseTrackerCsv(): Promise<string | null>
   getTrackerNovels(): Promise<Result<TrackerNovel[]>>
   getDownloadHistory(): Promise<DownloadHistoryEntry[]>
+  getDiscoveryQueue(): Promise<DiscoveryQueueItem[]>
+  addDiscoveryQueueItems(items: DiscoveryQueueInput[]): Promise<Result<DiscoveryQueueItem[]>>
+  retryDiscoveryQueueItem(id: string): Promise<Result<void>>
+  refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
+  removeDiscoveryQueueItem(id: string): Promise<Result<void>>
+  clearDiscoveryQueue(): Promise<Result<void>>
+  updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
+  onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItem[]) => void): () => void
   getLibraryIndex(): Promise<LibraryIndex | null>
   scanLibrary(): Promise<Result<LibraryIndex>>
   cancelLibraryScan(): Promise<void>

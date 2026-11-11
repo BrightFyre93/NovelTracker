@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type {
   AppSettings,
+  DiscoveryQueueItem,
   DownloadHistoryEntry,
   LibraryFileCorrection,
   LibraryIndex
@@ -53,6 +54,14 @@ export function writeLibraryIndex(dataDirectory: string, index: LibraryIndex): P
 
 export function readDownloadHistory(dataDirectory: string): Promise<DownloadHistoryEntry[]> {
   return readJson(join(dataDirectory, 'download-history.json'), [])
+}
+
+export function readDiscoveryQueue(dataDirectory: string): Promise<DiscoveryQueueItem[]> {
+  return readJson(join(dataDirectory, 'discovery-queue.json'), [])
+}
+
+export function writeDiscoveryQueue(dataDirectory: string, items: DiscoveryQueueItem[]): Promise<void> {
+  return writeJson(join(dataDirectory, 'discovery-queue.json'), items)
 }
 
 export async function saveDownloadHistoryEntry(
