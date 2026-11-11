@@ -679,6 +679,20 @@ footer {
   max-width: 240px;
 }
 
+.legacy-pdf-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  color: #64758c;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.legacy-pdf-toggle input {
+  accent-color: #4678c9;
+}
+
 .novel-list,
 .library-file-list {
   max-height: 560px;
@@ -739,6 +753,71 @@ footer {
   color: #94712d;
   font-size: 9px;
   line-height: 1.4;
+}
+
+.coverage-warning-panel {
+  margin-top: 14px;
+  border: 1px solid #e8dfc7;
+  border-radius: 9px;
+  background: #fffdf8;
+}
+
+.coverage-warning-panel > summary {
+  padding: 10px 12px;
+  color: #80632d;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.coverage-warning-note {
+  margin: 0;
+  padding: 0 12px 9px;
+  color: #7a6a4d;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.coverage-warning-list {
+  max-height: 410px;
+  overflow: auto;
+  margin: 0;
+  padding: 0 12px 12px 32px;
+}
+
+.coverage-warning-list > li {
+  padding: 9px 0;
+  border-top: 1px solid #efe8d9;
+  color: #4a5667;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.coverage-warning-list strong {
+  display: block;
+  color: #3d4a5d;
+}
+
+.coverage-warning-list p {
+  margin: 4px 0 2px;
+  color: #7a8798;
+}
+
+.warning-file-link {
+  display: block;
+  max-width: 100%;
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+  border: 0;
+  color: #376bad;
+  background: transparent;
+  text-align: left;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.warning-file-link:hover {
+  text-decoration: underline;
 }
 
 .library-file-detail {

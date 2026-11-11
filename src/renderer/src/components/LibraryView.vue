@@ -4,6 +4,7 @@ import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import type { AppSettings, LibraryFileRecord, LibraryIndex, LibraryProgress } from '../../../shared/contracts'
+import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
 const libraryState = useLibraryStore()
@@ -12,6 +13,7 @@ const index = ref<LibraryIndex | null>(null)
 const search = ref('')
 const selectedNovel = ref('')
 const selectedFileId = ref('')
+const includePdfs = ref(false)
 const correctedTitle = ref('')
 const correctedCoverage = ref('')
 const busy = computed(() => libraryState.scanning)
@@ -19,9 +21,13 @@ const error = ref('')
 const success = ref('')
 const visibleFileLimit = 100
 
+const visibleLibraryFiles = computed(() =>
+  (index.value?.files ?? []).filter((file) => includePdfs.value || file.format !== 'PDF')
+)
+
 const novelSummaries = computed(() => {
   const grouped = new Map<string, { key: string; title: string; files: LibraryFileRecord[] }>()
-  for (const file of index.value?.files ?? []) {
+  for (const file of visibleLibraryFiles.value) {
     const key = file.novelTitle.trim().toLocaleLowerCase()
     const group = grouped.get(key) ?? { key, title: file.novelTitle, files: [] }
     group.files.push(file)
@@ -36,30 +42,11 @@ const novelSummaries = computed(() => {
         Sent: group.files.filter((file) => file.folderState === 'Sent').length,
         Old: group.files.filter((file) => file.folderState === 'Old').length
       }
-      const chapterSources = new Map<number, number>()
-      for (const file of group.files) {
-        for (const chapter of new Set(file.chapterNumbers)) {
-          chapterSources.set(chapter, (chapterSources.get(chapter) ?? 0) + 1)
-        }
-      }
-      const chapterNumbers = [...chapterSources.keys()].sort((left, right) => left - right)
-      const gaps: string[] = []
-      for (let index = 1; index < chapterNumbers.length; index += 1) {
-        const previous = chapterNumbers[index - 1]
-        const current = chapterNumbers[index]
-        if (Number.isInteger(previous) && Number.isInteger(current) && current - previous > 1) {
-          gaps.push(`${previous + 1}-${current - 1}`)
-        }
-      }
+      const coverage = analyzeLibraryCoverage(group.files, includePdfs.value)
       return {
         ...group,
         stateCounts,
-        overlapCount: [...chapterSources.values()].filter((count) => count > 1).length,
-        gapCount: gaps.length,
-        gaps: gaps.slice(0, 3),
-        uncertainCount: group.files.filter(
-          (file) => file.coverageConfidence === 'unknown' || file.coverageConfidence === 'filename'
-        ).length
+        coverage
       }
     })
     .filter((group) =>
@@ -82,7 +69,7 @@ const filteredFiles = computed(() => {
 const selectedFile = computed(() =>
   selectedGroup.value?.files.find((file) => file.id === selectedFileId.value) ?? null
 )
-const fileCount = computed(() => index.value?.files.length ?? 0)
+const selectedCoverageWarnings = computed(() => selectedGroup.value?.coverage.warnings ?? [])
 const formatCounts = computed(() => ({
   epubs: (index.value?.files ?? []).filter((file) => file.format === 'EPUB').length,
   pdfs: (index.value?.files ?? []).filter((file) => file.format === 'PDF').length
@@ -254,6 +241,10 @@ function coverageLabel(file: LibraryFileRecord): string {
   if (file.filenameRange) return `${file.filenameRange.start}-${file.filenameRange.end} (filename only)`
   return 'Unknown'
 }
+
+function chapterRangeLabel(start: number, end: number): string {
+  return start === end ? String(start) : `${start}-${end}`
+}
 </script>
 
 <template>
@@ -298,10 +289,10 @@ function coverageLabel(file: LibraryFileRecord): string {
         Scans are read-only. EPUBs are inspected for metadata and chapter lists; PDFs are indexed from their content or chapter filenames.
       </p>
       <div v-if="index" class="library-summary">
-        <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>novels</span></div>
-        <div><strong>{{ fileCount.toLocaleString() }}</strong><span>files</span></div>
+        <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>visible novels</span></div>
+        <div><strong>{{ visibleLibraryFiles.length.toLocaleString() }}</strong><span>shown files</span></div>
         <div><strong>{{ formatCounts.epubs.toLocaleString() }}</strong><span>EPUBs</span></div>
-        <div><strong>{{ formatCounts.pdfs.toLocaleString() }}</strong><span>PDFs</span></div>
+        <div><strong>{{ formatCounts.pdfs.toLocaleString() }}</strong><span>PDFs indexed</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
       <Message v-if="!index && !busy" severity="info" :closable="false" class="feedback">
@@ -315,6 +306,10 @@ function coverageLabel(file: LibraryFileRecord): string {
           <h3>Novels</h3>
           <InputText v-model="search" class="library-search" placeholder="Search title or file" />
         </div>
+        <label class="legacy-pdf-toggle">
+          <input v-model="includePdfs" type="checkbox" />
+          Include legacy PDFs in this list and its warnings ({{ formatCounts.pdfs.toLocaleString() }})
+        </label>
         <div class="novel-list">
           <button
             v-for="novel in novelSummaries"
@@ -331,15 +326,22 @@ function coverageLabel(file: LibraryFileRecord): string {
               <template v-if="novel.stateCounts.Downloaded"> · Downloaded {{ novel.stateCounts.Downloaded }}</template>
               <template v-if="novel.stateCounts.Old"> · Old {{ novel.stateCounts.Old }}</template>
             </span>
-            <span v-if="novel.overlapCount || novel.gaps.length || novel.uncertainCount" class="novel-coverage-summary">
-              <template v-if="novel.overlapCount">{{ novel.overlapCount }} overlaps</template>
-              <template v-if="novel.gaps.length">
-                <template v-if="novel.overlapCount"> · </template>
-                Possible gaps {{ novel.gaps.join(', ') }}<template v-if="novel.gapCount > novel.gaps.length">…</template>
+            <span
+              v-if="novel.coverage.overlapNumberCount || novel.coverage.gapCount || novel.coverage.unverifiedCount || novel.coverage.rangeMismatchCount"
+              class="novel-coverage-summary"
+            >
+              <template v-if="novel.coverage.gapCount">{{ novel.coverage.gapCount }} possible gaps</template>
+              <template v-if="novel.coverage.overlapNumberCount">
+                <template v-if="novel.coverage.gapCount"> · </template>
+                {{ novel.coverage.overlapNumberCount }} duplicate chapter numbers
               </template>
-              <template v-if="novel.uncertainCount">
-                <template v-if="novel.overlapCount || novel.gaps.length"> · </template>
-                {{ novel.uncertainCount }} uncertain
+              <template v-if="novel.coverage.unverifiedCount">
+                <template v-if="novel.coverage.gapCount || novel.coverage.overlapNumberCount"> · </template>
+                {{ novel.coverage.unverifiedCount }} files need review
+              </template>
+              <template v-if="novel.coverage.rangeMismatchCount">
+                <template v-if="novel.coverage.gapCount || novel.coverage.overlapNumberCount || novel.coverage.unverifiedCount"> · </template>
+                {{ novel.coverage.rangeMismatchCount }} range mismatch{{ novel.coverage.rangeMismatchCount === 1 ? '' : 'es' }}
               </template>
             </span>
           </button>
@@ -370,6 +372,72 @@ function coverageLabel(file: LibraryFileRecord): string {
           </p>
         </div>
         <p v-else class="empty-state">Choose a novel to inspect its files.</p>
+
+        <details
+          v-if="selectedGroup && (selectedCoverageWarnings.length || selectedGroup.coverage.filenameEvidenceCount)"
+          class="coverage-warning-panel"
+        >
+          <summary>Coverage warnings ({{ selectedCoverageWarnings.length }})</summary>
+          <p class="coverage-warning-note">
+            Gaps mean no chapter evidence was found between the neighboring numbers shown; they are not proof that a source chapter is missing. Beginning and ending gaps need a known source chapter list.
+          </p>
+          <p v-if="selectedGroup.coverage.filenameEvidenceCount" class="coverage-warning-note">
+            {{ selectedGroup.coverage.filenameEvidenceCount.toLocaleString() }} individual PDF chapter number(s) come from filenames, not file contents. They are used as lower-confidence evidence because the PDF list is visible.
+          </p>
+          <ul v-if="selectedCoverageWarnings.length" class="coverage-warning-list">
+            <li v-for="warning in selectedCoverageWarnings" :key="warning.key">
+              <template v-if="warning.kind === 'gap'">
+                <strong>Possible missing chapter(s) {{ chapterRangeLabel(warning.start, warning.end) }}</strong>
+                <p>Evidence before the gap:</p>
+                <button
+                  v-for="file in warning.before"
+                  :key="`before-${warning.key}-${file.id}`"
+                  class="warning-file-link"
+                  @click="selectFile(file)"
+                >
+                  {{ file.chapterNumbers.filter((chapter) => chapter <= warning.start - 1).slice(-1)[0] }} · {{ file.relativePath }}
+                </button>
+                <p>Evidence after the gap:</p>
+                <button
+                  v-for="file in warning.after"
+                  :key="`after-${warning.key}-${file.id}`"
+                  class="warning-file-link"
+                  @click="selectFile(file)"
+                >
+                  {{ file.chapterNumbers.find((chapter) => chapter >= warning.end + 1) }} · {{ file.relativePath }}
+                </button>
+              </template>
+              <template v-else-if="warning.kind === 'overlap'">
+                <strong>
+                  Chapter{{ warning.start === warning.end ? '' : 's' }}
+                  {{ chapterRangeLabel(warning.start, warning.end) }} appear in multiple files
+                </strong>
+                <button
+                  v-for="file in warning.files"
+                  :key="`${warning.key}-${file.id}`"
+                  class="warning-file-link"
+                  @click="selectFile(file)"
+                >
+                  {{ file.coverageConfidence }} · {{ file.relativePath }}
+                </button>
+              </template>
+              <template v-else-if="warning.kind === 'unverified'">
+                <strong>No chapter coverage verified · {{ warning.file.relativePath }}</strong>
+                <p>{{ warning.explanation }}</p>
+                <button class="warning-file-link" @click="selectFile(warning.file)">Inspect this file</button>
+              </template>
+              <template v-else>
+                <strong>
+                  Extracted chapter numbers {{ warning.chapters[0] }}<template v-if="warning.chapters.length > 1">–{{ warning.chapters[warning.chapters.length - 1] }}</template>
+                  fall outside the filename range {{ warning.file.filenameRange?.start }}–{{ warning.file.filenameRange?.end }}
+                </strong>
+                <p>These out-of-range numbers are excluded from gap and overlap calculations. Check whether this file includes unrelated TOC entries or has a misleading filename.</p>
+                <button class="warning-file-link" @click="selectFile(warning.file)">{{ warning.file.relativePath }}</button>
+              </template>
+            </li>
+          </ul>
+          <p v-else class="empty-state">No extracted-coverage warnings. Filename-only evidence is listed above for context.</p>
+        </details>
 
         <div v-if="selectedFile" class="library-file-detail">
           <div class="file-detail-heading">
