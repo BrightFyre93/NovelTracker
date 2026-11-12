@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type {
   AppSettings,
+  ChapterContent,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
   LibraryFileCorrection,
@@ -12,7 +13,41 @@ import type {
 const EMPTY_SETTINGS: AppSettings = {
   libraryRoot: '',
   trackerCsvPath: '',
-  outputDirectory: ''
+  outputDirectory: '',
+  maxSimultaneousDownloads: 2
+}
+const fileWriteTails = new Map<string, Promise<void>>()
+let downloadHistoryWriteTail = Promise.resolve()
+
+function isTransientRenameError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    ['EPERM', 'EACCES', 'EBUSY'].includes(String(error.code))
+  )
+}
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  const delays = [75, 150, 300, 600, 1200, 2000]
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination)
+      return
+    } catch (error) {
+      const delay = delays[attempt]
+      if (!isTransientRenameError(error)) throw error
+      if (delay === undefined) {
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          ? String(error.code)
+          : 'filesystem error'
+        throw new Error(
+          `Windows could not replace "${destination}" after several attempts (${code}). Close any application locking the file, then retry.`
+        )
+      }
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay))
+    }
+  }
 }
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
@@ -25,19 +60,39 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  const temporaryPath = `${path}.${randomUUID()}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { flag: 'wx' })
+  const targetPath = resolve(path)
+  const previous = fileWriteTails.get(targetPath) ?? Promise.resolve()
+  let release!: () => void
+  const hold = new Promise<void>((resolveHold) => {
+    release = resolveHold
+  })
+  const tail = previous.then(() => hold)
+  fileWriteTails.set(targetPath, tail)
+  await previous
+
+  const temporaryPath = `${targetPath}.${randomUUID()}.tmp`
   try {
-    await rename(temporaryPath, path)
+    await mkdir(dirname(targetPath), { recursive: true })
+    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { flag: 'wx' })
+    await renameWithRetry(temporaryPath, targetPath)
   } catch (error) {
-    await rm(temporaryPath, { force: true })
+    await rm(temporaryPath, { force: true }).catch((cleanupError: unknown) => {
+      console.warn(`Temporary file ${temporaryPath} could not be removed:`, cleanupError)
+    })
     throw error
+  } finally {
+    release()
+    if (fileWriteTails.get(targetPath) === tail) {
+      void tail.then(() => {
+        if (fileWriteTails.get(targetPath) === tail) fileWriteTails.delete(targetPath)
+      })
+    }
   }
 }
 
-export function readSettings(dataDirectory: string): Promise<AppSettings> {
-  return readJson(join(dataDirectory, 'settings.json'), { ...EMPTY_SETTINGS })
+export async function readSettings(dataDirectory: string): Promise<AppSettings> {
+  const saved = await readJson<Partial<AppSettings>>(join(dataDirectory, 'settings.json'), {})
+  return { ...EMPTY_SETTINGS, ...saved }
 }
 
 export function writeSettings(dataDirectory: string, settings: AppSettings): Promise<void> {
@@ -56,6 +111,12 @@ export function readDownloadHistory(dataDirectory: string): Promise<DownloadHist
   return readJson(join(dataDirectory, 'download-history.json'), [])
 }
 
+function serializeDownloadHistoryWrite<T>(operation: () => Promise<T>): Promise<T> {
+  const result = downloadHistoryWriteTail.then(operation)
+  downloadHistoryWriteTail = result.then(() => undefined, () => undefined)
+  return result
+}
+
 export function readDiscoveryQueue(dataDirectory: string): Promise<DiscoveryQueueItem[]> {
   return readJson(join(dataDirectory, 'discovery-queue.json'), [])
 }
@@ -64,32 +125,78 @@ export function writeDiscoveryQueue(dataDirectory: string, items: DiscoveryQueue
   return writeJson(join(dataDirectory, 'discovery-queue.json'), items)
 }
 
+function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapterUrl: string): string {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+  const filename = `${createHash('sha256').update(chapterUrl).digest('hex')}.json`
+  return join(dataDirectory, 'download-artifacts', queueItemId, filename)
+}
+
+export async function readChapterArtifact(
+  dataDirectory: string,
+  queueItemId: string,
+  chapterUrl: string
+): Promise<ChapterContent | null> {
+  const artifact = await readJson<ChapterContent | null>(
+    chapterArtifactPath(dataDirectory, queueItemId, chapterUrl),
+    null
+  )
+  if (
+    artifact !== null &&
+    (typeof artifact.title !== 'string' ||
+      typeof artifact.url !== 'string' ||
+      !Array.isArray(artifact.paragraphs) ||
+      artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string'))
+  ) {
+    throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+  }
+  return artifact
+}
+
+export function writeChapterArtifact(
+  dataDirectory: string,
+  queueItemId: string,
+  chapter: ChapterContent
+): Promise<void> {
+  return writeJson(chapterArtifactPath(dataDirectory, queueItemId, chapter.url), chapter)
+}
+
+export async function removeChapterArtifacts(dataDirectory: string, queueItemId: string): Promise<void> {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+  await rm(join(dataDirectory, 'download-artifacts', queueItemId), { recursive: true, force: true })
+}
+
 export async function saveDownloadHistoryEntry(
   dataDirectory: string,
   entry: DownloadHistoryEntry
 ): Promise<DownloadHistoryEntry[]> {
-  const history = await readDownloadHistory(dataDirectory)
-  const existingIndex = history.findIndex((item) => item.id === entry.id)
-  if (existingIndex >= 0) history[existingIndex] = entry
-  else history.push(entry)
-  history.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-  const latest = history.slice(0, 50)
-  await writeJson(join(dataDirectory, 'download-history.json'), latest)
-  return latest
+  return serializeDownloadHistoryWrite(async () => {
+    const history = await readDownloadHistory(dataDirectory)
+    const existingIndex = history.findIndex((item) => item.id === entry.id)
+    if (existingIndex >= 0) history[existingIndex] = entry
+    else history.push(entry)
+    history.sort((left, right) =>
+      (right.startedAt || right.updatedAt).localeCompare(left.startedAt || left.updatedAt)
+    )
+    const latest = history.slice(0, 50)
+    await writeJson(join(dataDirectory, 'download-history.json'), latest)
+    return latest
+  })
 }
 
 export async function markInterruptedDownloadJobs(dataDirectory: string): Promise<void> {
-  const history = await readDownloadHistory(dataDirectory)
-  let changed = false
-  for (const entry of history) {
-    if (entry.status === 'running') {
-      entry.status = 'interrupted'
-      entry.error = 'The app closed before this job finished.'
-      entry.updatedAt = new Date().toISOString()
-      changed = true
+  await serializeDownloadHistoryWrite(async () => {
+    const history = await readDownloadHistory(dataDirectory)
+    let changed = false
+    for (const entry of history) {
+      if (entry.status === 'running') {
+        entry.status = 'interrupted'
+        entry.error = 'The app closed before this job finished.'
+        entry.updatedAt = new Date().toISOString()
+        changed = true
+      }
     }
-  }
-  if (changed) await writeJson(join(dataDirectory, 'download-history.json'), history)
+    if (changed) await writeJson(join(dataDirectory, 'download-history.json'), history)
+  })
 }
 
 export async function writeLibraryCorrection(

@@ -3,7 +3,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
-import type { DiscoveryQueueInput, DiscoveryQueueItem, TrackerNovel } from '../../../shared/contracts'
+import ProgressBar from 'primevue/progressbar'
+import type { DiscoveryQueueInput, DiscoveryQueueItem, GenerateEpubInput, TrackerNovel } from '../../../shared/contracts'
 
 const emit = defineEmits<{
   openItem: [item: DiscoveryQueueItem]
@@ -20,9 +21,13 @@ const trackerCsvPath = ref('')
 const manualUrls = ref('')
 const loading = ref(true)
 const adding = ref(false)
+const maxDownloads = ref(2)
+const outputDirectory = ref('')
 const retryingId = ref('')
 const refreshingId = ref('')
 const removingId = ref('')
+const downloadActionId = ref('')
+const batchQueueing = ref(false)
 const clearing = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -39,6 +44,40 @@ const filteredTrackerNovels = computed(() => {
     : trackerNovels.value
   return matches.slice(0, 100)
 })
+const activeDownloadCount = computed(() => items.value.filter((item) => item.status === 'downloading').length)
+const queuedItems = computed(() =>
+  items.value
+    .filter((item) => item.status === 'queued' && item.downloadOptions)
+    .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))
+)
+const batchQueueableItems = computed(() =>
+  items.value.filter((item) =>
+    (item.status === 'needs-review' || item.status === 'ready') &&
+    (
+      item.status === 'ready'
+        ? item.chapters.some((chapter) => chapter.selected)
+        : item.chapters.some((chapter) => chapter.recommended) ||
+          (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
+    ) &&
+    !item.chapters.some((chapter) => chapter.archiveStatus === 'uncertain' || chapter.archiveStatus === 'probable')
+  )
+)
+const batchAcceptableItems = computed(() =>
+  items.value.filter(
+    (item) =>
+      item.status === 'needs-review' &&
+      !item.chapters.some((chapter) => chapter.archiveStatus === 'uncertain' || chapter.archiveStatus === 'probable')
+  )
+)
+const batchAccepting = ref(false)
+
+function hasQueueableChapters(item: DiscoveryQueueItem): boolean {
+  if (item.status === 'ready') return item.chapters.some((chapter) => chapter.selected)
+  return (
+    item.chapters.some((chapter) => chapter.recommended) ||
+    (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
+  )
+}
 
 async function refreshQueue(): Promise<void> {
   loading.value = true
@@ -56,6 +95,12 @@ onMounted(() => {
     items.value = updatedItems
   })
   void refreshQueue()
+  void window.novelTracker.getSettings().then((settings) => {
+    maxDownloads.value = settings.maxSimultaneousDownloads
+    outputDirectory.value = settings.outputDirectory
+  }).catch((reason: unknown) => {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  })
 })
 
 onUnmounted(() => removeQueueListener?.())
@@ -86,6 +131,10 @@ async function toggleTrackerPicker(): Promise<void> {
   } finally {
     trackerLoading.value = false
   }
+}
+
+function closeTrackerPicker(): void {
+  trackerVisible.value = false
 }
 
 function isTrackerSelected(stableId: string): boolean {
@@ -180,6 +229,7 @@ async function addToQueue(): Promise<void> {
     }
     manualUrls.value = invalidManualLines.join('\n')
     selectedTrackerIds.value = []
+    trackerVisible.value = false
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
@@ -197,6 +247,192 @@ async function retryItem(item: DiscoveryQueueItem): Promise<void> {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     retryingId.value = ''
+  }
+}
+
+async function runDownloadAction(
+  item: DiscoveryQueueItem,
+  action: 'retry' | 'pause' | 'resume' | 'cancel'
+): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  downloadActionId.value = item.id
+  try {
+    const result = action === 'retry'
+      ? await window.novelTracker.retryEpub(item.id)
+      : action === 'pause'
+        ? await window.novelTracker.pauseEpub(item.id)
+        : action === 'resume'
+          ? await window.novelTracker.resumeEpub(item.id)
+          : await window.novelTracker.cancelEpub(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    if (action === 'cancel') notice.value = `Cancelled the EPUB job for ${item.title}.`
+    else if (action === 'pause') notice.value = `Paused the EPUB job for ${item.title}.`
+    else if (action === 'resume') notice.value = `Resumed the EPUB job for ${item.title}.`
+    else notice.value = `Queued ${item.title} for retry.`
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    downloadActionId.value = ''
+  }
+}
+
+function selectedChapters(item: DiscoveryQueueItem) {
+  return item.chapters
+    .filter((chapter) => chapter.selected)
+    .map(({ id, title, url }) => ({ id, title, url }))
+}
+
+async function queueRecommendedEpub(item: DiscoveryQueueItem): Promise<string | null> {
+  if (item.status === 'needs-review') {
+    const accepted = await window.novelTracker.acceptQueueRecommendations(
+      item.id,
+      item.includeOverlap,
+      item.overlapCount
+    )
+    if (!accepted.ok) return `${item.title}: ${accepted.error}`
+  }
+
+  const savedQueue = await window.novelTracker.getDiscoveryQueue()
+  const currentItem = savedQueue.find((candidate) => candidate.id === item.id)
+  if (!currentItem) return `${item.title}: the discovery queue item no longer exists.`
+  const chapters = selectedChapters(currentItem)
+  if (chapters.length === 0) return `${item.title}: select at least one chapter before queueing.`
+
+  const input: GenerateEpubInput = {
+    title: currentItem.title,
+    author: currentItem.author,
+    language: 'en',
+    sourceUrl: currentItem.sourceUrl,
+    outputDirectory: outputDirectory.value,
+    chapters,
+    trackerRow: currentItem.trackerRow ?? undefined
+  }
+  const result = await window.novelTracker.enqueueEpub(input, currentItem.id)
+  return result.ok ? null : `${item.title}: ${result.error}`
+}
+
+async function queueOneRecommendedEpub(item: DiscoveryQueueItem): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  downloadActionId.value = item.id
+  try {
+    const failure = await queueRecommendedEpub(item)
+    if (failure) {
+      error.value = failure
+      return
+    }
+    notice.value = `Queued suggested chapters for ${item.title}.`
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    downloadActionId.value = ''
+  }
+}
+
+async function queueAllRecommendedEpubs(): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  batchQueueing.value = true
+  const failures: string[] = []
+  let queued = 0
+  try {
+    for (const item of batchQueueableItems.value) {
+      try {
+        const failure = await queueRecommendedEpub(item)
+        if (failure) failures.push(failure)
+        else queued += 1
+      } catch (reason) {
+        failures.push(`${item.title}: ${reason instanceof Error ? reason.message : String(reason)}`)
+      }
+    }
+    notice.value = `Queued ${queued} suggested EPUB job${queued === 1 ? '' : 's'}.`
+    if (failures.length) error.value = failures.join(' ')
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    batchQueueing.value = false
+  }
+}
+
+async function moveQueuedJob(item: DiscoveryQueueItem, direction: 'up' | 'down'): Promise<void> {
+  error.value = ''
+  downloadActionId.value = item.id
+  try {
+    const result = await window.novelTracker.moveQueuedEpub(item.id, direction)
+    if (!result.ok) error.value = result.error
+    else await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    downloadActionId.value = ''
+  }
+}
+
+async function acceptRecommendations(item: DiscoveryQueueItem): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  try {
+    const result = await window.novelTracker.acceptQueueRecommendations(
+      item.id,
+      item.includeOverlap,
+      item.overlapCount
+    )
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = `Applied archive-aware suggestions for ${item.title}. Review the selected chapters before queueing the EPUB.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  }
+}
+
+async function acceptSafeSuggestions(): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  batchAccepting.value = true
+  let applied = 0
+  try {
+    for (const item of batchAcceptableItems.value) {
+      const result = await window.novelTracker.acceptQueueRecommendations(
+        item.id,
+        item.includeOverlap,
+        item.overlapCount
+      )
+      if (!result.ok) {
+        error.value = `${applied} item(s) accepted before "${item.title}" failed: ${result.error}`
+        return
+      }
+      applied += 1
+    }
+    notice.value = applied
+      ? `Applied suggestions to ${applied} item${applied === 1 ? '' : 's'}. Review chapters and manual selections before queueing EPUBs.`
+      : 'No items currently meet the confidence requirement for batch acceptance.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    batchAccepting.value = false
+  }
+}
+
+async function saveDownloadConcurrency(): Promise<void> {
+  error.value = ''
+  try {
+    const result = await window.novelTracker.updateDownloadConcurrency(maxDownloads.value)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    maxDownloads.value = result.value.maxSimultaneousDownloads
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
   }
 }
 
@@ -234,11 +470,11 @@ async function removeItem(item: DiscoveryQueueItem): Promise<void> {
 }
 
 async function clearQueue(): Promise<void> {
-  if (items.value.some((item) => item.status === 'discovering')) {
-    error.value = 'Wait for all discoveries to finish before clearing the queue.'
+  if (items.value.some((item) => ['discovering', 'queued', 'downloading', 'paused'].includes(item.status))) {
+    error.value = 'Finish, cancel, or remove active EPUB jobs before clearing the queue.'
     return
   }
-  if (!window.confirm(`Remove all ${items.value.length} saved discovery items? This cannot be undone.`)) return
+  if (!window.confirm(`Remove all ${items.value.length} saved queue items? Job history will remain. This cannot be undone.`)) return
   error.value = ''
   notice.value = ''
   clearing.value = true
@@ -261,7 +497,7 @@ async function clearQueue(): Promise<void> {
   <section class="intro">
     <p class="eyebrow">LIVE CHAPTER DISCOVERY</p>
     <h2>Build a persistent novel queue</h2>
-    <p>Add tracker entries or paste multiple URLs. Discovery runs in the background and survives navigation or app restart.</p>
+    <p>Add tracker entries or paste multiple URLs, review suggested chapters, then add EPUB jobs. Jobs survive navigation or app restart.</p>
   </section>
 
   <section class="card queue-intake" aria-labelledby="queue-intake-heading">
@@ -271,11 +507,13 @@ async function clearQueue(): Promise<void> {
         <h3 id="queue-intake-heading">Queue sources for discovery</h3>
       </div>
       <Button
-        label="Add from Tracker"
-        icon="pi pi-list"
+        :label="trackerVisible ? 'Hide Tracker' : 'Add from Tracker'"
+        :icon="trackerVisible ? 'pi pi-chevron-up' : 'pi pi-list'"
         severity="secondary"
         outlined
         :loading="trackerLoading"
+        :aria-expanded="trackerVisible"
+        aria-controls="tracker-picker"
         @click="toggleTrackerPicker"
       />
     </div>
@@ -291,12 +529,22 @@ async function clearQueue(): Promise<void> {
     />
     <p class="help-text">Paste one HTTP or HTTPS URL per line. Duplicate source URLs are skipped.</p>
 
-    <div v-if="trackerVisible" class="tracker-picker">
+    <div v-show="trackerVisible" id="tracker-picker" class="tracker-picker">
       <div class="tracker-picker-heading">
         <div>
           <h4>Select tracker novels</h4>
           <p>CSV access is read-only. Source requests begin only after adding selections to the queue.</p>
         </div>
+        <Button
+          icon="pi pi-times"
+          severity="secondary"
+          text
+          rounded
+          size="small"
+          aria-label="Close tracker selection"
+          title="Close tracker selection"
+          @click="closeTrackerPicker"
+        />
       </div>
       <InputText v-model="trackerSearch" class="full-input" placeholder="Search title, author, or alternate name" />
       <div v-if="trackerLoading" class="help-text">Reading the configured CSV…</div>
@@ -354,21 +602,76 @@ async function clearQueue(): Promise<void> {
     <div class="section-heading">
       <div>
         <p class="step-label">LOCAL QUEUE</p>
-        <h3 id="discovery-queue-heading">Discovery status</h3>
+        <h3 id="discovery-queue-heading">Discovery and EPUB jobs</h3>
       </div>
       <div class="queue-header-actions">
-        <Button label="Reload saved queue" icon="pi pi-refresh" severity="secondary" text :loading="loading" @click="refreshQueue" />
+        <details class="queue-settings">
+          <summary class="queue-settings-trigger" aria-label="Queue settings" title="Queue settings">
+            <i class="pi pi-cog" aria-hidden="true"></i>
+            <span>{{ activeDownloadCount }}/{{ maxDownloads }}</span>
+          </summary>
+          <div class="queue-settings-popover">
+            <strong>Download concurrency</strong>
+            <span class="help-text">{{ activeDownloadCount }} / {{ maxDownloads }} novels active</span>
+            <label class="concurrency-setting">
+              <span>Maximum active novels</span>
+              <select v-model.number="maxDownloads" aria-label="Maximum simultaneous novel downloads" @change="saveDownloadConcurrency">
+                <option v-for="limit in [1, 2, 3, 4, 5]" :key="limit" :value="limit">{{ limit }} active novel{{ limit === 1 ? '' : 's' }}</option>
+              </select>
+            </label>
+          </div>
+        </details>
         <Button
-          label="Clear queue"
+          :label="String(batchQueueableItems.length)"
+          icon="pi pi-bolt"
+          size="small"
+          text
+          rounded
+          aria-label="Queue all safe suggestions"
+          title="Queue all safe suggestions"
+          :loading="batchQueueing"
+          :disabled="!outputDirectory || batchQueueableItems.length === 0 || batchQueueing || batchAccepting || Boolean(downloadActionId)"
+          @click="queueAllRecommendedEpubs"
+        />
+        <Button
+          :label="String(batchAcceptableItems.length)"
+          icon="pi pi-check"
+          severity="secondary"
+          text
+          rounded
+          aria-label="Accept all safe suggestions"
+          title="Accept all safe suggestions"
+          size="small"
+          :loading="batchAccepting"
+          :disabled="batchAcceptableItems.length === 0 || batchAccepting || batchQueueing || Boolean(downloadActionId)"
+          @click="acceptSafeSuggestions"
+        />
+        <Button
+          icon="pi pi-refresh"
+          severity="secondary"
+          text
+          rounded
+          size="small"
+          aria-label="Reload saved queue"
+          title="Reload saved queue"
+          :loading="loading"
+          @click="refreshQueue"
+        />
+        <Button
           icon="pi pi-trash"
           severity="danger"
           text
+          rounded
+          size="small"
+          aria-label="Clear queue"
+          title="Clear queue"
           :loading="clearing"
-          :disabled="items.length === 0 || clearing || items.some((item) => item.status === 'discovering')"
+          :disabled="items.length === 0 || clearing || batchQueueing || items.some((item) => ['discovering', 'queued', 'downloading', 'paused'].includes(item.status))"
           @click="clearQueue"
         />
       </div>
     </div>
+    <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Library settings to queue downloads.</p>
     <p v-if="loading && items.length === 0" class="help-text">Loading saved queue…</p>
     <p v-else-if="items.length === 0" class="empty-state">No novels queued. Add a tracker selection or one or more URLs above.</p>
     <div v-for="item in items" :key="item.id" class="queue-item">
@@ -376,46 +679,155 @@ async function clearQueue(): Promise<void> {
         <strong>{{ item.title }}</strong>
         <span>{{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}</span>
         <span v-if="item.chapters.length">
-          {{ item.chapters.length.toLocaleString() }} chapters
+          {{ item.chapters.filter((chapter) => chapter.selected).length.toLocaleString() }} selected ·
+          {{ item.chapters.filter((chapter) => chapter.recommended || (item.includeOverlap && chapter.deliberateOverlap)).length.toLocaleString() }} suggested of {{ item.chapters.length.toLocaleString() }}
           <template v-if="item.chapters[item.chapters.length - 1]"> · latest: {{ item.chapters[item.chapters.length - 1].title }}</template>
         </span>
+        <span v-if="item.recommendationSummary" class="queue-item-recommendation">{{ item.recommendationSummary }}</span>
+        <span v-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
+        <ProgressBar
+          v-if="item.downloadOptions && item.progress && item.progress.total > 0 && ['queued', 'downloading', 'paused', 'partially-completed'].includes(item.status)"
+          :value="Math.round((item.progress.current / item.progress.total) * 100)"
+          :show-value="false"
+          :aria-label="`${item.title} download progress`"
+        />
         <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
         <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
+        <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
         <span v-if="item.error" class="queue-item-error">{{ item.error }}</span>
+        <span v-for="failed in item.failedChapters" :key="failed.url" class="queue-item-error">
+          {{ failed.title }}: {{ failed.error }}
+        </span>
       </div>
       <span class="history-status" :class="`status-${item.status}`">{{ item.status.replace('-', ' ') }}</span>
       <div class="queue-item-actions">
         <div class="queue-item-buttons">
           <Button
-            v-if="item.status === 'needs-review'"
-            label="Review chapters"
+            v-if="item.status === 'needs-review' || item.status === 'ready'"
+            label="Queue EPUB"
+            icon="pi pi-bolt"
+            size="small"
+            :loading="downloadActionId === item.id"
+            :disabled="!outputDirectory || Boolean(downloadActionId) || batchQueueing || batchAccepting || !hasQueueableChapters(item)"
+            @click="queueOneRecommendedEpub(item)"
+          />
+          <label v-if="item.status === 'needs-review' || item.status === 'ready'" class="overlap-control">
+            <input v-model="item.includeOverlap" type="checkbox" :disabled="!item.overlapAllowed" />
+            <span>Include overlap</span>
+            <input
+              v-model.number="item.overlapCount"
+              type="number"
+              min="0"
+              max="1000"
+              aria-label="Overlap chapter count"
+              :disabled="!item.includeOverlap || !item.overlapAllowed"
+            />
+          </label>
+          <Button
+            v-if="item.status === 'needs-review' || item.status === 'ready'"
+            label="Suggest"
+            icon="pi pi-check"
             size="small"
             severity="secondary"
             outlined
+            :disabled="Boolean(downloadActionId) || batchQueueing"
+            @click="acceptRecommendations(item)"
+          />
+          <Button
+            v-if="item.status === 'needs-review' || item.status === 'ready'"
+            label="Review"
+            size="small"
+            severity="secondary"
+            outlined
+            :disabled="Boolean(downloadActionId) || batchQueueing"
             @click="emit('openItem', item)"
           />
           <Button
-            v-if="item.status === 'needs-review'"
-            label="Refresh chapters"
+            v-if="item.status === 'needs-review' || item.status === 'ready'"
+            label="Refresh"
             icon="pi pi-refresh"
             size="small"
             severity="secondary"
             text
             :loading="refreshingId === item.id"
-            :disabled="Boolean(refreshingId) || Boolean(retryingId) || Boolean(removingId) || clearing"
+            :disabled="Boolean(refreshingId) || Boolean(retryingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="refreshItem(item)"
           />
           <Button
-            v-else-if="item.status === 'failed'"
-            label="Retry discovery"
+            v-else-if="item.status === 'failed' && !item.downloadOptions"
+            label="Retry scan"
             size="small"
             severity="secondary"
             outlined
             :loading="retryingId === item.id"
-            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing"
+            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="retryItem(item)"
           />
-          <span v-else class="help-text">Discovering…</span>
+          <Button
+            v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
+            label="Retry"
+            icon="pi pi-refresh"
+            size="small"
+            severity="secondary"
+            outlined
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="runDownloadAction(item, 'retry')"
+          />
+          <Button
+            v-if="item.status === 'queued' || item.status === 'downloading'"
+            label="Pause"
+            icon="pi pi-pause"
+            size="small"
+            severity="secondary"
+            text
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="runDownloadAction(item, 'pause')"
+          />
+          <template v-if="item.status === 'queued'">
+            <Button
+              label="Move up"
+              icon="pi pi-arrow-up"
+              size="small"
+              severity="secondary"
+              text
+              :disabled="queuedItems.findIndex((queued) => queued.id === item.id) === 0 || Boolean(downloadActionId)"
+              @click="moveQueuedJob(item, 'up')"
+            />
+            <Button
+              label="Move down"
+              icon="pi pi-arrow-down"
+              size="small"
+              severity="secondary"
+              text
+              :disabled="queuedItems.findIndex((queued) => queued.id === item.id) === queuedItems.length - 1 || Boolean(downloadActionId)"
+              @click="moveQueuedJob(item, 'down')"
+            />
+          </template>
+          <Button
+            v-if="item.status === 'paused'"
+            label="Resume"
+            icon="pi pi-play"
+            size="small"
+            severity="secondary"
+            outlined
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="runDownloadAction(item, 'resume')"
+          />
+          <Button
+            v-if="item.status === 'queued' || item.status === 'downloading' || item.status === 'paused'"
+            label="Cancel"
+            icon="pi pi-times"
+            size="small"
+            severity="danger"
+            text
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="runDownloadAction(item, 'cancel')"
+          />
+          <span v-if="item.status === 'discovering'" class="help-text">Discovering…</span>
           <Button
             label="Remove"
             icon="pi pi-times"
@@ -423,7 +835,7 @@ async function clearQueue(): Promise<void> {
             severity="danger"
             text
             :loading="removingId === item.id"
-            :disabled="item.status === 'discovering' || Boolean(removingId) || Boolean(refreshingId) || Boolean(retryingId) || clearing"
+            :disabled="['discovering', 'queued', 'downloading', 'paused'].includes(item.status) || Boolean(removingId) || Boolean(refreshingId) || Boolean(retryingId) || Boolean(downloadActionId) || clearing || batchQueueing"
             @click="removeItem(item)"
           />
         </div>

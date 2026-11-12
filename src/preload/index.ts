@@ -6,10 +6,10 @@ import type {
   DiscoveryQueueItem,
   DownloadHistoryEntry,
   GenerateEpubInput,
+  QueuedEpubJob,
   LibraryFileCorrection,
   LibraryIndex,
   LibraryProgress,
-  JobProgress,
   NovelTrackerApi,
   Result,
   TrackerNovel
@@ -18,8 +18,9 @@ import type {
 const api: NovelTrackerApi = {
   discover: (url) => ipcRenderer.invoke('chapter:discover', url) as Promise<Result<DiscoveryResult>>,
   chooseOutputDirectory: () => ipcRenderer.invoke('dialog:choose-output-directory') as Promise<string | null>,
-  generateEpub: (input: GenerateEpubInput) => ipcRenderer.invoke('epub:generate', input),
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
+  updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
+    ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
   chooseLibraryRoot: () => ipcRenderer.invoke('dialog:choose-library-root') as Promise<string | null>,
   chooseTrackerCsv: () => ipcRenderer.invoke('dialog:choose-tracker-csv') as Promise<string | null>,
   getTrackerNovels: () => ipcRenderer.invoke('tracker:list') as Promise<Result<TrackerNovel[]>>,
@@ -31,6 +32,16 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('discovery-queue:retry', id) as Promise<Result<void>>,
   refreshDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:refresh', id) as Promise<Result<void>>,
+  acceptQueueRecommendations: (id: string, includeOverlap: boolean, overlapCount: number) =>
+    ipcRenderer.invoke('discovery-queue:accept-recommendations', id, includeOverlap, overlapCount) as Promise<Result<void>>,
+  enqueueEpub: (input: GenerateEpubInput, queueItemId?: string) =>
+    ipcRenderer.invoke('download-queue:enqueue', input, queueItemId) as Promise<Result<QueuedEpubJob>>,
+  retryEpub: (id: string) => ipcRenderer.invoke('download-queue:retry', id) as Promise<Result<void>>,
+  pauseEpub: (id: string) => ipcRenderer.invoke('download-queue:pause', id) as Promise<Result<void>>,
+  resumeEpub: (id: string) => ipcRenderer.invoke('download-queue:resume', id) as Promise<Result<void>>,
+  cancelEpub: (id: string) => ipcRenderer.invoke('download-queue:cancel', id) as Promise<Result<void>>,
+  moveQueuedEpub: (id: string, direction: 'up' | 'down') =>
+    ipcRenderer.invoke('download-queue:move', id, direction) as Promise<Result<void>>,
   removeDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:remove', id) as Promise<Result<void>>,
   clearDiscoveryQueue: () =>
@@ -45,7 +56,6 @@ const api: NovelTrackerApi = {
   getLibraryIndex: () => ipcRenderer.invoke('library:index') as Promise<LibraryIndex | null>,
   scanLibrary: () => ipcRenderer.invoke('library:scan') as Promise<Result<LibraryIndex>>,
   cancelLibraryScan: () => ipcRenderer.invoke('library:cancel-scan') as Promise<void>,
-  cancelEpubGeneration: () => ipcRenderer.invoke('epub:cancel-generation') as Promise<void>,
   correctLibraryFile: (fileId: string, correction: LibraryFileCorrection) =>
     ipcRenderer.invoke('library:correct-file', fileId, correction) as Promise<Result<LibraryIndex>>,
   openLibraryPath: (path, reveal) => ipcRenderer.invoke('library:open-path', path, reveal),
@@ -54,11 +64,6 @@ const api: NovelTrackerApi = {
     ipcRenderer.on('library:progress', handler)
     return () => ipcRenderer.removeListener('library:progress', handler)
   },
-  onProgress: (listener: (progress: JobProgress) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, progress: JobProgress) => listener(progress)
-    ipcRenderer.on('job:progress', handler)
-    return () => ipcRenderer.removeListener('job:progress', handler)
-  }
 }
 
 contextBridge.exposeInMainWorld('novelTracker', api)

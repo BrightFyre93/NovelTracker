@@ -34,10 +34,19 @@ export interface GenerateEpubInput {
   }
 }
 
-export type DownloadJobStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type DownloadJobStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'partially-completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
 
 export interface DownloadHistoryEntry {
   id: string
+  queueItemId?: string
   title: string
   author: string
   sourceUrl: string
@@ -55,6 +64,7 @@ export interface AppSettings {
   libraryRoot: string
   trackerCsvPath: string
   outputDirectory: string
+  maxSimultaneousDownloads: number
 }
 
 export interface TrackerSource {
@@ -73,7 +83,49 @@ export interface TrackerNovel {
   sources: TrackerSource[]
 }
 
-export type DiscoveryQueueStatus = 'discovering' | 'needs-review' | 'failed'
+export type DiscoveryQueueStatus =
+  | 'discovering'
+  | 'needs-review'
+  | 'ready'
+  | 'queued'
+  | 'downloading'
+  | 'paused'
+  | 'completed'
+  | 'partially-completed'
+  | 'failed'
+  | 'cancelled'
+
+export type ChapterArchiveStatus = 'confirmed' | 'probable' | 'uncertain' | 'missing'
+
+export interface QueueChapter extends ChapterLink {
+  selected: boolean
+  archiveStatus: ChapterArchiveStatus
+  archiveSources: string[]
+  chapterNumber: number | null
+  archiveGap: boolean
+  recommended: boolean
+  deliberateOverlap: boolean
+}
+
+export interface QueueDownloadOptions {
+  title: string
+  author: string
+  language: string
+  filename: string
+  sourceUrl: string
+  outputDirectory: string
+}
+
+export interface QueuedEpubJob {
+  queueItemId: string
+  historyId: string
+}
+
+export interface FailedQueueChapter {
+  url: string
+  title: string
+  error: string
+}
 
 export interface DiscoveryQueueItem {
   id: string
@@ -84,8 +136,19 @@ export interface DiscoveryQueueItem {
   trackerRow: GenerateEpubInput['trackerRow'] | null
   status: DiscoveryQueueStatus
   parserName: string
-  chapters: Array<ChapterLink & { selected: boolean }>
+  chapters: QueueChapter[]
   discoveryChanges: string
+  recommendationSummary: string
+  overlapAllowed: boolean
+  includeOverlap: boolean
+  overlapCount: number
+  downloadOptions: QueueDownloadOptions | null
+  queuedAt: string
+  completedChapterUrls: string[]
+  failedChapters: FailedQueueChapter[]
+  outputPath: string
+  downloadHistoryId: string
+  progress: JobProgress | null
   error: string
   discoveredAt: string
   updatedAt: string
@@ -161,15 +224,9 @@ export type Result<T> =
   | { ok: true; value: T }
   | { ok: false; error: string }
 
-export interface GenerateEpubResult {
-  outputPath: string
-  overwroteExistingFile: boolean
-}
-
 export interface NovelTrackerApi {
   discover(url: string): Promise<Result<DiscoveryResult>>
   chooseOutputDirectory(): Promise<string | null>
-  generateEpub(input: GenerateEpubInput): Promise<Result<GenerateEpubResult>>
   getSettings(): Promise<AppSettings>
   chooseLibraryRoot(): Promise<string | null>
   chooseTrackerCsv(): Promise<string | null>
@@ -179,16 +236,22 @@ export interface NovelTrackerApi {
   addDiscoveryQueueItems(items: DiscoveryQueueInput[]): Promise<Result<DiscoveryQueueItem[]>>
   retryDiscoveryQueueItem(id: string): Promise<Result<void>>
   refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
+  acceptQueueRecommendations(id: string, includeOverlap: boolean, overlapCount: number): Promise<Result<void>>
+  enqueueEpub(input: GenerateEpubInput, queueItemId?: string): Promise<Result<QueuedEpubJob>>
+  retryEpub(id: string): Promise<Result<void>>
+  pauseEpub(id: string): Promise<Result<void>>
+  resumeEpub(id: string): Promise<Result<void>>
+  cancelEpub(id: string): Promise<Result<void>>
+  moveQueuedEpub(id: string, direction: 'up' | 'down'): Promise<Result<void>>
   removeDiscoveryQueueItem(id: string): Promise<Result<void>>
   clearDiscoveryQueue(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
+  updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItem[]) => void): () => void
   getLibraryIndex(): Promise<LibraryIndex | null>
   scanLibrary(): Promise<Result<LibraryIndex>>
   cancelLibraryScan(): Promise<void>
-  cancelEpubGeneration(): Promise<void>
   correctLibraryFile(fileId: string, correction: LibraryFileCorrection): Promise<Result<LibraryIndex>>
   openLibraryPath(path: string, reveal: boolean): Promise<Result<void>>
   onLibraryProgress(listener: (progress: LibraryProgress) => void): () => void
-  onProgress(listener: (progress: JobProgress) => void): () => void
 }

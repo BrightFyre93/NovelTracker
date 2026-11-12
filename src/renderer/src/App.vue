@@ -6,7 +6,7 @@ import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import type { DiscoveryQueueItem, DownloadHistoryEntry, JobProgress, TrackerNovel } from '../../shared/contracts'
+import type { DiscoveryQueueItem, DownloadHistoryEntry, TrackerNovel } from '../../shared/contracts'
 import { suggestEpubFilename } from '../../shared/epubFilename'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
@@ -28,6 +28,7 @@ const trackerNovels = ref<TrackerNovel[]>([])
 const trackerSearch = ref('')
 const trackerSources = ref<Record<string, string>>({})
 const trackerCsvPath = ref('')
+const chapterSearch = ref('')
 const downloadHistory = ref<DownloadHistoryEntry[]>([])
 const {
   url,
@@ -40,8 +41,6 @@ const {
   parserName,
   outputDirectory,
   busy,
-  creating,
-  progress,
   error,
   success,
   selectedCount
@@ -63,11 +62,13 @@ const filteredTrackerNovels = computed(() => {
     )
     .slice(0, 100)
 })
-const progressValue = computed(() => {
-  const currentProgress = progress.value
-  return currentProgress && currentProgress.total > 0
-    ? Math.round((currentProgress.current / currentProgress.total) * 100)
-    : 0
+const filteredChapters = computed(() => {
+  const query = chapterSearch.value.trim().toLocaleLowerCase()
+  return chapters.value
+    .map((chapter, index) => ({ chapter, index }))
+    .filter(({ chapter }) =>
+      !query || `${chapter.title} ${chapter.url}`.toLocaleLowerCase().includes(query)
+    )
 })
 const libraryScanProgressValue = computed(() => {
   const currentProgress = libraryState.progress
@@ -95,7 +96,6 @@ watch(url, (value) => {
     filename.value = ''
     parserName.value = ''
     store.success = ''
-    store.progress = null
   }
   if (store.trackerRow && value.trim() !== store.trackerSourceUrl) {
     store.trackerRow = null
@@ -103,10 +103,16 @@ watch(url, (value) => {
   }
 })
 
-let removeProgressListener: (() => void) | undefined
+let removeQueueListener: (() => void) | undefined
 
 onMounted(() => {
-  removeProgressListener = window.novelTracker.onProgress((progress: JobProgress) => store.setProgress(progress))
+  removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate(() => {
+    void window.novelTracker.getDownloadHistory().then((history) => {
+      downloadHistory.value = history
+    }).catch((reason: unknown) => {
+      store.error = reason instanceof Error ? reason.message : String(reason)
+    })
+  })
   void window.novelTracker.getSettings().then((settings) => {
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
     trackerCsvPath.value = settings.trackerCsvPath
@@ -120,34 +126,24 @@ onMounted(() => {
   })
 })
 
-onUnmounted(() => removeProgressListener?.())
+onUnmounted(() => removeQueueListener?.())
 
 async function discover(): Promise<void> {
   store.error = ''
   store.success = ''
-  store.progress = null
   store.busy = true
   try {
     const result = await window.novelTracker.discover(store.url)
     if (!result.ok) {
       store.error = result.error
-      store.progress = null
       return
     }
+    chapterSearch.value = ''
     store.applyDiscovery(result.value)
   } catch (error) {
     store.error = error instanceof Error ? error.message : String(error)
-    store.progress = null
   } finally {
     store.busy = false
-  }
-}
-
-async function cancelEpubGeneration(): Promise<void> {
-  try {
-    await window.novelTracker.cancelEpubGeneration()
-  } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -238,6 +234,7 @@ function useTrackerNovel(novel: TrackerNovel): void {
 }
 
 function openQueueItem(item: DiscoveryQueueItem): void {
+  chapterSearch.value = ''
   store.queueItemId = ''
   store.url = item.sourceUrl
   store.sourceUrl = item.sourceUrl
@@ -249,7 +246,6 @@ function openQueueItem(item: DiscoveryQueueItem): void {
   store.filename = ''
   store.trackerRow = item.trackerRow ? { ...item.trackerRow } : null
   store.trackerSourceUrl = item.trackerRow ? item.sourceUrl : ''
-  store.progress = null
   store.error = ''
   store.success = ''
   activeView.value = 'create'
@@ -285,16 +281,14 @@ watch(chapters, (updatedChapters) => {
 async function createEpub(): Promise<void> {
   store.error = ''
   store.success = ''
-  store.progress = null
   if (queueSelectionTimer) {
     clearTimeout(queueSelectionTimer)
     queueSelectionTimer = undefined
   }
   if (!(await persistQueueSelection())) return
   store.busy = true
-  store.creating = true
   try {
-    const result = await window.novelTracker.generateEpub({
+    const result = await window.novelTracker.enqueueEpub({
       title: store.title,
       author: store.author,
       language: store.language,
@@ -305,15 +299,14 @@ async function createEpub(): Promise<void> {
         .filter((chapter) => chapter.selected)
         .map(({ id, title, url }) => ({ id, title, url })),
       trackerRow: store.trackerRow ?? undefined
-    })
+    }, store.queueItemId || undefined)
     if (!result.ok) {
       store.error = result.error
       return
     }
-    const filename = result.value.outputPath.split(/[\\/]/).pop() ?? result.value.outputPath
-    store.success = result.value.overwroteExistingFile
-      ? `Saved ${filename}, overwriting the existing file.`
-      : `Saved ${filename}.`
+    store.queueItemId = ''
+    store.success = `EPUB job queued for ${store.title}. Track progress and controls in the Queue.`
+    activeView.value = 'queue'
   } catch (error) {
     store.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -322,13 +315,19 @@ async function createEpub(): Promise<void> {
     } catch (error) {
       if (!store.error) store.error = error instanceof Error ? error.message : String(error)
     }
-    store.creating = false
     store.busy = false
   }
 }
 
 function toggleAll(selected: boolean): void {
   for (const chapter of store.chapters) chapter.selected = selected
+}
+
+function selectBoundaryChapter(boundary: 'first' | 'last'): void {
+  const selectedIndex = boundary === 'first' ? 0 : store.chapters.length - 1
+  for (const [index, chapter] of store.chapters.entries()) {
+    chapter.selected = index === selectedIndex
+  }
 }
 </script>
 
@@ -420,15 +419,8 @@ function toggleAll(selected: boolean): void {
         </div>
       </div>
       <p v-if="parserName === 'NovelFull'" class="help-text">
-        {{ parserName }} index pages are collected in reading order. Chapter text is fetched when you create the EPUB.
+        {{ parserName }} index pages are collected in reading order. Chapter text is fetched when the queued job runs.
       </p>
-      <div v-if="progress && chapters.length === 0" class="progress-block" aria-live="polite">
-        <div class="progress-caption">
-          <span>{{ progress.message }}</span>
-          <span>{{ progressValue }}%</span>
-        </div>
-        <ProgressBar :value="progressValue" :show-value="false" />
-      </div>
     </section>
 
     <template v-if="chapters.length > 0">
@@ -461,17 +453,36 @@ function toggleAll(selected: boolean): void {
             <p>{{ parserName }} · {{ chapters.length.toLocaleString() }} chapters · source order</p>
           </div>
           <div class="toolbar-actions">
+            <Button label="First only" severity="secondary" text size="small" :disabled="busy || chapters.length === 0" @click="selectBoundaryChapter('first')" />
+            <Button label="Last only" severity="secondary" text size="small" :disabled="busy || chapters.length === 0" @click="selectBoundaryChapter('last')" />
             <Button label="Select all" severity="secondary" text size="small" :disabled="busy" @click="toggleAll(true)" />
             <Button label="Clear" severity="secondary" text size="small" :disabled="busy" @click="toggleAll(false)" />
           </div>
         </div>
+        <div class="chapter-filter-row">
+          <InputText
+            v-model="chapterSearch"
+            class="full-input"
+            placeholder="Filter chapters by title or URL"
+            aria-label="Filter chapters by title or URL"
+          />
+          <span class="help-text">Showing {{ filteredChapters.length.toLocaleString() }} of {{ chapters.length.toLocaleString() }}</span>
+        </div>
         <div class="chapter-list" role="group" aria-label="Select chapters to include">
-          <label v-for="(chapter, index) in chapters" :key="chapter.id" class="chapter-row">
+          <label v-for="{ chapter, index } in filteredChapters" :key="chapter.id" class="chapter-row">
             <Checkbox v-model="chapter.selected" :binary="true" :input-id="`chapter-${index}`" :disabled="busy" />
             <span class="chapter-order">{{ String(index + 1).padStart(2, '0') }}</span>
             <span class="chapter-detail">
               <span class="chapter-title">{{ chapter.title }}</span>
               <span class="chapter-url">{{ chapter.url }}</span>
+              <span v-if="chapter.archiveStatus" class="chapter-archive-status">
+                {{ chapter.archiveStatus }} archive coverage
+                <template v-if="chapter.chapterNumber !== null && chapter.chapterNumber !== undefined"> · chapter {{ chapter.chapterNumber }}</template>
+                <template v-if="chapter.deliberateOverlap"> · included as overlap</template>
+                <template v-if="chapter.archiveGap"> · unresolved earlier gap</template>
+                <template v-if="chapter.archiveSources?.length"> · {{ chapter.archiveSources.join(', ') }}</template>
+              </span>
+              <span v-else-if="chapter.recommended === false" class="chapter-archive-status">Not recommended</span>
             </span>
           </label>
         </div>
@@ -509,21 +520,12 @@ function toggleAll(selected: boolean): void {
         <div class="create-row">
           <p class="help-text">If an EPUB with this name already exists, it will be overwritten.</p>
           <Button
-            v-if="!creating"
-            label="Create EPUB"
+            label="Add to EPUB queue"
             icon="pi pi-book"
             :loading="busy"
             :disabled="busy || selectedCount === 0 || !title.trim() || !outputDirectory || !hasCurrentDiscovery"
             @click="createEpub"
           />
-          <Button v-else label="Cancel creation" severity="danger" outlined @click="cancelEpubGeneration" />
-        </div>
-        <div v-if="progress" class="progress-block" aria-live="polite">
-          <div class="progress-caption">
-            <span>{{ progress.message }}</span>
-            <span>{{ progressValue }}%</span>
-          </div>
-          <ProgressBar :value="progressValue" :show-value="false" />
         </div>
       </section>
     </template>

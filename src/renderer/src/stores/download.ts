@@ -1,8 +1,14 @@
 import { defineStore } from 'pinia'
-import type { ChapterLink, DiscoveryResult, JobProgress } from '../../../shared/contracts'
+import type { ChapterArchiveStatus, ChapterLink, DiscoveryResult } from '../../../shared/contracts'
 
 export interface SelectableChapter extends ChapterLink {
   selected: boolean
+  archiveStatus?: ChapterArchiveStatus
+  archiveSources?: string[]
+  chapterNumber?: number | null
+  archiveGap?: boolean
+  recommended?: boolean
+  deliberateOverlap?: boolean
 }
 
 export const useDownloadStore = defineStore('download', {
@@ -20,8 +26,6 @@ export const useDownloadStore = defineStore('download', {
     chapters: [] as SelectableChapter[],
     outputDirectory: '',
     busy: false,
-    creating: false,
-    progress: null as JobProgress | null,
     error: '',
     success: ''
   }),
@@ -38,12 +42,8 @@ export const useDownloadStore = defineStore('download', {
       this.filename = ''
       this.chapters = result.chapters.map((chapter) => ({ ...chapter, selected: true }))
       this.parserName = result.parserName
-      this.progress = null
       this.error = ''
       this.success = ''
-    },
-    setProgress(progress: JobProgress) {
-      this.progress = progress
     }
   }
 })

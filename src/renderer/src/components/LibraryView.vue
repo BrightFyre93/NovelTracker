@@ -8,7 +8,12 @@ import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
 const libraryState = useLibraryStore()
-const settings = ref<AppSettings>({ libraryRoot: '', trackerCsvPath: '', outputDirectory: '' })
+const settings = ref<AppSettings>({
+  libraryRoot: '',
+  trackerCsvPath: '',
+  outputDirectory: '',
+  maxSimultaneousDownloads: 2
+})
 const index = ref<LibraryIndex | null>(null)
 const search = ref('')
 const selectedNovel = ref('')

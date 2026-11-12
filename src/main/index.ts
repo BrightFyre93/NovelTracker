@@ -5,31 +5,38 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type {
   AppSettings,
+  ChapterContent,
   ChapterLink,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
   GenerateEpubInput,
-  GenerateEpubResult,
   LibraryFileCorrection,
   LibraryIndex,
   LibraryProgress,
+  QueueChapter,
+  QueueDownloadOptions,
   Result
 } from '../shared/contracts'
 import {
   markInterruptedDownloadJobs,
+  readChapterArtifact,
   readDiscoveryQueue,
   readDownloadHistory,
   readLibraryIndex,
   readSettings,
   saveDownloadHistoryEntry,
+  removeChapterArtifacts,
   writeLibraryCorrection,
   writeDiscoveryQueue,
+  writeChapterArtifact,
   writeSettings
 } from './services/localStore'
 import { readTrackerCsv } from './services/trackerCsv'
-import { fetchChapterContent, discoverChapters, validateHttpUrl } from './services/scraper'
+import { fetchChapterContent, discoverChapters, HttpStatusError, validateHttpUrl } from './services/scraper'
 import { writeEpub } from './services/epub'
+import { recommendArchiveCoverage } from '../shared/archiveRecommendation'
+import { sanitizeEpubFilename, suggestEpubFilename } from '../shared/epubFilename'
 
 let mainWindow: BrowserWindow | null = null
 const approvedOutputDirectories = new Set<string>()
@@ -44,12 +51,15 @@ type LibraryScanWorkerMessage =
   | { type: 'error'; error: string }
 
 let activeLibraryScan: ActiveLibraryScan | null = null
-let activeEpubGeneration: AbortController | null = null
 let discoveryQueue: DiscoveryQueueItem[] = []
 let discoveryQueueWrites = Promise.resolve()
+let historyWrites = Promise.resolve()
 const pendingDiscoveries: string[] = []
 let activeDiscoveries = 0
 const MAX_ACTIVE_DISCOVERIES = 2
+const activeDownloads = new Map<string, { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' }>()
+let downloadPumpRunning = false
+let downloadPumpRequested = false
 
 function dataDirectory(): string {
   return app.getPath('userData')
@@ -63,6 +73,10 @@ function copyDiscoveryQueue(): DiscoveryQueueItem[] {
   return discoveryQueue.map((item) => ({
     ...item,
     trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
+    downloadOptions: item.downloadOptions ? { ...item.downloadOptions } : null,
+    completedChapterUrls: [...item.completedChapterUrls],
+    failedChapters: item.failedChapters.map((chapter) => ({ ...chapter })),
+    progress: item.progress ? { ...item.progress } : null,
     chapters: item.chapters.map((chapter) => ({ ...chapter }))
   }))
 }
@@ -72,6 +86,54 @@ function persistDiscoveryQueue(): Promise<void> {
   const write = discoveryQueueWrites.then(() => writeDiscoveryQueue(dataDirectory(), snapshot))
   discoveryQueueWrites = write.then(() => undefined, () => undefined)
   return write
+}
+
+function persistHistoryEntry(entry: DownloadHistoryEntry): Promise<DownloadHistoryEntry[]> {
+  const write = historyWrites.then(() => saveDownloadHistoryEntry(dataDirectory(), entry))
+  historyWrites = write.then(() => undefined, () => undefined)
+  return write
+}
+
+function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
+  return {
+    ...item,
+    status: item.status ?? 'needs-review',
+    discoveryChanges: item.discoveryChanges ?? '',
+    recommendationSummary: item.recommendationSummary ?? '',
+    overlapAllowed: item.overlapAllowed ?? false,
+    includeOverlap: item.includeOverlap ?? false,
+    overlapCount: item.overlapCount ?? 10,
+    downloadOptions: item.downloadOptions ?? null,
+    queuedAt: item.queuedAt ?? '',
+    completedChapterUrls: item.completedChapterUrls ?? [],
+    failedChapters: item.failedChapters ?? [],
+    outputPath: item.outputPath ?? '',
+    downloadHistoryId: item.downloadHistoryId ?? '',
+    progress: item.progress ?? null,
+    chapters: (item.chapters ?? []).map((chapter) => ({
+      ...chapter,
+      archiveStatus: chapter.archiveStatus ?? 'missing',
+      archiveSources: chapter.archiveSources ?? [],
+      chapterNumber: chapter.chapterNumber ?? null,
+      archiveGap: chapter.archiveGap ?? false,
+      recommended: chapter.recommended ?? true,
+      deliberateOverlap: chapter.deliberateOverlap ?? false
+    }))
+  }
+}
+
+function expectedOutputPath(
+  outputDirectory: string,
+  title: string,
+  filename: string,
+  chapters: ChapterLink[]
+): string {
+  const requestedFilename = filename.trim() || suggestEpubFilename(
+    title,
+    chapters[0]?.title ?? '',
+    chapters[chapters.length - 1]?.title ?? ''
+  )
+  return resolve(outputDirectory, sanitizeEpubFilename(requestedFilename)).toLowerCase()
 }
 
 function notifyDiscoveryQueueChanged(): void {
@@ -100,10 +162,27 @@ async function discoverQueueItem(id: string): Promise<void> {
     const orderChanged =
       previousChapters.length === result.chapters.length &&
       previousChapters.some((chapter, index) => chapter.url !== result.chapters[index].url)
-    item.chapters = result.chapters.map((chapter) => ({
+    const refreshedChapters: QueueChapter[] = result.chapters.map((chapter) => ({
       ...chapter,
+      archiveStatus: 'missing',
+      archiveSources: [],
+      chapterNumber: null,
+      archiveGap: false,
+      recommended: true,
+      deliberateOverlap: false,
       selected: previousByUrl.get(chapter.url)?.selected ?? true
     }))
+    const libraryIndex = await readLibraryIndex(dataDirectory())
+    const recommendation = recommendArchiveCoverage(
+      { ...item, chapters: refreshedChapters },
+      libraryIndex?.files ?? [],
+      item.includeOverlap,
+      item.overlapCount
+    )
+    item.chapters = recommendation.chapters
+    item.overlapAllowed = recommendation.overlapAllowed
+    item.includeOverlap = item.includeOverlap && recommendation.overlapAllowed
+    item.recommendationSummary = recommendation.summary
     item.discoveryChanges =
       hadPreviousSnapshot && (addedCount > 0 || removedCount > 0 || orderChanged)
         ? `Chapter list changed: ${addedCount} added, ${removedCount} removed${orderChanged ? ', order changed' : ''}. Review your selection.`
@@ -302,6 +381,340 @@ function parseGenerateInput(value: unknown): GenerateEpubInput {
   }
 }
 
+async function cancellableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new Error('EPUB creation was cancelled.')
+  if (milliseconds <= 0) return
+  await new Promise<void>((resolveDelay, rejectDelay) => {
+    const deadline = Date.now() + milliseconds
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      signal.removeEventListener('abort', abort)
+    }
+    const abort = (): void => {
+      cleanup()
+      rejectDelay(new Error('EPUB creation was cancelled.'))
+    }
+    const schedule = (): void => {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        cleanup()
+        resolveDelay()
+        return
+      }
+      timer = setTimeout(schedule, Math.min(remaining, 2_147_483_647))
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) {
+      abort()
+      return
+    }
+    schedule()
+  })
+}
+
+function canRetryChapter(error: unknown): boolean {
+  if (error instanceof HttpStatusError) return error.status === 429 || error.status >= 500
+  const message = errorMessage(error)
+  return !/manual verification|no readable chapter content|HTTP 4\d\d/i.test(message)
+}
+
+async function persistDownloadState(
+  item: DiscoveryQueueItem,
+  historyEntry: DownloadHistoryEntry
+): Promise<void> {
+  const now = new Date().toISOString()
+  item.updatedAt = now
+  historyEntry.updatedAt = now
+  await persistDiscoveryQueue()
+  await persistHistoryEntry(historyEntry)
+  notifyDiscoveryQueueChanged()
+}
+
+async function runQueuedDownload(
+  itemId: string,
+  controller: AbortController,
+  historyEntry: DownloadHistoryEntry
+): Promise<void> {
+  const item = discoveryQueue.find((candidate) => candidate.id === itemId)
+  if (!item || !item.downloadOptions) return
+  const options = item.downloadOptions
+  const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+
+  try {
+    if (selectedChapters.length === 0) throw new Error('Select at least one chapter before queueing this EPUB.')
+    for (let index = 0; index < selectedChapters.length; index += 1) {
+      const chapter = selectedChapters[index]
+      const active = activeDownloads.get(itemId)
+      if (!active || active.requestedAction !== 'none' || controller.signal.aborted) break
+
+      let savedContent: ChapterContent | null = null
+      if (item.completedChapterUrls.includes(chapter.url)) {
+        try {
+          savedContent = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
+          if (savedContent && savedContent.url !== chapter.url) {
+            console.warn(`Saved chapter artifact for ${chapter.url} has a mismatched URL and will be fetched again.`)
+            savedContent = null
+          }
+        } catch (error) {
+          console.warn(`Saved chapter artifact for ${chapter.url} will be fetched again:`, errorMessage(error))
+        }
+        if (!savedContent) {
+          item.completedChapterUrls = item.completedChapterUrls.filter((url) => url !== chapter.url)
+        }
+      }
+
+      if (!savedContent) {
+        item.progress = {
+          current: item.completedChapterUrls.length,
+          total: selectedChapters.length,
+          message: `Fetching chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
+        }
+        await persistDownloadState(item, historyEntry)
+
+        let lastError: unknown = new Error('Chapter could not be fetched.')
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            savedContent = await fetchChapterContent(chapter, controller.signal)
+            break
+          } catch (error) {
+            if (controller.signal.aborted) break
+            lastError = error
+            if (attempt === 2 || !canRetryChapter(error)) break
+            const retryAfter = error instanceof HttpStatusError ? error.retryAfterMs : null
+            const delay = retryAfter ?? 1000 * (2 ** attempt)
+            try {
+              await cancellableDelay(delay, controller.signal)
+            } catch {
+              break
+            }
+          }
+        }
+
+        if (controller.signal.aborted) break
+        if (savedContent) {
+          await writeChapterArtifact(dataDirectory(), itemId, savedContent)
+          if (!item.completedChapterUrls.includes(chapter.url)) item.completedChapterUrls.push(chapter.url)
+          item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
+        } else {
+          item.failedChapters = [
+            ...item.failedChapters.filter((failed) => failed.url !== chapter.url),
+            { url: chapter.url, title: chapter.title, error: errorMessage(lastError) }
+          ]
+          item.error = `${item.failedChapters.length} chapter(s) failed. Retry failed chapters to continue.`
+        }
+      }
+
+      historyEntry.completedChapters = selectedChapters.filter((selected) =>
+        item.completedChapterUrls.includes(selected.url)
+      ).length
+      item.progress = {
+        current: historyEntry.completedChapters,
+        total: selectedChapters.length,
+        message: savedContent
+          ? `Fetched ${chapter.title}`
+          : `Failed ${chapter.title}`
+      }
+      await persistDownloadState(item, historyEntry)
+    }
+
+    const requestedAction = activeDownloads.get(itemId)?.requestedAction ?? 'cancel'
+    if (requestedAction === 'pause') {
+      item.status = 'paused'
+      item.progress = { ...(item.progress ?? { current: 0, total: selectedChapters.length, message: '' }), message: 'Paused' }
+      historyEntry.status = 'paused'
+      historyEntry.error = ''
+      await persistDownloadState(item, historyEntry)
+      return
+    }
+    if (requestedAction === 'cancel' || controller.signal.aborted) {
+      item.status = 'cancelled'
+      item.progress = { ...(item.progress ?? { current: 0, total: selectedChapters.length, message: '' }), message: 'Cancelled' }
+      historyEntry.status = 'cancelled'
+      historyEntry.error = ''
+      await persistDownloadState(item, historyEntry)
+      return
+    }
+    if (item.failedChapters.length > 0) {
+      item.status = item.completedChapterUrls.length > 0 ? 'partially-completed' : 'failed'
+      item.progress = {
+        current: historyEntry.completedChapters,
+        total: selectedChapters.length,
+        message: `${item.failedChapters.length} chapter(s) failed`
+      }
+      historyEntry.status = item.status
+      historyEntry.error = `${item.failedChapters.length} chapter(s) failed.`
+      await persistDownloadState(item, historyEntry)
+      return
+    }
+
+    const chapters: ChapterContent[] = []
+    for (const chapter of selectedChapters) {
+      const content = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
+      if (!content || content.url !== chapter.url) {
+        throw new Error(`Saved chapter content is missing or invalid for "${chapter.title}".`)
+      }
+      chapters.push(content)
+    }
+    item.progress = {
+      current: selectedChapters.length,
+      total: selectedChapters.length,
+      message: 'Validating and packaging EPUB…'
+    }
+    await persistDownloadState(item, historyEntry)
+    const result = await writeEpub(
+      options.outputDirectory,
+      options.title,
+      options.author,
+      options.language,
+      chapters,
+      options.filename,
+      controller.signal
+    )
+    item.status = 'completed'
+    item.outputPath = result.outputPath
+    item.error = ''
+    item.progress = { current: selectedChapters.length, total: selectedChapters.length, message: 'Completed' }
+    historyEntry.status = 'completed'
+    historyEntry.outputPath = result.outputPath
+    historyEntry.error = ''
+    await persistDownloadState(item, historyEntry)
+    await removeChapterArtifacts(dataDirectory(), itemId).catch((error: unknown) => {
+      console.warn(`Completed chapter artifacts for queue item ${itemId} could not be removed:`, errorMessage(error))
+    })
+  } catch (error) {
+    const requestedAction = activeDownloads.get(itemId)?.requestedAction ?? 'none'
+    if (requestedAction === 'pause' || requestedAction === 'cancel') {
+      item.status = requestedAction === 'pause' ? 'paused' : 'cancelled'
+      historyEntry.status = requestedAction === 'pause' ? 'paused' : 'cancelled'
+      historyEntry.error = ''
+    } else {
+      item.status = item.completedChapterUrls.length > 0 ? 'partially-completed' : 'failed'
+      item.error = errorMessage(error)
+      historyEntry.status = item.status
+      historyEntry.error = item.error
+      console.error(`Queued EPUB job ${itemId} failed:`, error)
+    }
+    item.progress = {
+      current: historyEntry.completedChapters,
+      total: historyEntry.selectedChapterCount,
+      message: item.status
+    }
+    try {
+      await persistDownloadState(item, historyEntry)
+    } catch (saveError) {
+      console.error(`Queued EPUB job ${itemId} state could not be saved:`, saveError)
+    }
+  }
+}
+
+async function pumpDownloadQueue(): Promise<void> {
+  if (downloadPumpRunning) {
+    downloadPumpRequested = true
+    return
+  }
+  downloadPumpRunning = true
+  try {
+    const settings = await readSettings(dataDirectory())
+    if (
+      !Number.isInteger(settings.maxSimultaneousDownloads) ||
+      settings.maxSimultaneousDownloads < 1 ||
+      settings.maxSimultaneousDownloads > 5
+    ) {
+      throw new Error('Maximum simultaneous novel downloads must be from 1 to 5.')
+    }
+    while (activeDownloads.size < settings.maxSimultaneousDownloads) {
+      const item = discoveryQueue
+        .filter((candidate) => candidate.status === 'queued' && candidate.downloadOptions)
+        .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))[0]
+      if (!item) break
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      const currentHead = discoveryQueue
+        .filter((candidate) => candidate.status === 'queued' && candidate.downloadOptions)
+        .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))[0]
+      if (item.status !== 'queued' || currentHead?.id !== item.id) continue
+      if (!historyEntry) {
+        item.status = 'failed'
+        item.error = 'The saved job history entry is missing.'
+        item.updatedAt = new Date().toISOString()
+        await persistDiscoveryQueue()
+        notifyDiscoveryQueueChanged()
+        continue
+      }
+      const controller = new AbortController()
+      activeDownloads.set(item.id, { controller, requestedAction: 'none' })
+      item.status = 'downloading'
+      item.error = ''
+      item.progress = {
+        current: historyEntry.completedChapters,
+        total: historyEntry.selectedChapterCount,
+        message: 'Starting download…'
+      }
+      historyEntry.status = 'running'
+      historyEntry.error = ''
+      try {
+        await persistDownloadState(item, historyEntry)
+      } catch (error) {
+        activeDownloads.delete(item.id)
+        item.status = 'failed'
+        item.error = `The queued job could not be started: ${errorMessage(error)}`
+        historyEntry.status = 'failed'
+        historyEntry.error = item.error
+        console.error(`Queued EPUB job ${item.id} could not be started:`, error)
+        await persistDiscoveryQueue().catch((saveError: unknown) => {
+          console.error(`Queued EPUB job ${item.id} failure state could not be saved:`, saveError)
+        })
+        await persistHistoryEntry(historyEntry).catch((saveError: unknown) => {
+          console.error(`Queued EPUB job ${item.id} failure history could not be saved:`, saveError)
+        })
+        notifyDiscoveryQueueChanged()
+        continue
+      }
+      void runQueuedDownload(item.id, controller, historyEntry).finally(() => {
+        activeDownloads.delete(item.id)
+        void pumpDownloadQueue().catch((error: unknown) => {
+          console.error('Download queue scheduler failed:', error)
+        })
+      })
+    }
+  } catch (error) {
+    console.error('Download queue scheduler failed:', error)
+    const history = await readDownloadHistory(dataDirectory()).catch((readError: unknown) => {
+      console.error('Download history could not be loaded after a scheduler failure:', readError)
+      return []
+    })
+    for (const item of discoveryQueue) {
+      if (item.status === 'queued') {
+        item.status = 'failed'
+        item.error = errorMessage(error)
+        item.updatedAt = new Date().toISOString()
+        const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+        if (historyEntry) {
+          historyEntry.status = 'failed'
+          historyEntry.error = item.error
+          historyEntry.updatedAt = item.updatedAt
+          await persistHistoryEntry(historyEntry).catch((saveError: unknown) => {
+            console.error(`Download history for ${item.id} could not be updated:`, saveError)
+          })
+        }
+      }
+    }
+    await persistDiscoveryQueue().catch((saveError: unknown) => {
+      console.error('Download queue scheduler failure could not be saved:', saveError)
+    })
+    notifyDiscoveryQueueChanged()
+  } finally {
+    downloadPumpRunning = false
+    if (downloadPumpRequested) {
+      downloadPumpRequested = false
+      void pumpDownloadQueue().catch((error: unknown) => {
+        console.error('Download queue scheduler failed:', error)
+      })
+    }
+  }
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1180,
@@ -367,6 +780,23 @@ function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('settings:get', async (): Promise<AppSettings> => readSettings(dataDirectory()))
+
+  ipcMain.handle('settings:download-concurrency', async (_event, rawValue: unknown): Promise<Result<AppSettings>> => {
+    try {
+      if (typeof rawValue !== 'number' || !Number.isInteger(rawValue) || rawValue < 1 || rawValue > 5) {
+        throw new Error('Maximum simultaneous downloads must be a whole number from 1 to 5.')
+      }
+      const settings = await readSettings(dataDirectory())
+      settings.maxSimultaneousDownloads = rawValue
+      await writeSettings(dataDirectory(), settings)
+      void pumpDownloadQueue().catch((error: unknown) => {
+        console.error('Download queue scheduler failed:', error)
+      })
+      return { ok: true, value: settings }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
 
   ipcMain.handle('dialog:choose-library-root', async () => {
     if (!mainWindow) throw new Error('The application window is not available.')
@@ -449,6 +879,17 @@ function registerIpcHandlers(): void {
           parserName: '',
           chapters: [],
           discoveryChanges: '',
+          recommendationSummary: '',
+          overlapAllowed: false,
+          includeOverlap: false,
+          overlapCount: 10,
+          downloadOptions: null,
+          queuedAt: '',
+          completedChapterUrls: [],
+          failedChapters: [],
+          outputPath: '',
+          downloadHistoryId: '',
+          progress: null,
           error: '',
           discoveredAt: '',
           updatedAt: now
@@ -474,7 +915,9 @@ function registerIpcHandlers(): void {
       if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
       const item = discoveryQueue.find((candidate) => candidate.id === rawId)
       if (!item) throw new Error('The selected discovery queue item no longer exists.')
-      if (item.status !== 'failed') throw new Error('Only failed discovery items can be retried.')
+      if (item.status !== 'failed' || item.downloadOptions) {
+        throw new Error('Only failed discovery items can be retried.')
+      }
       const previousError = item.error
       const previousUpdatedAt = item.updatedAt
       item.status = 'discovering'
@@ -503,14 +946,17 @@ function registerIpcHandlers(): void {
       if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
       const item = discoveryQueue.find((candidate) => candidate.id === rawId)
       if (!item) throw new Error('The selected discovery queue item no longer exists.')
-      if (item.status !== 'needs-review') throw new Error('Only reviewed discovery items can be refreshed.')
+      if (item.status !== 'needs-review' && item.status !== 'ready') {
+        throw new Error('Only reviewed discovery items can be refreshed.')
+      }
       const previousUpdatedAt = item.updatedAt
+      const previousStatus = item.status
       item.status = 'discovering'
       item.updatedAt = new Date().toISOString()
       try {
         await persistDiscoveryQueue()
       } catch (error) {
-        item.status = 'needs-review'
+        item.status = previousStatus
         item.updatedAt = previousUpdatedAt
         throw error
       }
@@ -524,13 +970,64 @@ function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle(
+    'discovery-queue:accept-recommendations',
+    async (_event, rawId: unknown, rawIncludeOverlap: unknown, rawOverlapCount: unknown): Promise<Result<void>> => {
+      try {
+        if (
+          typeof rawId !== 'string' ||
+          typeof rawIncludeOverlap !== 'boolean' ||
+          typeof rawOverlapCount !== 'number' ||
+          !Number.isInteger(rawOverlapCount) ||
+          rawOverlapCount < 0 ||
+          rawOverlapCount > 1000
+        ) {
+          throw new Error('Invalid recommendation settings.')
+        }
+        const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+        if (!item || (item.status !== 'needs-review' && item.status !== 'ready')) {
+          throw new Error('The selected item is not ready for recommendations.')
+        }
+        if (rawIncludeOverlap && !item.overlapAllowed) {
+          throw new Error('Overlap cannot be applied because archive coverage is uncertain or has unresolved gaps.')
+        }
+        const libraryIndex = await readLibraryIndex(dataDirectory())
+        const recommendation = recommendArchiveCoverage(
+          item,
+          libraryIndex?.files ?? [],
+          rawIncludeOverlap,
+          rawOverlapCount
+        )
+        if (rawIncludeOverlap && !recommendation.overlapAllowed) {
+          throw new Error('Overlap cannot be applied because archive coverage is uncertain or has unresolved gaps.')
+        }
+        item.chapters = recommendation.chapters.map((chapter) => ({
+          ...chapter,
+          selected: chapter.recommended || chapter.deliberateOverlap
+        }))
+        item.includeOverlap = rawIncludeOverlap
+        item.overlapCount = rawOverlapCount
+        item.overlapAllowed = recommendation.overlapAllowed
+        item.recommendationSummary = recommendation.summary
+        item.status = 'ready'
+        item.updatedAt = new Date().toISOString()
+        await persistDiscoveryQueue()
+        notifyDiscoveryQueueChanged()
+        return { ok: true, value: undefined }
+      } catch (error) {
+        console.error('Archive recommendation acceptance failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
   ipcMain.handle('discovery-queue:remove', async (_event, rawId: unknown): Promise<Result<void>> => {
     try {
       if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
       const index = discoveryQueue.findIndex((candidate) => candidate.id === rawId)
       if (index < 0) throw new Error('The selected discovery queue item no longer exists.')
-      if (discoveryQueue[index].status === 'discovering') {
-        throw new Error('Wait for discovery to finish before removing this item.')
+      if (['discovering', 'queued', 'downloading', 'paused'].includes(discoveryQueue[index].status)) {
+        throw new Error('Finish or cancel the active work before removing this item.')
       }
       const [removedItem] = discoveryQueue.splice(index, 1)
       try {
@@ -538,6 +1035,11 @@ function registerIpcHandlers(): void {
       } catch (error) {
         discoveryQueue.splice(index, 0, removedItem)
         throw error
+      }
+      if (removedItem.downloadOptions) {
+        await removeChapterArtifacts(dataDirectory(), removedItem.id).catch((error: unknown) => {
+          console.warn(`Chapter artifacts for removed queue item ${removedItem.id} could not be removed:`, errorMessage(error))
+        })
       }
       notifyDiscoveryQueueChanged()
       return { ok: true, value: undefined }
@@ -549,8 +1051,8 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('discovery-queue:clear', async (): Promise<Result<void>> => {
     try {
-      if (discoveryQueue.some((item) => item.status === 'discovering')) {
-        throw new Error('Wait for all discoveries to finish before clearing the queue.')
+      if (discoveryQueue.some((item) => ['discovering', 'queued', 'downloading', 'paused'].includes(item.status))) {
+        throw new Error('Finish or cancel active work before clearing the queue.')
       }
       const previousQueue = discoveryQueue
       discoveryQueue = []
@@ -559,6 +1061,13 @@ function registerIpcHandlers(): void {
       } catch (error) {
         discoveryQueue = previousQueue
         throw error
+      }
+      for (const item of previousQueue) {
+        if (item.downloadOptions) {
+          await removeChapterArtifacts(dataDirectory(), item.id).catch((error: unknown) => {
+            console.warn(`Chapter artifacts for cleared queue item ${item.id} could not be removed:`, errorMessage(error))
+          })
+        }
       }
       notifyDiscoveryQueueChanged()
       return { ok: true, value: undefined }
@@ -582,7 +1091,7 @@ function registerIpcHandlers(): void {
           })
         )
         const item = discoveryQueue.find((candidate) => candidate.id === rawId)
-        if (!item || item.status !== 'needs-review') {
+        if (!item || (item.status !== 'needs-review' && item.status !== 'ready')) {
           throw new Error('The selected discovery queue item is no longer ready for review.')
         }
         const availableUrls = new Set(item.chapters.map((chapter) => chapter.url))
@@ -590,6 +1099,7 @@ function registerIpcHandlers(): void {
           throw new Error('The chapter selection no longer matches the saved discovery snapshot.')
         }
         for (const chapter of item.chapters) chapter.selected = selectedUrls.has(chapter.url)
+        item.status = 'ready'
         item.updatedAt = new Date().toISOString()
         await persistDiscoveryQueue()
         notifyDiscoveryQueueChanged()
@@ -600,6 +1110,385 @@ function registerIpcHandlers(): void {
       }
     }
   )
+
+  ipcMain.handle(
+    'download-queue:enqueue',
+    async (_event, rawInput: unknown, rawQueueItemId: unknown): Promise<Result<{ queueItemId: string; historyId: string }>> => {
+      let previousItem: DiscoveryQueueItem | null = null
+      let createdItemId = ''
+      let queueMutated = false
+      let historyEntry: DownloadHistoryEntry | null = null
+      try {
+        const input = parseGenerateInput(rawInput)
+        if (rawQueueItemId !== undefined && typeof rawQueueItemId !== 'string') {
+          throw new Error('Invalid discovery queue item.')
+        }
+        let item = typeof rawQueueItemId === 'string'
+          ? discoveryQueue.find((candidate) => candidate.id === rawQueueItemId)
+          : undefined
+        if (rawQueueItemId !== undefined && !item) {
+          throw new Error('The selected discovery queue item no longer exists.')
+        }
+        if (item && item.status !== 'needs-review' && item.status !== 'ready') {
+          throw new Error('This novel is not ready to be queued for EPUB creation.')
+        }
+
+        const sourceUrl = input.sourceUrl || item?.sourceUrl || input.chapters[0].url
+        const outputPath = expectedOutputPath(input.outputDirectory, input.title, input.filename ?? '', input.chapters)
+        const outputConflict = discoveryQueue.find((candidate) => {
+          if (!candidate.downloadOptions || candidate.status === 'completed') return false
+          const selectedChapters = candidate.chapters.filter((chapter) => chapter.selected)
+          return expectedOutputPath(
+            candidate.downloadOptions.outputDirectory,
+            candidate.downloadOptions.title,
+            candidate.downloadOptions.filename,
+            selectedChapters
+          ) === outputPath
+        })
+        if (outputConflict) {
+          throw new Error(
+            `Another saved EPUB job uses this output filename. Remove or complete "${outputConflict.title}" before reusing it.`
+          )
+        }
+        if (!item) {
+          const libraryIndex = await readLibraryIndex(dataDirectory())
+          const duplicate = discoveryQueue.find(
+            (candidate) =>
+              candidate.sourceUrl === sourceUrl &&
+              ['needs-review', 'ready', 'queued', 'downloading', 'paused'].includes(candidate.status)
+          )
+          if (duplicate) throw new Error('A job for this novel or source is already active in the queue.')
+          const now = new Date().toISOString()
+          const createdItem: DiscoveryQueueItem = {
+            id: randomUUID(),
+            title: input.title,
+            author: input.author,
+            sourceUrl,
+            origin: 'manual',
+            trackerRow: input.trackerRow ?? null,
+            status: 'needs-review',
+            parserName: 'Manual chapter selection',
+            chapters: input.chapters.map((chapter) => ({
+              ...chapter,
+              selected: true,
+              archiveStatus: 'missing',
+              archiveSources: [],
+              chapterNumber: null,
+              archiveGap: false,
+              recommended: true,
+              deliberateOverlap: false
+            })),
+            discoveryChanges: '',
+            recommendationSummary: '',
+            overlapAllowed: false,
+            includeOverlap: false,
+            overlapCount: 10,
+            downloadOptions: null,
+            queuedAt: '',
+            completedChapterUrls: [],
+            failedChapters: [],
+            outputPath: '',
+            downloadHistoryId: '',
+            progress: null,
+            error: '',
+            discoveredAt: now,
+            updatedAt: now
+          }
+          item = createdItem
+          discoveryQueue.push(createdItem)
+          createdItemId = createdItem.id
+          queueMutated = true
+          const recommendation = recommendArchiveCoverage(createdItem, libraryIndex?.files ?? [])
+          createdItem.chapters = recommendation.chapters
+          createdItem.overlapAllowed = recommendation.overlapAllowed
+          createdItem.recommendationSummary = recommendation.summary
+        } else {
+          const existingItem = item
+          previousItem = copyDiscoveryQueue().find((candidate) => candidate.id === existingItem.id) ?? null
+          if (input.sourceUrl && validateHttpUrl(input.sourceUrl) !== existingItem.sourceUrl) {
+            throw new Error('The source URL does not match the selected queue item.')
+          }
+          const duplicate = discoveryQueue.find(
+            (candidate) =>
+              candidate.id !== existingItem.id &&
+              candidate.sourceUrl === sourceUrl &&
+              ['queued', 'downloading', 'paused'].includes(candidate.status)
+          )
+          if (duplicate) throw new Error('A job for this novel or source is already active in the queue.')
+          const selectedUrls = new Set(input.chapters.map((chapter) => chapter.url))
+          const availableUrls = new Set(existingItem.chapters.map((chapter) => chapter.url))
+          if ([...selectedUrls].some((url) => !availableUrls.has(url))) {
+            throw new Error('The selected chapters no longer match the saved discovery snapshot.')
+          }
+          queueMutated = true
+          for (const chapter of existingItem.chapters) chapter.selected = selectedUrls.has(chapter.url)
+          existingItem.title = input.title
+          existingItem.author = input.author
+          existingItem.trackerRow = input.trackerRow ?? existingItem.trackerRow
+        }
+
+        const queueItem = item
+        if (!queueItem) throw new Error('The EPUB job could not be added to the queue.')
+        const now = new Date().toISOString()
+        historyEntry = {
+          id: randomUUID(),
+          queueItemId: queueItem.id,
+          title: input.title,
+          author: input.author,
+          sourceUrl,
+          trackerRow: input.trackerRow ?? null,
+          selectedChapterCount: input.chapters.length,
+          status: 'queued',
+          completedChapters: 0,
+          outputPath: '',
+          error: '',
+          startedAt: now,
+          updatedAt: now
+        }
+        queueItem.status = 'queued'
+        queueItem.downloadOptions = {
+          title: input.title,
+          author: input.author,
+          language: input.language,
+          filename: input.filename ?? '',
+          sourceUrl,
+          outputDirectory: input.outputDirectory
+        }
+        queueItem.queuedAt = now
+        queueItem.completedChapterUrls = []
+        queueItem.failedChapters = []
+        queueItem.outputPath = ''
+        queueItem.downloadHistoryId = historyEntry.id
+        queueItem.progress = { current: 0, total: input.chapters.length, message: 'Queued for download' }
+        queueItem.error = ''
+        queueItem.updatedAt = now
+
+        await persistHistoryEntry(historyEntry)
+        try {
+          await persistDiscoveryQueue()
+        } catch (error) {
+          historyEntry.status = 'failed'
+          historyEntry.error = `The queue item could not be saved: ${errorMessage(error)}`
+          await persistHistoryEntry(historyEntry)
+          throw error
+        }
+        notifyDiscoveryQueueChanged()
+        void pumpDownloadQueue().catch((error: unknown) => {
+          console.error('Download queue scheduler failed:', error)
+        })
+        return { ok: true, value: { queueItemId: queueItem.id, historyId: historyEntry.id } }
+      } catch (error) {
+        if (queueMutated) {
+          if (createdItemId) {
+            discoveryQueue = discoveryQueue.filter((candidate) => candidate.id !== createdItemId)
+          } else if (previousItem) {
+            const index = discoveryQueue.findIndex((candidate) => candidate.id === previousItem?.id)
+            if (index >= 0) discoveryQueue[index] = previousItem
+          }
+          await persistDiscoveryQueue().catch((saveError: unknown) => {
+            console.error('Failed queue submission rollback could not be saved:', saveError)
+          })
+          notifyDiscoveryQueueChanged()
+        }
+        if (historyEntry?.status === 'queued') {
+          historyEntry.status = 'failed'
+          historyEntry.error = errorMessage(error)
+          await persistHistoryEntry(historyEntry).catch((saveError: unknown) => {
+            console.error('Failed queue submission history could not be saved:', saveError)
+          })
+        }
+        console.error('EPUB queueing failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
+  ipcMain.handle('download-queue:retry', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid download queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || !item.downloadOptions || !item.downloadHistoryId) {
+        throw new Error('This item has no saved EPUB job to retry.')
+      }
+      if (item.status !== 'failed' && item.status !== 'partially-completed' && item.status !== 'cancelled') {
+        throw new Error('Only failed, partially completed, or cancelled jobs can be retried.')
+      }
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      if (!historyEntry) throw new Error('The saved job history entry is missing.')
+      if (
+        !discoveryQueue.includes(item) ||
+        (item.status !== 'failed' && item.status !== 'partially-completed' && item.status !== 'cancelled')
+      ) {
+        throw new Error('The EPUB job changed before it could be retried.')
+      }
+      item.status = 'queued'
+      item.queuedAt = new Date().toISOString()
+      item.error = ''
+      item.progress = {
+        current: item.completedChapterUrls.length,
+        total: item.chapters.filter((chapter) => chapter.selected).length,
+        message: 'Queued for retry'
+      }
+      historyEntry.status = 'queued'
+      historyEntry.error = ''
+      await persistDownloadState(item, historyEntry)
+      void pumpDownloadQueue().catch((error: unknown) => {
+        console.error('Download queue scheduler failed:', error)
+      })
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('EPUB job retry failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle(
+    'download-queue:move',
+    async (_event, rawId: unknown, rawDirection: unknown): Promise<Result<void>> => {
+      try {
+        if (typeof rawId !== 'string' || (rawDirection !== 'up' && rawDirection !== 'down')) {
+          throw new Error('Invalid queue reorder request.')
+        }
+        const queuedItems = discoveryQueue
+          .filter((item) => item.status === 'queued' && item.downloadOptions)
+          .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))
+        const index = queuedItems.findIndex((item) => item.id === rawId)
+        if (index < 0) throw new Error('Only queued EPUB jobs can be reordered.')
+        const targetIndex = index + (rawDirection === 'up' ? -1 : 1)
+        if (targetIndex < 0 || targetIndex >= queuedItems.length) {
+          return { ok: true, value: undefined }
+        }
+        const oldTimes = new Map(queuedItems.map((item) => [item.id, { queuedAt: item.queuedAt, updatedAt: item.updatedAt }]))
+        const movingItem = queuedItems[index]
+        const displacedItem = queuedItems[targetIndex]
+        if (!movingItem || !displacedItem) throw new Error('The queue order changed before the job could be moved.')
+        queuedItems[index] = displacedItem
+        queuedItems[targetIndex] = movingItem
+        const now = Date.now()
+        queuedItems.forEach((item, position) => {
+          item.queuedAt = new Date(now + position).toISOString()
+          item.updatedAt = new Date().toISOString()
+        })
+        try {
+          await persistDiscoveryQueue()
+        } catch (error) {
+          for (const item of queuedItems) {
+            const previous = oldTimes.get(item.id)
+            if (previous) {
+              item.queuedAt = previous.queuedAt
+              item.updatedAt = previous.updatedAt
+            }
+          }
+          throw error
+        }
+        notifyDiscoveryQueueChanged()
+        void pumpDownloadQueue().catch((error: unknown) => {
+          console.error('Download queue scheduler failed:', error)
+        })
+        return { ok: true, value: undefined }
+      } catch (error) {
+        console.error('EPUB queue reorder failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
+  ipcMain.handle('download-queue:pause', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid download queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || !item.downloadHistoryId) throw new Error('The selected item has no active EPUB job.')
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      if (!historyEntry) throw new Error('The saved job history entry is missing.')
+      if (!discoveryQueue.includes(item) || (item.status !== 'queued' && item.status !== 'downloading')) {
+        throw new Error('The EPUB job changed before it could be paused.')
+      }
+      if (item.status === 'queued') {
+        item.status = 'paused'
+        item.progress = { ...(item.progress ?? { current: 0, total: 0, message: '' }), message: 'Paused' }
+        historyEntry.status = 'paused'
+        await persistDownloadState(item, historyEntry)
+        return { ok: true, value: undefined }
+      }
+      const active = activeDownloads.get(item.id)
+      if (item.status !== 'downloading' || !active) throw new Error('Only queued or downloading jobs can be paused.')
+      active.requestedAction = 'pause'
+      active.controller.abort()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('EPUB job pause failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('download-queue:resume', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid download queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || item.status !== 'paused' || !item.downloadHistoryId) {
+        throw new Error('Only paused EPUB jobs can be resumed.')
+      }
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      if (!historyEntry) throw new Error('The saved job history entry is missing.')
+      if (!discoveryQueue.includes(item) || item.status !== 'paused') {
+        throw new Error('The EPUB job changed before it could be resumed.')
+      }
+      item.status = 'queued'
+      item.queuedAt = new Date().toISOString()
+      item.error = ''
+      item.progress = {
+        current: item.completedChapterUrls.length,
+        total: item.chapters.filter((chapter) => chapter.selected).length,
+        message: 'Queued to resume'
+      }
+      historyEntry.status = 'queued'
+      await persistDownloadState(item, historyEntry)
+      void pumpDownloadQueue().catch((error: unknown) => {
+        console.error('Download queue scheduler failed:', error)
+      })
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('EPUB job resume failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('download-queue:cancel', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid download queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || !item.downloadHistoryId) throw new Error('The selected item has no active EPUB job.')
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      if (!historyEntry) throw new Error('The saved job history entry is missing.')
+      if (
+        !discoveryQueue.includes(item) ||
+        (item.status !== 'queued' && item.status !== 'paused' && item.status !== 'downloading')
+      ) {
+        throw new Error('The EPUB job changed before it could be cancelled.')
+      }
+      if (item.status === 'queued' || item.status === 'paused') {
+        item.status = 'cancelled'
+        item.progress = { ...(item.progress ?? { current: 0, total: 0, message: '' }), message: 'Cancelled' }
+        historyEntry.status = 'cancelled'
+        await persistDownloadState(item, historyEntry)
+        return { ok: true, value: undefined }
+      }
+      const active = activeDownloads.get(item.id)
+      if (item.status !== 'downloading' || !active) {
+        throw new Error('Only queued, paused, or downloading jobs can be cancelled.')
+      }
+      active.requestedAction = 'cancel'
+      active.controller.abort()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('EPUB job cancellation failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
 
   ipcMain.handle('library:index', async () => readLibraryIndex(dataDirectory()))
 
@@ -632,10 +1521,6 @@ function registerIpcHandlers(): void {
     if (!activeLibraryScan) return
     activeLibraryScan.cancelRequested = true
     activeLibraryScan.worker?.postMessage({ type: 'cancel' })
-  })
-
-  ipcMain.handle('epub:cancel-generation', () => {
-    activeEpubGeneration?.abort()
   })
 
   ipcMain.handle('library:correct-file', async (_event, rawFileId: unknown, rawCorrection: unknown) => {
@@ -691,104 +1576,78 @@ function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('epub:generate', async (event, rawInput: unknown): Promise<Result<GenerateEpubResult>> => {
-    if (activeEpubGeneration) return { ok: false, error: 'EPUB creation is already running.' }
-    try {
-      const input = parseGenerateInput(rawInput)
-      const controller = new AbortController()
-      activeEpubGeneration = controller
-      const now = new Date().toISOString()
-      const historyEntry: DownloadHistoryEntry = {
-        id: randomUUID(),
-        title: input.title,
-        author: input.author,
-        sourceUrl: input.sourceUrl || input.chapters[0].url,
-        trackerRow: input.trackerRow ?? null,
-        selectedChapterCount: input.chapters.length,
-        status: 'running',
-        completedChapters: 0,
-        outputPath: '',
-        error: '',
-        startedAt: now,
-        updatedAt: now
-      }
-      try {
-        await saveDownloadHistoryEntry(dataDirectory(), historyEntry)
-      } catch (error) {
-        activeEpubGeneration = null
-        throw error
-      }
-      const chapters = []
-
-      try {
-        for (let index = 0; index < input.chapters.length; index += 1) {
-          if (controller.signal.aborted) throw new Error('EPUB creation was cancelled.')
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('job:progress', {
-              current: index,
-              total: input.chapters.length,
-              message: `Fetching chapter ${index + 1} of ${input.chapters.length}: ${input.chapters[index].title}`
-            })
-          }
-          const chapterContent = await fetchChapterContent(input.chapters[index], controller.signal)
-          chapters.push(chapterContent)
-          historyEntry.completedChapters = index + 1
-          historyEntry.updatedAt = new Date().toISOString()
-          await saveDownloadHistoryEntry(dataDirectory(), historyEntry)
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('job:progress', {
-              current: index + 1,
-              total: input.chapters.length,
-              message: `Fetched chapter ${index + 1} of ${input.chapters.length}: ${input.chapters[index].title}`
-            })
-          }
-          if (index + 1 < input.chapters.length) {
-            await new Promise((resolveDelay) => setTimeout(resolveDelay, 1000))
-          }
-        }
-
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('job:progress', {
-            current: input.chapters.length,
-            total: input.chapters.length,
-            message: 'Validating and packaging EPUB…'
-          })
-        }
-        const result = await writeEpub(
-          input.outputDirectory,
-          input.title,
-          input.author,
-          input.language,
-          chapters,
-          input.filename,
-          controller.signal
-        )
-        historyEntry.status = 'completed'
-        historyEntry.outputPath = result.outputPath
-        historyEntry.updatedAt = new Date().toISOString()
-        await saveDownloadHistoryEntry(dataDirectory(), historyEntry)
-        return { ok: true, value: result }
-      } catch (error) {
-        historyEntry.status = controller.signal.aborted ? 'cancelled' : 'failed'
-        historyEntry.error = errorMessage(error)
-        historyEntry.updatedAt = new Date().toISOString()
-        await saveDownloadHistoryEntry(dataDirectory(), historyEntry)
-        if (!controller.signal.aborted) console.error('EPUB creation failed:', error)
-        return { ok: false, error: historyEntry.error }
-      } finally {
-        if (activeEpubGeneration === controller) activeEpubGeneration = null
-      }
-    } catch (error) {
-      console.error('EPUB job setup failed:', error)
-      return { ok: false, error: errorMessage(error) }
-    }
-  })
 }
 
 app.whenReady().then(async () => {
   registerIpcHandlers()
   await markInterruptedDownloadJobs(dataDirectory())
-  discoveryQueue = await readDiscoveryQueue(dataDirectory())
+  discoveryQueue = (await readDiscoveryQueue(dataDirectory())).map(hydrateQueueItem)
+  const history = await readDownloadHistory(dataDirectory())
+  let interruptedDownloads = false
+  for (const item of discoveryQueue) {
+    const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+    if (historyEntry && item.downloadOptions) {
+      if (item.status === 'completed' && historyEntry.status !== 'completed') {
+        historyEntry.status = 'completed'
+        historyEntry.outputPath = item.outputPath
+        historyEntry.error = ''
+        historyEntry.updatedAt = item.updatedAt
+        interruptedDownloads = true
+      } else if (item.status === 'partially-completed' && historyEntry.status !== 'partially-completed') {
+        historyEntry.status = 'partially-completed'
+        historyEntry.error = item.error
+        historyEntry.updatedAt = item.updatedAt
+        interruptedDownloads = true
+      } else if (item.status === 'failed' && historyEntry.status !== 'failed') {
+        historyEntry.status = 'failed'
+        historyEntry.error = item.error
+        historyEntry.updatedAt = item.updatedAt
+        interruptedDownloads = true
+      } else if (item.status === 'cancelled' && historyEntry.status !== 'cancelled') {
+        historyEntry.status = 'cancelled'
+        historyEntry.error = ''
+        historyEntry.updatedAt = item.updatedAt
+        interruptedDownloads = true
+      } else if (item.status === 'paused' && historyEntry.status !== 'paused') {
+        historyEntry.status = 'paused'
+        historyEntry.error = ''
+        historyEntry.updatedAt = item.updatedAt
+        interruptedDownloads = true
+      }
+    }
+    if (item.status !== 'downloading' && item.status !== 'queued') continue
+    if (!item.downloadOptions || !historyEntry) {
+      item.status = 'failed'
+      item.error = 'The saved EPUB job or its history entry is missing.'
+      item.updatedAt = new Date().toISOString()
+      interruptedDownloads = true
+      continue
+    }
+    if (item.status === 'downloading' || historyEntry.status === 'running' || historyEntry.status === 'interrupted') {
+      item.status = 'queued'
+      item.error = ''
+      item.queuedAt = new Date().toISOString()
+      item.progress = {
+        current: item.completedChapterUrls.length,
+        total: item.chapters.filter((chapter) => chapter.selected).length,
+        message: 'Resuming after app restart'
+      }
+      historyEntry.status = 'queued'
+      historyEntry.error = ''
+      historyEntry.completedChapters = item.completedChapterUrls.filter((url) =>
+        item.chapters.some((chapter) => chapter.selected && chapter.url === url)
+      ).length
+      historyEntry.updatedAt = new Date().toISOString()
+      interruptedDownloads = true
+    }
+  }
+  if (interruptedDownloads) {
+    await persistDiscoveryQueue()
+    for (const item of discoveryQueue) {
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      if (historyEntry) await persistHistoryEntry(historyEntry)
+    }
+  }
   let interruptedDiscoveries = false
   for (const item of discoveryQueue) {
     if (item.status === 'discovering') {
@@ -809,6 +1668,9 @@ app.whenReady().then(async () => {
     }
   }
   await createWindow()
+  void pumpDownloadQueue().catch((error: unknown) => {
+    console.error('Download queue scheduler failed:', error)
+  })
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) await createWindow()

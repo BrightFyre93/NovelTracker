@@ -4,12 +4,28 @@ import type { ChapterContent, ChapterLink, DiscoveryResult, JobProgress } from '
 const REQUEST_TIMEOUT_MS = 20_000
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_NOVELFULL_CATALOG_PAGES = 200
-const NOVELFULL_PAGE_DELAY_MS = 1000
 const USER_AGENT = 'NovelTrackerEPUB/0.1'
 const CHAPTER_LABEL = /\b(chapter|episode|part|prologue|epilogue|volume)\b|^\s*#?\s*\d+(?:\.\d+)?\s*$/i
 const CHAPTER_URL = /(?:chapter|episode|part|prologue|epilogue)(?:[-_./]|%20)/i
 const BLOCKED_PAGE = /\b(captcha|verify you are human|access denied|403 forbidden|checking your browser)\b/i
 const NOVELFULL_HOSTS = new Set(['novelfull.com', 'novelfull.net'])
+const DEFAULT_DOMAIN_REQUEST_DELAY_MS = 250
+const DOMAIN_REQUEST_DELAYS_MS: Readonly<Record<string, number>> = {
+  'novelfull.com': 250,
+  'novelfull.net': 500
+}
+const domainTails = new Map<string, Promise<void>>()
+const domainNextRequestAt = new Map<string, number>()
+
+export class HttpStatusError extends Error {
+  constructor(
+    readonly status: number,
+    readonly retryAfterMs: number | null
+  ) {
+    super(`The page returned HTTP ${status}.`)
+    this.name = 'HttpStatusError'
+  }
+}
 
 export function validateHttpUrl(value: unknown): string {
   if (typeof value !== 'string' || value.length > 2048) {
@@ -31,7 +47,73 @@ export function validateHttpUrl(value: unknown): string {
   return url.href
 }
 
+async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() => void> {
+  const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
+  const requestDelayMs = DOMAIN_REQUEST_DELAYS_MS[hostname] ?? DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  const previous = domainTails.get(hostname) ?? Promise.resolve()
+  let release!: () => void
+  const hold = new Promise<void>((resolveHold) => {
+    release = resolveHold
+  })
+  const tail = previous.then(() => hold)
+  domainTails.set(hostname, tail)
+  const removeTailWhenSettled = (): void => {
+    if (domainTails.get(hostname) === tail) domainTails.delete(hostname)
+  }
+  void tail.then(removeTailWhenSettled, removeTailWhenSettled)
+
+  let requestStarted = false
+  try {
+    if (signal) {
+      await new Promise<void>((resolveTurn, rejectTurn) => {
+        const abort = (): void => {
+          signal.removeEventListener('abort', abort)
+          rejectTurn(new Error('EPUB creation was cancelled.'))
+        }
+        signal.addEventListener('abort', abort, { once: true })
+        previous.then(() => {
+          signal.removeEventListener('abort', abort)
+          resolveTurn()
+        }, (error: unknown) => {
+          signal.removeEventListener('abort', abort)
+          rejectTurn(error)
+        })
+        if (signal.aborted) abort()
+      })
+    } else {
+      await previous
+    }
+    const wait = Math.max(0, (domainNextRequestAt.get(hostname) ?? 0) - Date.now())
+    if (wait > 0) {
+      await new Promise<void>((resolveWait, rejectWait) => {
+        let timer: ReturnType<typeof setTimeout>
+        const abort = (): void => {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', abort)
+          rejectWait(new Error('EPUB creation was cancelled.'))
+        }
+        timer = setTimeout(() => {
+          signal?.removeEventListener('abort', abort)
+          resolveWait()
+        }, wait)
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+      })
+    }
+    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    requestStarted = true
+    return () => {
+      if (requestStarted) domainNextRequestAt.set(hostname, Date.now() + requestDelayMs)
+      release()
+    }
+  } catch (error) {
+    release()
+    throw error
+  }
+}
+
 async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ html: string; finalUrl: string }> {
+  const releaseDomain = await acquireDomainSlot(url, operationSignal)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   const abortOperation = () => controller.abort()
@@ -49,7 +131,17 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     })
 
     if (!response.ok) {
-      throw new Error(`The page returned HTTP ${response.status}.`)
+      const retryAfter = response.headers.get('retry-after')
+      let retryAfterMs: number | null = null
+      if (retryAfter) {
+        const seconds = Number(retryAfter)
+        const retryDate = Date.parse(retryAfter)
+        if (Number.isFinite(seconds) && seconds >= 0 && Number.isFinite(seconds * 1000)) {
+          retryAfterMs = seconds * 1000
+        }
+        else if (Number.isFinite(retryDate)) retryAfterMs = Math.max(0, retryDate - Date.now())
+      }
+      throw new HttpStatusError(response.status, retryAfterMs)
     }
 
     const finalUrl = validateHttpUrl(response.url)
@@ -99,6 +191,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
   } finally {
     clearTimeout(timeout)
     operationSignal?.removeEventListener('abort', abortOperation)
+    releaseDomain()
   }
 }
 
@@ -135,8 +228,8 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
     throw new Error('The source requires manual verification; discovery was not continued.')
   }
   const title =
-    $('.books .desc h3.title').first().text().replace(/\s+/g, ' ').trim() ||
-    $('h3.title').first().text().replace(/\s+/g, ' ').trim()
+    $('.books .desc h3.title, .m-desc h1.tit').first().text().replace(/\s+/g, ' ').trim() ||
+    $('h3.title, h1.tit').first().text().replace(/\s+/g, ' ').trim()
   const authorHeading = $('h3').filter((_, element) => /^author\s*:?$/i.test($(element).text().trim())).first()
   const authorLinks = authorHeading.length
     ? authorHeading.parent().find('a[href*="/author/"]')
@@ -148,7 +241,7 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
   })
 
   const chaptersByUrl = new Map<string, ChapterLink>()
-  $('ul.list-chapter').each((listIndex, list) => {
+  $('ul.list-chapter, #list-chapter ul#idData, #list-chapter ul.ul-list5').each((listIndex, list) => {
     if ($(list).closest('.l-chapters').length > 0) return
     $(list).find('a[href]').each((linkIndex, element) => {
       const label = $(element).text().replace(/\s+/g, ' ').trim()
@@ -174,7 +267,7 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
 
   const base = new URL(url)
   let pageCount = 1
-  $('.pagination-sm a[href]').each((_, element) => {
+  $('.pagination-sm a[href], #list-chapter .page a[href]').each((_, element) => {
     try {
       const link = new URL($(element).attr('href')!, url)
       const page = Number(link.searchParams.get('page') ?? 1)
@@ -295,7 +388,6 @@ async function discoverNovelFullChapters(
   })
 
   for (let pageNumber = 2; pageNumber <= firstPage.pageCount; pageNumber += 1) {
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, NOVELFULL_PAGE_DELAY_MS))
     const pageUrl = new URL(catalogUrl)
     pageUrl.searchParams.set('page', String(pageNumber))
     const response = await fetchHtml(pageUrl.href)
