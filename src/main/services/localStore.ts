@@ -9,12 +9,20 @@ import type {
   LibraryFileCorrection,
   LibraryIndex
 } from '../../shared/contracts'
+import { DEFAULT_EPUB_CSS, MAX_EPUB_CSS_LENGTH } from '../../shared/defaultEpubCss'
+import {
+  EPUB_IMAGE_TYPES,
+  MAX_CHAPTER_IMAGE_BYTES,
+  MAX_CHAPTER_IMAGES,
+  MAX_IMAGE_BYTES
+} from '../../shared/epubImages'
 
 const EMPTY_SETTINGS: AppSettings = {
   libraryRoot: '',
   trackerCsvPath: '',
   outputDirectory: '',
-  maxSimultaneousDownloads: 2
+  maxSimultaneousDownloads: 2,
+  epubCss: DEFAULT_EPUB_CSS
 }
 const fileWriteTails = new Map<string, Promise<void>>()
 let downloadHistoryWriteTail = Promise.resolve()
@@ -92,7 +100,12 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 
 export async function readSettings(dataDirectory: string): Promise<AppSettings> {
   const saved = await readJson<Partial<AppSettings>>(join(dataDirectory, 'settings.json'), {})
-  return { ...EMPTY_SETTINGS, ...saved }
+  const settings = { ...EMPTY_SETTINGS, ...saved }
+  if (saved.epubCss === undefined) settings.epubCss = DEFAULT_EPUB_CSS
+  else if (typeof settings.epubCss !== 'string' || settings.epubCss.length > MAX_EPUB_CSS_LENGTH) {
+    throw new Error('The saved EPUB stylesheet is invalid or exceeds the size limit.')
+  }
+  return settings
 }
 
 export function writeSettings(dataDirectory: string, settings: AppSettings): Promise<void> {
@@ -140,14 +153,74 @@ export async function readChapterArtifact(
     chapterArtifactPath(dataDirectory, queueItemId, chapterUrl),
     null
   )
+  const images = artifact?.images ?? []
   if (
     artifact !== null &&
     (typeof artifact.title !== 'string' ||
       typeof artifact.url !== 'string' ||
       !Array.isArray(artifact.paragraphs) ||
-      artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string'))
+      artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string') ||
+      !Array.isArray(images) ||
+      images.length > MAX_CHAPTER_IMAGES)
   ) {
     throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+  }
+  if (artifact) {
+    let totalImageBytes = 0
+    for (const image of images) {
+      if (
+        typeof image !== 'object' ||
+        image === null ||
+        typeof image.sourceUrl !== 'string' ||
+        typeof image.mediaType !== 'string' ||
+        !Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, image.mediaType) ||
+        typeof image.dataBase64 !== 'string' ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image.dataBase64)
+      ) {
+        throw new Error('A saved chapter artifact contains invalid image data and must be fetched again.')
+      }
+      let source: URL
+      try {
+        source = new URL(image.sourceUrl)
+      } catch {
+        throw new Error('A saved chapter artifact contains an invalid image URL and must be fetched again.')
+      }
+      if (
+        (source.protocol !== 'http:' && source.protocol !== 'https:') ||
+        source.username ||
+        source.password
+      ) {
+        throw new Error('A saved chapter artifact contains an invalid image URL and must be fetched again.')
+      }
+      const imageBytes = Buffer.byteLength(image.dataBase64, 'base64')
+      if (imageBytes === 0 || imageBytes > MAX_IMAGE_BYTES) {
+        throw new Error('A saved chapter artifact image exceeds its size limit and must be fetched again.')
+      }
+      totalImageBytes += imageBytes
+      if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
+        throw new Error('A saved chapter artifact exceeds its image size limit and must be fetched again.')
+      }
+    }
+
+    if (artifact.blocks !== undefined) {
+      if (!Array.isArray(artifact.blocks)) {
+        throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
+      }
+      for (const block of artifact.blocks) {
+        if (
+          typeof block !== 'object' ||
+          block === null ||
+          (block.type === 'paragraph' && typeof block.text === 'string') ||
+          (block.type === 'image' &&
+            Number.isInteger(block.imageIndex) &&
+            block.imageIndex >= 0 &&
+            block.imageIndex < images.length &&
+            typeof block.alt === 'string' &&
+            block.alt.length <= 1000)
+        ) continue
+        throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
+      }
+    }
   }
   return artifact
 }

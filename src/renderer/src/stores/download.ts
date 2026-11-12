@@ -16,6 +16,12 @@ export const useDownloadStore = defineStore('download', {
     url: '',
     title: '',
     author: '',
+    description: '',
+    coverUrl: '',
+    alternativeNames: [] as string[],
+    genres: [] as string[],
+    source: '',
+    novelStatus: '',
     language: 'en',
     filename: '',
     trackerRow: null as { stableId: string; rowNumber: number; title: string; csvPath: string } | null,
@@ -39,6 +45,12 @@ export const useDownloadStore = defineStore('download', {
       this.url = result.sourceUrl
       this.title = result.title || 'Untitled'
       this.author = result.author
+      this.description = result.description
+      this.coverUrl = result.coverUrl
+      this.alternativeNames = [...result.alternativeNames]
+      this.genres = [...result.genres]
+      this.source = result.source
+      this.novelStatus = result.novelStatus
       this.filename = ''
       this.chapters = result.chapters.map((chapter) => ({ ...chapter, selected: true }))
       this.parserName = result.parserName

@@ -1,8 +1,20 @@
+import { createHash } from 'node:crypto'
+import { lookup } from 'node:dns/promises'
 import { load } from 'cheerio'
-import type { ChapterContent, ChapterLink, DiscoveryResult, JobProgress } from '../../shared/contracts'
+import { isIP } from 'node:net'
+import type {
+  ChapterContent,
+  ChapterContentBlock,
+  ChapterImage,
+  ChapterLink,
+  DiscoveryResult,
+  JobProgress
+} from '../../shared/contracts'
+import { EPUB_IMAGE_TYPES, MAX_CHAPTER_IMAGE_BYTES, MAX_CHAPTER_IMAGES, MAX_IMAGE_BYTES, type EpubImageMediaType } from '../../shared/epubImages'
 
 const REQUEST_TIMEOUT_MS = 20_000
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+const IMAGE_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
 const MAX_NOVELFULL_CATALOG_PAGES = 200
 const USER_AGENT = 'NovelTrackerEPUB/0.1'
 const CHAPTER_LABEL = /\b(chapter|episode|part|prologue|epilogue|volume)\b|^\s*#?\s*\d+(?:\.\d+)?\s*$/i
@@ -195,6 +207,165 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
   }
 }
 
+function responseRetryAfter(response: Response): number | null {
+  const retryAfter = response.headers.get('retry-after')
+  if (!retryAfter) return null
+  const seconds = Number(retryAfter)
+  const retryDate = Date.parse(retryAfter)
+  if (Number.isFinite(seconds) && seconds >= 0 && Number.isFinite(seconds * 1000)) return seconds * 1000
+  return Number.isFinite(retryDate) ? Math.max(0, retryDate - Date.now()) : null
+}
+
+function imageMediaType(data: Uint8Array): EpubImageMediaType {
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'image/jpeg'
+  if (
+    data.length >= 8 &&
+    data[0] === 0x89 &&
+    data[1] === 0x50 &&
+    data[2] === 0x4e &&
+    data[3] === 0x47 &&
+    data[4] === 0x0d &&
+    data[5] === 0x0a &&
+    data[6] === 0x1a &&
+    data[7] === 0x0a
+  ) return 'image/png'
+  if (data.length >= 6) {
+    const signature = String.fromCharCode(...data.subarray(0, 6))
+    if (signature === 'GIF87a' || signature === 'GIF89a') return 'image/gif'
+  }
+  if (
+    data.length >= 12 &&
+    String.fromCharCode(...data.subarray(0, 4)) === 'RIFF' &&
+    String.fromCharCode(...data.subarray(8, 12)) === 'WEBP'
+  ) return 'image/webp'
+  throw new Error('An image is not a supported JPEG, PNG, GIF, or WebP file.')
+}
+
+function isPublicAddress(address: string): boolean {
+  const normalized = address.toLowerCase().split('%')[0]
+  if (isIP(normalized) === 4) {
+    const [first, second, third] = normalized.split('.').map(Number)
+    return !(
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      first >= 224 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 192 && second === 0 && (third === 0 || third === 2)) ||
+      (first === 192 && second === 88 && third === 99) ||
+      (first === 198 && (second === 18 || second === 19 || second === 51)) ||
+      (first === 203 && second === 0 && third === 113)
+    )
+  }
+  if (isIP(normalized) === 6) {
+    return !(
+      normalized === '::' ||
+      normalized === '::1' ||
+      normalized.startsWith('::ffff:') ||
+      /^f[cd]/.test(normalized) ||
+      /^fe[89ab]/.test(normalized) ||
+      normalized.startsWith('ff') ||
+      normalized.startsWith('2001:db8:')
+    )
+  }
+  return false
+}
+
+async function validateImageHost(value: string, pageOrigin: string): Promise<void> {
+  const url = new URL(value)
+  if (url.origin === pageOrigin) return
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, '')
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) {
+    throw new Error('An image URL points to a non-public host.')
+  }
+
+  let addresses: { address: string }[]
+  try {
+    addresses = isIP(hostname)
+      ? [{ address: hostname }]
+      : await lookup(hostname, { all: true, verbatim: true })
+  } catch (error) {
+    throw new Error(`The image host could not be verified: ${error instanceof Error ? error.message : String(error)}.`)
+  }
+  if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) {
+    throw new Error('An image URL points to a non-public host.')
+  }
+}
+
+export async function fetchImageResource(
+  value: unknown,
+  sourceUrl: string,
+  operationSignal?: AbortSignal
+): Promise<ChapterImage> {
+  const pageOrigin = new URL(validateHttpUrl(sourceUrl)).origin
+  let url = validateHttpUrl(value)
+
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    await validateImageHost(url, pageOrigin)
+    const releaseDomain = await acquireDomainSlot(url, operationSignal)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    const abortOperation = () => controller.abort()
+    operationSignal?.addEventListener('abort', abortOperation, { once: true })
+    try {
+      if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
+      const response = await fetch(url, {
+        headers: { Accept: IMAGE_ACCEPT_HEADER, 'User-Agent': USER_AGENT },
+        redirect: 'manual',
+        signal: controller.signal
+      })
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location')
+        if (!location) throw new Error('The image redirect did not include a destination.')
+        const redirectedUrl = validateHttpUrl(new URL(location, url).href)
+        await validateImageHost(redirectedUrl, pageOrigin)
+        if (redirects === 5) throw new Error('The image redirected too many times.')
+        url = redirectedUrl
+        continue
+      }
+      if (!response.ok) throw new HttpStatusError(response.status, responseRetryAfter(response))
+      const finalUrl = validateHttpUrl(response.url || url)
+      await validateImageHost(finalUrl, pageOrigin)
+      const declaredLength = Number(response.headers.get('content-length') ?? 0)
+      if (declaredLength > MAX_IMAGE_BYTES) throw new Error('An image exceeds the 4 MB size limit.')
+      if (!response.body) throw new Error('The image response had no readable content.')
+
+      const reader = response.body.getReader()
+      const chunks: Uint8Array[] = []
+      let totalLength = 0
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        totalLength += value.byteLength
+        if (totalLength > MAX_IMAGE_BYTES) {
+          await reader.cancel()
+          throw new Error('An image exceeds the 4 MB size limit.')
+        }
+        chunks.push(value)
+      }
+
+      const data = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), totalLength)
+      const mediaType = imageMediaType(data)
+      if (!Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, mediaType)) {
+        throw new Error('An image uses an unsupported format.')
+      }
+      return { sourceUrl: finalUrl, mediaType, dataBase64: data.toString('base64') }
+    } catch (error) {
+      if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
+      if (error instanceof Error && error.name === 'AbortError') throw new Error('The image request timed out.')
+      throw error
+    } finally {
+      clearTimeout(timeout)
+      operationSignal?.removeEventListener('abort', abortOperation)
+      releaseDomain()
+    }
+  }
+  throw new Error('The image redirected too many times.')
+}
+
 function documentTitle($: ReturnType<typeof load>): string {
   return (
     $('meta[property="og:title"]').attr('content')?.trim() ||
@@ -216,8 +387,197 @@ function isNovelFullUrl(value: string): boolean {
 interface NovelFullCatalogPage {
   title: string
   author: string
+  description: string
+  coverUrl: string
+  alternativeNames: string[]
+  genres: string[]
+  source: string
+  novelStatus: string
   chapters: ChapterLink[]
   pageCount: number
+}
+
+interface NovelPageMetadata {
+  author: string
+  description: string
+  coverUrl: string
+  alternativeNames: string[]
+  genres: string[]
+  source: string
+  novelStatus: string
+}
+
+function genericNovelMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPageMetadata {
+  const contentRoot = $('main, article, .novel-info, .book-info, .book-detail').first()
+  const root = contentRoot.length ? contentRoot : $('body')
+  const labeledField = (labels: string[]): string => {
+    const pattern = new RegExp(`^(${labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\s*:?\\s*(.*)$`, 'i')
+    for (const element of root.find('p, li, dt, dd, tr, .item').toArray()) {
+      const text = normalizedText($(element).text())
+      const match = pattern.exec(text)
+      if (match?.[2]) return match[2]
+      if (match && $(element).is('dt')) {
+        const next = normalizedText($(element).next().text())
+        if (next) return next
+      }
+    }
+    return ''
+  }
+  const coverValue =
+    $('meta[property="og:image"]').attr('content') ||
+    $('meta[name="twitter:image"]').attr('content') ||
+    $('meta[name="image"]').attr('content') ||
+    root.find('img[itemprop="image"], .cover img, .book-cover img').first().attr('src') ||
+    ''
+  let coverUrl = ''
+  if (coverValue) {
+    try {
+      coverUrl = validateHttpUrl(new URL(coverValue, pageUrl).href)
+    } catch {
+      coverUrl = ''
+    }
+  }
+  const genres = [
+    ...root.find('[itemprop="genre"], .genre a, .genres a, a[rel="tag"], a[href*="/genre/"], a[href*="/genres/"]')
+      .toArray()
+      .map((element) => $(element).text()),
+    ...$('meta[property="article:tag"], meta[name="genre"], meta[name="book:genre"]')
+      .toArray()
+      .map((element) => $(element).attr('content') ?? '')
+  ]
+  const description =
+    $('.books .desc-text, [itemprop="description"], .description, .desc-text, .book-summary, .summary').first().text() ||
+    $('meta[property="og:description"]').attr('content') ||
+    $('meta[name="description"]').attr('content') ||
+    $('meta[name="twitter:description"]').attr('content') ||
+    labeledField(['Description', 'Summary', 'Synopsis'])
+  const author =
+    $('meta[name="author"]').attr('content') ||
+    root.find('[itemprop="author"], .author a, .author').first().text() ||
+    labeledField(['Authors?', 'Writers?'])
+  const alternativeNames = uniqueText(
+    [
+      ...root.find('[itemprop="alternativeName"], .alternative-names, .alternate-names, .alternative-name, .alt-names')
+        .toArray()
+        .map((element) => $(element).text()),
+      labeledField(['Alternative names?', 'Also known as', 'Other names', 'Aliases'])
+    ]
+  )
+
+  return {
+    author: normalizedText(author),
+    description: normalizedText(description).slice(0, 20_000),
+    coverUrl,
+    alternativeNames,
+    genres: uniqueText([...genres, labeledField(['Genres?'])]),
+    source: (
+      normalizedText(root.find('[itemprop="publisher"], .source').first().text()) ||
+      labeledField(['Source', 'Publisher', 'Origin']) ||
+      new URL(pageUrl).hostname
+    ).slice(0, 300),
+    novelStatus: (
+      normalizedText(root.find('[itemprop="bookStatus"], .novel-status, .book-status, .status').first().text()) ||
+      labeledField(['Status', 'Novel status', 'State'])
+    ).slice(0, 300)
+  }
+}
+
+function normalizedText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function uniqueText(values: string[], limit = 100): string[] {
+  const unique = new Set<string>()
+  for (const value of values) {
+    const text = normalizedText(value)
+    if (text && text.length <= 300) unique.add(text)
+    if (unique.size >= limit) break
+  }
+  return [...unique]
+}
+
+function novelFullInfoRow($: ReturnType<typeof load>, labels: string[]) {
+  const expected = new Set(labels.map((label) => label.toLowerCase()))
+  const rows = $('.m-imgtxt .txt .item, .info-holder .info > div')
+  return rows
+    .filter((_, element) => {
+      const label =
+        $(element).find('[title]').first().attr('title')?.trim().replace(/:$/, '').toLowerCase() ||
+        $(element).children('h3').first().text().trim().replace(/:$/, '').toLowerCase()
+      return expected.has(label)
+    })
+    .first()
+}
+
+function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPageMetadata {
+  const generic = genericNovelMetadata($, pageUrl)
+  const infoRow = (labels: string[]) => novelFullInfoRow($, labels)
+  const infoValue = (labels: string[]): string => {
+    const row = infoRow(labels)
+    if (!row.length) return ''
+    const value = row.clone()
+    value.children('h3').remove()
+    value.find('span[title]').remove()
+    return normalizedText(value.text())
+  }
+  const summary = $('.m-desc .txt').first()
+  const classicDescription = $('.col-info-desc .desc-text, .desc-text').first().text()
+  const coverValue =
+    $('meta[property="og:image"]').attr('content') ||
+    $('meta[name="twitter:image"]').attr('content') ||
+    $('meta[name="image"]').attr('content') ||
+    $('.info-holder .book img').first().attr('src') ||
+    $('.m-imgtxt img, .books .cover img, .book-cover img').first().attr('src') ||
+    ''
+  let coverUrl = ''
+  if (coverValue) {
+    try {
+      coverUrl = validateHttpUrl(new URL(coverValue, pageUrl).href)
+    } catch {
+      coverUrl = ''
+    }
+  }
+
+  const alternativeNames = uniqueText([
+    ...$('[itemprop="alternativeName"], .alternative-names, .alternate-names, .alternative-name, .alt-names')
+      .toArray()
+      .map((element) => $(element).text()),
+    ...infoValue([
+      'Alternative names',
+      'Alternative name',
+      'Alternative titles',
+      'Also known as',
+      'Other names',
+      'Aliases'
+    ]).split(/\s*,\s*/)
+  ])
+  const author = infoValue(['Author', 'Authors', 'Writer']) || generic.author
+  const genres = uniqueText(
+    infoRow(['Genre', 'Genres', 'Genre(s)', 'Category', 'Categories'])
+      .find('a')
+      .toArray()
+      .map((element) => $(element).text())
+  )
+
+  return {
+    author,
+    description: normalizedText(
+      classicDescription ||
+      summary.text() ||
+      $('meta[property="og:description"]').attr('content') ||
+      ''
+    ).slice(0, 20_000) || generic.description,
+    coverUrl: coverUrl || generic.coverUrl,
+    alternativeNames,
+    genres: genres.length > 0 ? genres : generic.genres,
+    source: (
+      infoValue(['Source', 'Origin', 'Publisher', 'Original source']) || generic.source
+    ).slice(0, 300),
+    novelStatus: (
+      infoValue(['Status', 'State', 'Novel status', 'Translation status']) ||
+      generic.novelStatus
+    ).slice(0, 300)
+  }
 }
 
 export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelFullCatalogPage {
@@ -239,6 +599,7 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
     const author = $(element).text().replace(/\s+/g, ' ').trim()
     if (author) authors.add(author)
   })
+  const metadata = novelFullMetadata($, url)
 
   const chaptersByUrl = new Map<string, ChapterLink>()
   $('ul.list-chapter, #list-chapter ul#idData, #list-chapter ul.ul-list5').each((listIndex, list) => {
@@ -279,7 +640,13 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
     }
   })
 
-  return { title, author: [...authors].join(', '), chapters: [...chaptersByUrl.values()], pageCount }
+  return {
+    ...metadata,
+    title,
+    author: [...authors].join(', ') || metadata.author,
+    chapters: [...chaptersByUrl.values()],
+    pageCount
+  }
 }
 
 function chapterLinksFromHtml(html: string, pageUrl: string): ChapterLink[] {
@@ -322,8 +689,8 @@ function chapterLinksFromHtml(html: string, pageUrl: string): ChapterLink[] {
 export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult {
   const url = validateHttpUrl(pageUrl)
   const $ = load(html)
-  const title = documentTitle($)
-  const author = $('meta[name="author"]').attr('content')?.trim() ?? ''
+  const metadata = genericNovelMetadata($, url)
+  const title = $('h1').first().text().trim() || documentTitle($)
   const pageText = $('body').text().replace(/\s+/g, ' ').trim()
   if (BLOCKED_PAGE.test(`${title} ${pageText.slice(0, 1000)}`)) {
     throw new Error('The source requires manual verification; discovery was not continued.')
@@ -331,7 +698,13 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
   const chapters = chapterLinksFromHtml(html, url)
 
   if (chapters.length > 0) {
-    return { sourceUrl: url, title, author, parserName: 'Generic HTML', chapters }
+    return {
+      sourceUrl: url,
+      title,
+      ...metadata,
+      parserName: 'Generic HTML',
+      chapters
+    }
   }
 
   const novelFullChapterTitle = isNovelFullUrl(url)
@@ -352,7 +725,7 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
     return {
       sourceUrl: url,
       title,
-      author,
+      ...metadata,
       parserName: 'Generic HTML',
       chapters: [{ id: 'chapter-1', title: directTitle, url }]
     }
@@ -415,6 +788,12 @@ async function discoverNovelFullChapters(
     sourceUrl: sourceUrl.href,
     title: firstPage.title,
     author: firstPage.author,
+    description: firstPage.description,
+    coverUrl: firstPage.coverUrl,
+    alternativeNames: firstPage.alternativeNames,
+    genres: firstPage.genres,
+    source: firstPage.source,
+    novelStatus: firstPage.novelStatus,
     parserName: 'NovelFull',
     chapters
   }
@@ -458,7 +837,30 @@ function normalizeParagraph(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
 
-export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTitle: string): ChapterContent {
+interface ExtractedChapter {
+  content: ChapterContent
+  imageReferences: { key: string; url?: string; inline?: ChapterImage }[]
+}
+
+function inlineImageResource(value: string, pageUrl: string): ChapterImage {
+  const match = /^data:(image\/(?:jpeg|png|gif|webp));base64,([A-Za-z0-9+/=]+)$/i.exec(value)
+  if (!match) throw new Error('A chapter contains an unsupported inline image.')
+  const data = Buffer.from(match[2], 'base64')
+  if (
+    data.length === 0 ||
+    data.length > MAX_IMAGE_BYTES ||
+    data.toString('base64') !== match[2]
+  ) {
+    throw new Error('An inline chapter image exceeds the 4 MB size limit or is malformed.')
+  }
+  const mediaType = imageMediaType(data)
+  if (mediaType !== match[1].toLowerCase()) {
+    throw new Error('An inline chapter image has mismatched image data.')
+  }
+  return { sourceUrl: pageUrl, mediaType, dataBase64: data.toString('base64') }
+}
+
+function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: string): ExtractedChapter {
   const url = validateHttpUrl(pageUrl)
   const $ = load(html)
   const root = chapterRoot($)
@@ -473,13 +875,61 @@ export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTi
     throw new Error('No readable chapter content was found on this page.')
   }
 
-  const paragraphs = root
-    .find('p')
-    .toArray()
-    .map((paragraph) => normalizeParagraph($(paragraph).text()))
-    .filter((paragraph) => paragraph.length > 0)
+  const paragraphs: string[] = []
+  const blocks: ChapterContentBlock[] = []
+  const imageReferences: ExtractedChapter['imageReferences'] = []
+  const imageIndexes = new Map<string, number>()
+
+  for (const element of root.find('p, img').toArray()) {
+    const tagName = element.tagName?.toLowerCase()
+    if (tagName === 'p') {
+      const paragraph = normalizeParagraph($(element).text())
+      if (paragraph) {
+        paragraphs.push(paragraph)
+        blocks.push({ type: 'paragraph', text: paragraph })
+      }
+      continue
+    }
+
+    if (tagName !== 'img') continue
+    const source =
+      $(element).attr('data-original') ||
+      $(element).attr('data-lazy-src') ||
+      $(element).attr('data-src') ||
+      $(element).attr('data-srcset')?.split(',')[0].trim().split(/\s+/)[0] ||
+      $(element).attr('src') ||
+      $(element).attr('srcset')?.split(',')[0].trim().split(/\s+/)[0] ||
+      ''
+    if (!source) continue
+
+    let key: string
+    let urlValue: string | undefined
+    let inline: ChapterImage | undefined
+    if (source.startsWith('data:')) {
+      inline = inlineImageResource(source, url)
+      key = `data:${createHash('sha256').update(inline.dataBase64).digest('hex')}`
+    } else {
+      urlValue = validateHttpUrl(new URL(source, url).href)
+      key = urlValue
+    }
+    let imageIndex = imageIndexes.get(key)
+    if (imageIndex === undefined) {
+      if (imageReferences.length >= MAX_CHAPTER_IMAGES) {
+        throw new Error(`A chapter contains more than ${MAX_CHAPTER_IMAGES} images.`)
+      }
+      imageIndex = imageReferences.length
+      imageIndexes.set(key, imageIndex)
+      imageReferences.push({ key, url: urlValue, inline })
+    }
+    blocks.push({
+      type: 'image',
+      imageIndex,
+      alt: normalizeParagraph($(element).attr('alt') ?? '').slice(0, 1000)
+    })
+  }
 
   const readableParagraphs = paragraphs.length > 0 ? paragraphs : [text]
+  if (paragraphs.length === 0) blocks.unshift({ type: 'paragraph', text })
   const novelFullChapterTitle = isNovelFullUrl(url)
     ? $('.chapter-title').first().text().replace(/\s+/g, ' ').trim() ||
       $('h1, h2, h3')
@@ -488,14 +938,35 @@ export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTi
         .find((heading) => CHAPTER_LABEL.test(heading))
     : ''
   return {
-    title: novelFullChapterTitle || $('h1').first().text().trim() || pageTitle || fallbackTitle,
-    url,
-    paragraphs: readableParagraphs
+    content: {
+      title: novelFullChapterTitle || $('h1').first().text().trim() || pageTitle || fallbackTitle,
+      url,
+      paragraphs: readableParagraphs,
+      blocks
+    },
+    imageReferences
   }
+}
+
+export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTitle: string): ChapterContent {
+  const { content } = extractChapterStructure(html, pageUrl, fallbackTitle)
+  return { title: content.title, url: content.url, paragraphs: content.paragraphs }
 }
 
 export async function fetchChapterContent(chapter: ChapterLink, signal?: AbortSignal): Promise<ChapterContent> {
   const url = validateHttpUrl(chapter.url)
   const { html, finalUrl } = await fetchHtml(url, signal)
-  return extractChapterFromHtml(html, finalUrl, chapter.title)
+  const { content, imageReferences } = extractChapterStructure(html, finalUrl, chapter.title)
+  const images: ChapterImage[] = []
+  let totalImageBytes = 0
+  for (const image of imageReferences) {
+    const resource = image.inline ?? await fetchImageResource(image.url, content.url, signal)
+    const imageBytes = Buffer.byteLength(resource.dataBase64, 'base64')
+    totalImageBytes += imageBytes
+    if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
+      throw new Error(`A chapter contains more than ${MAX_CHAPTER_IMAGE_BYTES / 1024 / 1024} MB of images.`)
+    }
+    images.push(resource)
+  }
+  return { ...content, images }
 }

@@ -306,11 +306,17 @@ async function queueRecommendedEpub(item: DiscoveryQueueItem): Promise<string | 
   const input: GenerateEpubInput = {
     title: currentItem.title,
     author: currentItem.author,
+    description: currentItem.description,
+    coverUrl: currentItem.coverUrl,
+    alternativeNames: [...currentItem.alternativeNames],
+    genres: [...currentItem.genres],
+    source: currentItem.source,
+    novelStatus: currentItem.novelStatus,
     language: 'en',
     sourceUrl: currentItem.sourceUrl,
     outputDirectory: outputDirectory.value,
     chapters,
-    trackerRow: currentItem.trackerRow ?? undefined
+    trackerRow: currentItem.trackerRow ? { ...currentItem.trackerRow } : undefined
   }
   const result = await window.novelTracker.enqueueEpub(input, currentItem.id)
   return result.ok ? null : `${item.title}: ${result.error}`

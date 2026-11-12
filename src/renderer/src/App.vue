@@ -34,6 +34,12 @@ const {
   url,
   title,
   author,
+  description,
+  coverUrl,
+  alternativeNames,
+  genres,
+  source,
+  novelStatus,
   language,
   filename,
   chapters,
@@ -93,6 +99,12 @@ watch(url, (value) => {
     chapters.value = []
     title.value = ''
     author.value = ''
+    description.value = ''
+    coverUrl.value = ''
+    alternativeNames.value = []
+    genres.value = []
+    source.value = ''
+    novelStatus.value = ''
     filename.value = ''
     parserName.value = ''
     store.success = ''
@@ -195,14 +207,47 @@ async function openTrackerPicker(): Promise<void> {
 }
 
 async function openCreateView(): Promise<void> {
-  activeView.value = 'create'
   try {
+    if (store.queueItemId) {
+      const queue = await window.novelTracker.getDiscoveryQueue()
+      const currentItem = queue.find((item) => item.id === store.queueItemId)
+      if (!currentItem || (currentItem.status !== 'needs-review' && currentItem.status !== 'ready')) {
+        resetDiscoveryForm()
+      }
+    }
+    activeView.value = 'create'
     const settings = await window.novelTracker.getSettings()
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
     trackerCsvPath.value = settings.trackerCsvPath
   } catch (error) {
+    activeView.value = 'create'
     store.error = error instanceof Error ? error.message : String(error)
   }
+}
+
+function resetDiscoveryForm(): void {
+  if (queueSelectionTimer) {
+    clearTimeout(queueSelectionTimer)
+    queueSelectionTimer = undefined
+  }
+  store.queueItemId = ''
+  store.sourceUrl = ''
+  store.url = ''
+  store.title = ''
+  store.author = ''
+  store.description = ''
+  store.coverUrl = ''
+  store.alternativeNames = []
+  store.genres = []
+  store.source = ''
+  store.novelStatus = ''
+  store.filename = ''
+  store.trackerRow = null
+  store.trackerSourceUrl = ''
+  store.parserName = ''
+  store.chapters = []
+  chapterSearch.value = ''
+  trackerVisible.value = false
 }
 
 function useTrackerNovel(novel: TrackerNovel): void {
@@ -240,6 +285,12 @@ function openQueueItem(item: DiscoveryQueueItem): void {
   store.sourceUrl = item.sourceUrl
   store.title = item.title
   store.author = item.author
+  store.description = item.description
+  store.coverUrl = item.coverUrl
+  store.alternativeNames = [...item.alternativeNames]
+  store.genres = [...item.genres]
+  store.source = item.source
+  store.novelStatus = item.novelStatus
   store.parserName = item.parserName
   store.chapters = item.chapters.map((chapter) => ({ ...chapter }))
   store.queueItemId = item.id
@@ -255,7 +306,7 @@ async function persistQueueSelection(
   id = store.queueItemId,
   selectedUrls = store.chapters.filter((chapter) => chapter.selected).map((chapter) => chapter.url)
 ): Promise<boolean> {
-  if (!id) return true
+  if (!id || id !== store.queueItemId) return true
   try {
     const result = await window.novelTracker.updateDiscoveryQueueSelection(id, selectedUrls)
     if (!result.ok) throw new Error(result.error)
@@ -274,6 +325,7 @@ watch(chapters, (updatedChapters) => {
   if (queueSelectionTimer) clearTimeout(queueSelectionTimer)
   queueSelectionTimer = setTimeout(() => {
     queueSelectionTimer = undefined
+    if (store.queueItemId !== id || activeView.value !== 'create') return
     void persistQueueSelection(id, selectedUrls)
   }, 250)
 }, { deep: true })
@@ -287,10 +339,17 @@ async function createEpub(): Promise<void> {
   }
   if (!(await persistQueueSelection())) return
   store.busy = true
+  const queuedTitle = store.title
   try {
     const result = await window.novelTracker.enqueueEpub({
       title: store.title,
       author: store.author,
+      description: store.description,
+      coverUrl: store.coverUrl,
+      alternativeNames: [...store.alternativeNames],
+      genres: [...store.genres],
+      source: store.source,
+      novelStatus: store.novelStatus,
       language: store.language,
       filename: store.filename.trim() || filenamePreview.value,
       sourceUrl: store.sourceUrl,
@@ -298,14 +357,14 @@ async function createEpub(): Promise<void> {
       chapters: store.chapters
         .filter((chapter) => chapter.selected)
         .map(({ id, title, url }) => ({ id, title, url })),
-      trackerRow: store.trackerRow ?? undefined
+      trackerRow: store.trackerRow ? { ...store.trackerRow } : undefined
     }, store.queueItemId || undefined)
     if (!result.ok) {
       store.error = result.error
       return
     }
-    store.queueItemId = ''
-    store.success = `EPUB job queued for ${store.title}. Track progress and controls in the Queue.`
+    resetDiscoveryForm()
+    store.success = `EPUB job queued for ${queuedTitle}. Track progress and controls in the Queue.`
     activeView.value = 'queue'
   } catch (error) {
     store.error = error instanceof Error ? error.message : String(error)
@@ -341,18 +400,17 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <h1>EPUB Builder</h1>
       </div>
       <nav class="main-navigation" aria-label="Main navigation">
-        <button :class="{ active: activeView === 'create' }" @click="openCreateView">Create EPUB</button>
+        <button :class="{ active: activeView === 'create' }" @click="openCreateView">Prepare EPUB</button>
         <button :class="{ active: activeView === 'queue' }" @click="activeView = 'queue'">Queue</button>
         <button :class="{ active: activeView === 'library' }" @click="activeView = 'library'">Library</button>
       </nav>
-      <span class="phase-badge">Text-first EPUB</span>
     </header>
 
     <template v-if="activeView === 'create'">
     <section class="intro">
       <p class="eyebrow">FROM WEBSITE TO EPUB</p>
-      <h2>Make a personal EPUB from a novel URL</h2>
-      <p>Review the book details and chapter order before saving.</p>
+      <h2>Prepare a personal EPUB from a novel URL</h2>
+      <p>Review the book details and chapter order, then add the job to the queue.</p>
     </section>
 
     <section class="card source-card" aria-labelledby="source-heading">
@@ -492,7 +550,7 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <div class="section-heading">
           <div>
             <p class="step-label">STEP 3</p>
-            <h3 id="output-heading">Create EPUB</h3>
+            <h3 id="output-heading">Queue EPUB</h3>
           </div>
         </div>
         <div class="filename-field">

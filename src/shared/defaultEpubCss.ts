@@ -1,3 +1,5 @@
+export const MAX_EPUB_CSS_LENGTH = 100_000
+
 export const DEFAULT_EPUB_CSS = `div.svg_outer {
    display: block;
    margin-bottom: 0;

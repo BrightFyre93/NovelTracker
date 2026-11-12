@@ -7,9 +7,11 @@ import type {
   AppSettings,
   ChapterContent,
   ChapterLink,
+  ChapterImage,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
+  EpubNovelMetadata,
   GenerateEpubInput,
   LibraryFileCorrection,
   LibraryIndex,
@@ -33,9 +35,16 @@ import {
   writeSettings
 } from './services/localStore'
 import { readTrackerCsv } from './services/trackerCsv'
-import { fetchChapterContent, discoverChapters, HttpStatusError, validateHttpUrl } from './services/scraper'
+import {
+  fetchChapterContent,
+  fetchImageResource,
+  discoverChapters,
+  HttpStatusError,
+  validateHttpUrl
+} from './services/scraper'
 import { writeEpub } from './services/epub'
 import { recommendArchiveCoverage } from '../shared/archiveRecommendation'
+import { DEFAULT_EPUB_CSS, MAX_EPUB_CSS_LENGTH } from '../shared/defaultEpubCss'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../shared/epubFilename'
 
 let mainWindow: BrowserWindow | null = null
@@ -73,7 +82,15 @@ function copyDiscoveryQueue(): DiscoveryQueueItem[] {
   return discoveryQueue.map((item) => ({
     ...item,
     trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
-    downloadOptions: item.downloadOptions ? { ...item.downloadOptions } : null,
+    alternativeNames: [...(item.alternativeNames ?? [])],
+    genres: [...(item.genres ?? [])],
+    downloadOptions: item.downloadOptions
+      ? {
+          ...item.downloadOptions,
+          alternativeNames: [...(item.downloadOptions.alternativeNames ?? [])],
+          genres: [...(item.downloadOptions.genres ?? [])]
+        }
+      : null,
     completedChapterUrls: [...item.completedChapterUrls],
     failedChapters: item.failedChapters.map((chapter) => ({ ...chapter })),
     progress: item.progress ? { ...item.progress } : null,
@@ -97,13 +114,30 @@ function persistHistoryEntry(entry: DownloadHistoryEntry): Promise<DownloadHisto
 function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
   return {
     ...item,
+    description: item.description ?? '',
+    coverUrl: item.coverUrl ?? '',
+    alternativeNames: item.alternativeNames ?? [],
+    genres: item.genres ?? [],
+    source: item.source ?? '',
+    novelStatus: item.novelStatus ?? '',
     status: item.status ?? 'needs-review',
     discoveryChanges: item.discoveryChanges ?? '',
     recommendationSummary: item.recommendationSummary ?? '',
     overlapAllowed: item.overlapAllowed ?? false,
     includeOverlap: item.includeOverlap ?? false,
     overlapCount: item.overlapCount ?? 10,
-    downloadOptions: item.downloadOptions ?? null,
+    downloadOptions: item.downloadOptions
+      ? {
+          ...item.downloadOptions,
+          description: item.downloadOptions.description ?? '',
+          coverUrl: item.downloadOptions.coverUrl ?? '',
+          alternativeNames: item.downloadOptions.alternativeNames ?? [],
+          genres: item.downloadOptions.genres ?? [],
+          source: item.downloadOptions.source ?? '',
+          novelStatus: item.downloadOptions.novelStatus ?? '',
+          epubCss: item.downloadOptions.epubCss ?? DEFAULT_EPUB_CSS
+        }
+      : null,
     queuedAt: item.queuedAt ?? '',
     completedChapterUrls: item.completedChapterUrls ?? [],
     failedChapters: item.failedChapters ?? [],
@@ -155,6 +189,12 @@ async function discoverQueueItem(id: string): Promise<void> {
     if (item.status !== 'discovering') return
     item.title = result.title || item.title
     item.author = result.author || item.author
+    item.description = result.description
+    item.coverUrl = result.coverUrl
+    item.alternativeNames = [...result.alternativeNames]
+    item.genres = [...result.genres]
+    item.source = result.source
+    item.novelStatus = result.novelStatus
     item.parserName = result.parserName
     const newUrls = new Set(result.chapters.map((chapter) => chapter.url))
     const addedCount = result.chapters.filter((chapter) => !previousByUrl.has(chapter.url)).length
@@ -314,12 +354,35 @@ function parseGenerateInput(value: unknown): GenerateEpubInput {
   const input = value as Record<string, unknown>
   const title = typeof input.title === 'string' ? input.title.trim() : ''
   const author = typeof input.author === 'string' ? input.author.trim() : ''
+  const description = typeof input.description === 'string' ? input.description.trim() : ''
+  const coverUrlValue = typeof input.coverUrl === 'string' ? input.coverUrl.trim() : ''
+  const alternativeNames = parseMetadataLabels(input.alternativeNames, 'Alternative names')
+  const genres = parseMetadataLabels(input.genres, 'Genres')
+  const source = typeof input.source === 'string' ? input.source.trim() : ''
+  const novelStatus = typeof input.novelStatus === 'string' ? input.novelStatus.trim() : ''
   const language = typeof input.language === 'string' ? input.language.trim() : ''
+  if (input.description !== undefined && typeof input.description !== 'string') {
+    throw new Error('The novel description must be text.')
+  }
+  if (input.coverUrl !== undefined && typeof input.coverUrl !== 'string') {
+    throw new Error('The novel cover URL must be text.')
+  }
+  if (input.source !== undefined && typeof input.source !== 'string') {
+    throw new Error('The novel source must be text.')
+  }
+  if (input.novelStatus !== undefined && typeof input.novelStatus !== 'string') {
+    throw new Error('The novel status must be text.')
+  }
+  if (description.length > 20_000) throw new Error('The novel description must be 20,000 characters or fewer.')
+  if (source.length > 300 || novelStatus.length > 300) {
+    throw new Error('Novel source and status must be 300 characters or fewer.')
+  }
   if (input.filename !== undefined && typeof input.filename !== 'string') {
     throw new Error('The EPUB filename must be text.')
   }
   const filename = typeof input.filename === 'string' ? input.filename.trim() : ''
   const sourceUrl = input.sourceUrl === undefined ? '' : validateHttpUrl(input.sourceUrl)
+  const coverUrl = coverUrlValue ? validateHttpUrl(coverUrlValue) : ''
   const outputDirectory = typeof input.outputDirectory === 'string' ? input.outputDirectory : ''
 
   if (!title || title.length > 300) throw new Error('Enter a title of 1–300 characters.')
@@ -372,6 +435,12 @@ function parseGenerateInput(value: unknown): GenerateEpubInput {
   return {
     title,
     author,
+    description,
+    coverUrl,
+    alternativeNames,
+    genres,
+    source,
+    novelStatus,
     language,
     filename: filename || undefined,
     sourceUrl: sourceUrl || undefined,
@@ -379,6 +448,21 @@ function parseGenerateInput(value: unknown): GenerateEpubInput {
     chapters,
     trackerRow
   }
+}
+
+function parseMetadataLabels(value: unknown, label: string): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new Error(`${label} must contain no more than 100 values.`)
+  }
+  const labels = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string' || item.trim().length > 300) {
+      throw new Error(`Each ${label.toLowerCase()} value must be text of 300 characters or fewer.`)
+    }
+    if (item.trim()) labels.add(item.trim())
+  }
+  return [...labels]
 }
 
 async function cancellableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -556,6 +640,40 @@ async function runQueuedDownload(
       }
       chapters.push(content)
     }
+    let cover: ChapterImage | undefined
+    if (options.coverUrl) {
+      item.progress = {
+        current: selectedChapters.length,
+        total: selectedChapters.length,
+        message: 'Fetching novel cover…'
+      }
+      await persistDownloadState(item, historyEntry)
+      let lastError: unknown = new Error('The novel cover could not be fetched.')
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          cover = await fetchImageResource(
+            options.coverUrl,
+            options.sourceUrl || item.sourceUrl,
+            controller.signal
+          )
+          break
+        } catch (error) {
+          if (controller.signal.aborted) break
+          lastError = error
+          if (attempt === 2 || !canRetryChapter(error)) break
+          const retryAfter = error instanceof HttpStatusError ? error.retryAfterMs : null
+          try {
+            await cancellableDelay(retryAfter ?? 1000 * (2 ** attempt), controller.signal)
+          } catch {
+            break
+          }
+        }
+      }
+      if (!cover) {
+        if (controller.signal.aborted) throw new Error('EPUB creation was cancelled.')
+        throw lastError
+      }
+    }
     item.progress = {
       current: selectedChapters.length,
       total: selectedChapters.length,
@@ -569,7 +687,17 @@ async function runQueuedDownload(
       options.language,
       chapters,
       options.filename,
-      controller.signal
+      controller.signal,
+      options.epubCss,
+      {
+        description: options.description,
+        alternativeNames: options.alternativeNames,
+        genres: options.genres,
+        source: options.source,
+        novelStatus: options.novelStatus,
+        sourceUrl: options.sourceUrl || item.sourceUrl,
+        cover
+      }
     )
     item.status = 'completed'
     item.outputPath = result.outputPath
@@ -781,6 +909,20 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('settings:get', async (): Promise<AppSettings> => readSettings(dataDirectory()))
 
+  ipcMain.handle('settings:epub-css', async (_event, rawCss: unknown): Promise<Result<AppSettings>> => {
+    try {
+      if (typeof rawCss !== 'string' || rawCss.length > MAX_EPUB_CSS_LENGTH) {
+        throw new Error(`EPUB CSS must be text of at most ${MAX_EPUB_CSS_LENGTH.toLocaleString()} characters.`)
+      }
+      const settings = await readSettings(dataDirectory())
+      settings.epubCss = rawCss
+      await writeSettings(dataDirectory(), settings)
+      return { ok: true, value: settings }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
   ipcMain.handle('settings:download-concurrency', async (_event, rawValue: unknown): Promise<Result<AppSettings>> => {
     try {
       if (typeof rawValue !== 'number' || !Number.isInteger(rawValue) || rawValue < 1 || rawValue > 5) {
@@ -872,6 +1014,12 @@ function registerIpcHandlers(): void {
           id: randomUUID(),
           title: input.title,
           author: input.author,
+          description: '',
+          coverUrl: '',
+          alternativeNames: [],
+          genres: [],
+          source: '',
+          novelStatus: '',
           sourceUrl: input.sourceUrl,
           origin: input.origin,
           trackerRow: input.trackerRow ?? null,
@@ -1120,6 +1268,7 @@ function registerIpcHandlers(): void {
       let historyEntry: DownloadHistoryEntry | null = null
       try {
         const input = parseGenerateInput(rawInput)
+        const settings = await readSettings(dataDirectory())
         if (rawQueueItemId !== undefined && typeof rawQueueItemId !== 'string') {
           throw new Error('Invalid discovery queue item.')
         }
@@ -1163,6 +1312,12 @@ function registerIpcHandlers(): void {
             id: randomUUID(),
             title: input.title,
             author: input.author,
+            description: input.description ?? '',
+            coverUrl: input.coverUrl ?? '',
+            alternativeNames: [...(input.alternativeNames ?? [])],
+            genres: [...(input.genres ?? [])],
+            source: input.source ?? '',
+            novelStatus: input.novelStatus ?? '',
             sourceUrl,
             origin: 'manual',
             trackerRow: input.trackerRow ?? null,
@@ -1224,6 +1379,12 @@ function registerIpcHandlers(): void {
           for (const chapter of existingItem.chapters) chapter.selected = selectedUrls.has(chapter.url)
           existingItem.title = input.title
           existingItem.author = input.author
+          existingItem.description = input.description ?? existingItem.description
+          existingItem.coverUrl = input.coverUrl ?? existingItem.coverUrl
+          existingItem.alternativeNames = [...(input.alternativeNames ?? existingItem.alternativeNames)]
+          existingItem.genres = [...(input.genres ?? existingItem.genres)]
+          existingItem.source = input.source ?? existingItem.source
+          existingItem.novelStatus = input.novelStatus ?? existingItem.novelStatus
           existingItem.trackerRow = input.trackerRow ?? existingItem.trackerRow
         }
 
@@ -1249,10 +1410,17 @@ function registerIpcHandlers(): void {
         queueItem.downloadOptions = {
           title: input.title,
           author: input.author,
+          description: input.description ?? queueItem.description,
+          coverUrl: input.coverUrl ?? queueItem.coverUrl,
+          alternativeNames: [...(input.alternativeNames ?? queueItem.alternativeNames)],
+          genres: [...(input.genres ?? queueItem.genres)],
+          source: input.source ?? queueItem.source,
+          novelStatus: input.novelStatus ?? queueItem.novelStatus,
           language: input.language,
           filename: input.filename ?? '',
           sourceUrl,
-          outputDirectory: input.outputDirectory
+          outputDirectory: input.outputDirectory,
+          epubCss: settings.epubCss
         }
         queueItem.queuedAt = now
         queueItem.completedChapterUrls = []

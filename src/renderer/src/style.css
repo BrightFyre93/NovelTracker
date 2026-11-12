@@ -820,6 +820,57 @@ footer {
   margin-bottom: 14px;
 }
 
+.epub-css-settings {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #e5eaf1;
+  border-radius: 9px;
+  background: #fafbfd;
+}
+
+.epub-css-settings summary {
+  color: #435167;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.epub-css-editor {
+  display: block;
+  width: 100%;
+  min-height: 260px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #dfe5ed;
+  border-radius: 7px;
+  color: #283548;
+  background: #fff;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.epub-css-editor:focus {
+  outline: 2px solid #8bb5f5;
+  outline-offset: 1px;
+}
+
+.epub-css-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: #78869a;
+  font-size: 10px;
+}
+
+.epub-css-actions > div {
+  display: flex;
+  gap: 8px;
+}
+
 .library-path-grid {
   display: grid;
   gap: 10px;

@@ -4,6 +4,7 @@ import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import type { AppSettings, LibraryFileRecord, LibraryIndex, LibraryProgress } from '../../../shared/contracts'
+import { DEFAULT_EPUB_CSS, MAX_EPUB_CSS_LENGTH } from '../../../shared/defaultEpubCss'
 import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
@@ -12,8 +13,12 @@ const settings = ref<AppSettings>({
   libraryRoot: '',
   trackerCsvPath: '',
   outputDirectory: '',
-  maxSimultaneousDownloads: 2
+  maxSimultaneousDownloads: 2,
+  epubCss: DEFAULT_EPUB_CSS
 })
+const epubCssDraft = ref(DEFAULT_EPUB_CSS)
+const savingEpubCss = ref(false)
+const epubCssDirty = computed(() => epubCssDraft.value !== settings.value.epubCss)
 const index = ref<LibraryIndex | null>(null)
 const search = ref('')
 const selectedNovel = ref('')
@@ -88,6 +93,7 @@ onMounted(async () => {
   })
   try {
     settings.value = await window.novelTracker.getSettings()
+    epubCssDraft.value = settings.value.epubCss
     const savedIndex = await window.novelTracker.getLibraryIndex()
     index.value = savedIndex && (!settings.value.libraryRoot || savedIndex.libraryRoot === settings.value.libraryRoot)
       ? savedIndex
@@ -149,6 +155,31 @@ async function chooseOutputDirectory(): Promise<void> {
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   }
+}
+
+async function saveEpubCss(css = epubCssDraft.value): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingEpubCss.value = true
+  try {
+    const result = await window.novelTracker.updateEpubCss(css)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    epubCssDraft.value = result.value.epubCss
+    success.value = 'EPUB stylesheet saved. Existing queued jobs keep their saved stylesheet.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    savingEpubCss.value = false
+  }
+}
+
+async function resetEpubCss(): Promise<void> {
+  epubCssDraft.value = DEFAULT_EPUB_CSS
+  await saveEpubCss(DEFAULT_EPUB_CSS)
 }
 
 async function scan(): Promise<void> {
@@ -278,6 +309,38 @@ function chapterRangeLabel(start: number, end: number): string {
           <Button label="Choose output" severity="secondary" outlined size="small" :disabled="busy" @click="chooseOutputDirectory" />
         </div>
       </div>
+      <details class="epub-css-settings">
+        <summary>EPUB stylesheet</summary>
+        <p class="help-text">Applies to new EPUB jobs. Existing queued jobs keep their saved stylesheet.</p>
+        <textarea
+          v-model="epubCssDraft"
+          class="epub-css-editor"
+          aria-label="EPUB stylesheet CSS"
+          spellcheck="false"
+          :maxlength="MAX_EPUB_CSS_LENGTH"
+          :disabled="savingEpubCss"
+        />
+        <div class="epub-css-actions">
+          <span>{{ epubCssDraft.length.toLocaleString() }} / {{ MAX_EPUB_CSS_LENGTH.toLocaleString() }} characters</span>
+          <div>
+            <Button
+              label="Reset to default"
+              severity="secondary"
+              outlined
+              size="small"
+              :disabled="savingEpubCss || (epubCssDraft === DEFAULT_EPUB_CSS && settings.epubCss === DEFAULT_EPUB_CSS)"
+              @click="resetEpubCss"
+            />
+            <Button
+              label="Save stylesheet"
+              size="small"
+              :loading="savingEpubCss"
+              :disabled="savingEpubCss || !epubCssDirty"
+              @click="saveEpubCss()"
+            />
+          </div>
+        </div>
+      </details>
     </section>
 
     <section class="card" aria-labelledby="library-heading">
