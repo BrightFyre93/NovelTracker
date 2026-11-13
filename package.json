@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "package:win": "npm run build && node scripts/package-windows.mjs",
     "lint": "eslint src",
     "typecheck": "vue-tsc --noEmit"
   },
@@ -27,6 +28,7 @@
     "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^5.2.1",
     "electron": "^45.3.0",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^3.0.0",
     "eslint": "^10.14.0",
     "eslint-plugin-vue": "^10.12.1",
@@ -35,5 +37,46 @@
     "typescript-eslint": "^8.72.2",
     "vite": "^6.2.2",
     "vue-tsc": "^3.3.14"
+  },
+  "build": {
+    "appId": "com.brightfyre.noveltracker",
+    "productName": "NovelTracker",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": ".playwright-browsers",
+        "to": "playwright-browsers"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

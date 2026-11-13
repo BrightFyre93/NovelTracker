@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
@@ -41,6 +41,7 @@ const queueStatusOptions: QueueStatusOption[] = [
   { value: 'failed', label: 'Failed' },
   { value: 'cancelled', label: 'Cancelled' }
 ]
+const queueViewPreferencesKey = 'novel-tracker.queue-view-preferences'
 
 const items = ref<DiscoveryQueueItem[]>([])
 const selectedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
@@ -69,6 +70,7 @@ const clearing = ref(false)
 const error = ref('')
 const notice = ref('')
 let removeQueueListener: (() => void) | undefined
+loadQueueViewPreferences()
 
 const filteredTrackerNovels = computed(() => {
   const query = trackerSearch.value.trim().toLocaleLowerCase()
@@ -141,6 +143,36 @@ function toggleQueueStatus(status: DiscoveryQueueStatus): void {
     ? selectedQueueStatuses.value.filter((selected) => selected !== status)
     : [...selectedQueueStatuses.value, status]
 }
+
+function isQueueStatus(value: unknown): value is DiscoveryQueueStatus {
+  return queueStatusOptions.some((option) => option.value === value)
+}
+
+function loadQueueViewPreferences(): void {
+  try {
+    const saved = localStorage.getItem(queueViewPreferencesKey)
+    if (!saved) return
+    const preferences = JSON.parse(saved) as { statuses?: unknown; groupByStatus?: unknown }
+    if (!Array.isArray(preferences.statuses) || typeof preferences.groupByStatus !== 'boolean') {
+      throw new Error('The saved Queue display settings have an invalid format.')
+    }
+    selectedQueueStatuses.value = [...new Set(preferences.statuses.filter(isQueueStatus))]
+    groupQueueByStatus.value = preferences.groupByStatus
+  } catch (reason) {
+    error.value = `Queue display settings could not be loaded: ${reason instanceof Error ? reason.message : String(reason)}`
+  }
+}
+
+watch([selectedQueueStatuses, groupQueueByStatus], () => {
+  try {
+    localStorage.setItem(queueViewPreferencesKey, JSON.stringify({
+      statuses: selectedQueueStatuses.value,
+      groupByStatus: groupQueueByStatus.value
+    }))
+  } catch (reason) {
+    error.value = `Queue display settings could not be saved: ${reason instanceof Error ? reason.message : String(reason)}`
+  }
+}, { deep: true, flush: 'sync' })
 
 function compareQueuedItems(left: DiscoveryQueueItem, right: DiscoveryQueueItem): number {
   return left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id)

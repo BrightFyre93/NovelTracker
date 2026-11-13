@@ -5,6 +5,7 @@ release/
 coverage/
 .vite/
 .cache/
+.playwright-browsers/
 
 # Local environment settings
 .env

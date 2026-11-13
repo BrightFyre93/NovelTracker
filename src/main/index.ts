@@ -81,6 +81,7 @@ import { recommendArchiveCoverage } from '../shared/archiveRecommendation'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../shared/epubFilename'
 import type { EpubMergeInput, EpubMergeResult } from './services/epubMerger'
 import { convertAzw3ToEpub, convertEpubToAzw3 } from './services/azw3Converter'
+import { initializeLocalLogger } from './services/localLogger'
 
 let mainWindow: BrowserWindow | null = null
 const approvedOutputDirectories = new Set<string>()
@@ -2879,6 +2880,11 @@ function registerIpcHandlers(): void {
 }
 
 app.whenReady().then(async () => {
+  initializeLocalLogger(dataDirectory(), app.getVersion())
+  if (app.isPackaged) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = join(process.resourcesPath, 'playwright-browsers')
+  }
+  if (process.platform === 'win32') app.setAppUserModelId('com.brightfyre.noveltracker')
   registerIpcHandlers()
   libraryOperations = await readLibraryOperations(dataDirectory())
   let interruptedLibraryOperations = false

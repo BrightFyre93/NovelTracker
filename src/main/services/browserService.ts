@@ -1,6 +1,6 @@
 import { mkdir, rm } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
-import { chromium, type BrowserContext, type Page } from 'playwright'
+import type { BrowserContext, Page } from 'playwright'
 import type { BrowserSessionInfo } from '../../shared/contracts'
 import { BROWSER_NAVIGATION_TIMEOUT_MS, BROWSER_PROFILE_DIRECTORY_NAME } from '../../shared/constants'
 import { validateHttpUrl } from './scraper'
@@ -27,6 +27,7 @@ async function getBrowserContext(dataDirectory: string): Promise<BrowserContext>
 
   const profile = profileDirectory(dataDirectory)
   const launch = async (): Promise<BrowserContext> => {
+    const { chromium } = await import('playwright')
     await mkdir(profile, { recursive: true })
     const context = await chromium.launchPersistentContext(profile, {
       acceptDownloads: false,

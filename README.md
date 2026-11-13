@@ -9,6 +9,12 @@ A Windows-first Electron + Vue desktop app for discovering chapters from one nov
 - Run `npx playwright install chromium` to install the browser used for manual verification.
 - Run `npm run dev` to open the desktop app.
 
+## Package for Windows
+
+- Run `npm run package:win` on Windows to build the app and create an unsigned NSIS setup installer in `release/`.
+- The packaging command installs the matching Playwright Chromium build into a temporary local folder and bundles it, so users do not need Node.js or a separate browser install. The first run requires internet access to download Chromium.
+- The installer is per-user by default, creates Start Menu and desktop shortcuts, lets the user choose the install folder, and preserves local app data when uninstalled. Code signing is not configured.
+
 ## Verify
 
 - `npm run typecheck`
@@ -31,7 +37,9 @@ Select an indexed EPUB in the Library to **Check / repair** it without a file pi
 
 The Library page can convert an indexed or just-merged EPUB to AZW3 for local sideloading; completed EPUB jobs also have a conversion action in recent job history. To convert back, select an indexed AZW3 in the Library and choose **Convert to EPUB**; the result is saved beside it with the same base filename and `.epub` extension. These optional features require Calibre installed with `ebook-convert` available on `PATH` (or in the standard Windows Calibre installation folder). Conversions run locally and preserve the source. EPUB-to-AZW3 lets you choose its output destination; AZW3-to-EPUB saves beside its source. Existing sibling outputs require confirmation before replacement, and newly created files appear in the index after a rescan. Calibre may alter formatting, so review converted books in Kindle Previewer; EPUB structural validation and successful conversion do not guarantee Amazon Send-to-Kindle acceptance. Merge and conversion status and recent history remain visible across app pages and are saved locally, including failures and operations interrupted by closing the app.
 
-Recent EPUB jobs and per-chapter progress are stored locally. On the Queue page, filter jobs by one or more statuses or group them by status. Running jobs can be cancelled, paused, and resumed, and unfinished jobs are restored when the app restarts. Completed chapter content and fetched covers are checkpointed locally so retries can reuse successful work. Failed, partial, or cancelled jobs can be repackaged offline when all selected chapter and cover artifacts are available; this path does not refresh discovery or make network requests.
+Recent EPUB jobs and per-chapter progress are stored locally. On the Queue page, filter jobs by one or more statuses or group them by status; these view preferences are saved and restored when the app reopens. Running jobs can be cancelled, paused, and resumed, and unfinished jobs are restored when the app restarts. Completed chapter content and fetched covers are checkpointed locally so retries can reuse successful work. Failed, partial, or cancelled jobs can be repackaged offline when all selected chapter and cover artifacts are available; this path does not refresh discovery or make network requests.
+
+The main process writes structured JSON-line logs locally under the Electron user-data directory in `logs/novel-tracker.log`, rotating up to three older log files at 5 MB each. Authorization, cookie, token, password, and API-key values are redacted before output or file logging. Logs are not uploaded.
 
 Before a queued EPUB starts, its chapter list is refreshed when the saved discovery snapshot is older than the configurable interval (24 hours by default; change it in Configuration, from 1 to 720 hours). Chapter selections are matched by URL; newly discovered chapters remain unselected. If a selected chapter disappeared or the selected order changed, the job waits for review instead of fetching from the stale snapshot.
 
