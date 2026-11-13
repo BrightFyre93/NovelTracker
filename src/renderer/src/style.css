@@ -808,13 +808,6 @@ input {
   justify-self: start;
 }
 
-.queue-group-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-
 .queue-visible-count {
   margin-left: auto;
 }
@@ -829,6 +822,11 @@ input {
   color: #435167;
   font-size: 11px;
   font-weight: 700;
+}
+
+.queue-status-section > summary {
+  cursor: pointer;
+  list-style-position: inside;
 }
 
 .queue-status-group-heading small {
@@ -891,16 +889,48 @@ input {
 
 .queue-item-summary {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   min-width: 0;
-  gap: 4px;
+  gap: 4px 14px;
 }
 
-.queue-item-summary strong {
+.queue-item-heading {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.queue-item-heading strong {
   overflow: hidden;
+  min-width: 0;
   color: #283548;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.queue-item-heading > span {
+  overflow: hidden;
+  color: #7a8798;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-item-select,
+.library-multi-file-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.queue-item-select {
+  width: fit-content;
+  flex: 0 0 auto;
 }
 
 .queue-item-summary > span {
@@ -909,6 +939,19 @@ input {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.queue-item-summary > .queue-item-recommendation,
+.queue-item-summary > .queue-item-error,
+.queue-item-summary > .queue-item-change,
+.queue-item-summary > .queue-item-output,
+.queue-item-summary > .queue-item-rechecking {
+  grid-column: 1 / -1;
+}
+
+.queue-item-summary > .queue-remaining-chapters {
+  color: #315f9f;
+  font-weight: 600;
 }
 
 .queue-item-summary > .queue-item-error {
@@ -936,6 +979,15 @@ input {
   color: #315f9f;
   font-weight: 600;
   white-space: normal;
+}
+
+.queue-item-summary > div.queue-item-rechecking {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.queue-item-summary > div.queue-item-rechecking .queue-item-progress {
+  grid-column: 1;
 }
 
 .queue-item-actions {
@@ -1193,6 +1245,11 @@ footer {
 
 .library-search {
   max-width: 240px;
+}
+
+.library-multi-file-filter {
+  margin-top: 12px;
+  cursor: pointer;
 }
 
 .novel-list,
@@ -1497,6 +1554,9 @@ html[data-theme='dark'] .operation-history-older,
 html[data-theme='dark'] .queue-list-controls,
 html[data-theme='dark'] .queue-status-group-heading,
 html[data-theme='dark'] .queue-item-summary > span,
+html[data-theme='dark'] .queue-item-heading > span,
+html[data-theme='dark'] .queue-item-select,
+html[data-theme='dark'] .library-multi-file-filter,
 html[data-theme='dark'] .epub-css-actions,
 html[data-theme='dark'] .library-path-value,
 html[data-theme='dark'] .novel-choice-count,
@@ -1523,6 +1583,10 @@ html[data-theme='dark'] .library-summary small {
 }
 
 html[data-theme='dark'] .queue-item-summary > .queue-item-rechecking {
+  color: #9bc0ff;
+}
+
+html[data-theme='dark'] .queue-item-summary > .queue-remaining-chapters {
   color: #9bc0ff;
 }
 
@@ -1790,6 +1854,11 @@ html[data-theme='dark'] .p-message {
 
   .queue-item {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .queue-item-summary {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .queue-item-actions {

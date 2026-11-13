@@ -246,6 +246,7 @@ async function parseEpub(
   }
 
   const chapters: ParsedChapter[] = []
+  const sourceId = createHash('sha256').update(source.path).digest('hex')
   let textBytes = 0
   const spineItems = entries(spine.itemref)
   const updateInterval = Math.max(1, Math.ceil(spineItems.length / 100))
@@ -320,7 +321,7 @@ async function parseEpub(
         : null)
     const content: ChapterContent = {
       title,
-      url: `https://offline.invalid/${encodeURIComponent(source.filename)}/${ordinal}`,
+      url: `https://offline.invalid/${sourceId}/${ordinal}`,
       paragraphs,
       images,
       blocks: [
@@ -365,11 +366,11 @@ export async function mergeEpubFiles(
   )
   const images = new Map<string, ChapterImage>()
   const imageBytes = { value: 0 }
-  const chaptersByIdentity = new Map<string, { content: ChapterContent; text: string; number: number | null }>()
+  const chaptersByIdentity = new Map<string, { content: ChapterContent; textHash: string; number: number | null }>()
   let duplicates = 0
   let conflicts = 0
   let totalTextBytes = 0
-  let primary: ParsedEpub | null = null
+  let primary: Pick<ParsedEpub, 'author' | 'language' | 'metadata'> | null = null
   let lastProgressPercentage = 0
 
   for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
@@ -394,7 +395,13 @@ export async function mergeEpubFiles(
         onProgress(progress)
       }
     })
-    if (!primary) primary = parsed
+    if (!primary) {
+      primary = {
+        author: parsed.author,
+        language: parsed.language,
+        metadata: parsed.metadata
+      }
+    }
     totalTextBytes += parsed.chapters.reduce(
       (sum, chapter) => sum + Buffer.byteLength(chapter.content.paragraphs.join('\n'), 'utf8'),
       0
@@ -411,15 +418,16 @@ export async function mergeEpubFiles(
         ? `title:${normalizedText(chapter.content.title)}`
         : `number:${chapter.number}`
       const chapterText = normalizedText(`${chapter.content.title}\n${chapter.content.paragraphs.join('\n')}`)
+      const textHash = createHash('sha256').update(chapterText).digest('hex')
       const previous = chaptersByIdentity.get(identity)
       if (previous) {
         duplicates += 1
-        if (previous.text !== chapterText) conflicts += 1
+        if (previous.textHash !== textHash) conflicts += 1
       } else {
         if (chaptersByIdentity.size >= MAX_EPUB_MERGED_CHAPTERS) {
           throw new Error('The combined EPUB exceeds the 20,000 chapter safety limit.')
         }
-        chaptersByIdentity.set(identity, { ...chapter, text: chapterText })
+        chaptersByIdentity.set(identity, { ...chapter, textHash })
       }
       if ((chapterIndex + 1) % mergeInterval === 0 || chapterIndex + 1 === parsed.chapters.length) {
         const sourceFraction = parsed.chapters.length > 0 ? (chapterIndex + 1) / parsed.chapters.length : 1

@@ -812,9 +812,10 @@ async function discoverNovelFullChapters(
 
 export async function discoverChapters(
   value: unknown,
-  onProgress?: (progress: JobProgress) => void
+  onProgress?: (progress: JobProgress) => void,
+  signal?: AbortSignal
 ): Promise<DiscoveryResult> {
-  return discoverChaptersUsingPageLoader(value, fetchHtml, onProgress)
+  return discoverChaptersUsingPageLoader(value, fetchHtml, onProgress, signal)
 }
 
 export async function discoverChaptersUsingPageLoader(

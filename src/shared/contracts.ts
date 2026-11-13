@@ -279,6 +279,33 @@ export interface LibraryIndex {
   }
 }
 
+export interface LibraryFileSummary {
+  id: string
+  filename: string
+}
+
+export interface LibraryNovelSummary {
+  key: string
+  title: string
+  files: LibraryFileSummary[]
+  stateCounts: Record<LibraryFolderState, number>
+  coverage: {
+    gapCount: number
+    overlapNumberCount: number
+    unverifiedCount: number
+    rangeMismatchCount: number
+  }
+}
+
+export interface LibraryIndexSummary {
+  libraryRoot: string
+  scannedAt: string
+  fileCount: number
+  scanErrors: number
+  scanSummary?: LibraryIndex['scanSummary']
+  novels: LibraryNovelSummary[]
+}
+
 export interface LibraryProgress {
   stage: 'scan' | 'inspect' | 'save'
   current: number
@@ -380,6 +407,7 @@ export interface NovelTrackerApi {
   getDiscoveryQueueItem(id: string): Promise<Result<DiscoveryQueueItem>>
   addDiscoveryQueueItems(items: DiscoveryQueueInput[]): Promise<Result<DiscoveryQueueItem[]>>
   retryDiscoveryQueueItem(id: string): Promise<Result<void>>
+  forceRetryDiscoveryQueueItem(id: string): Promise<Result<void>>
   retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
   refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
   acceptQueueRecommendations(id: string, includeOverlap: boolean, overlapCount: number): Promise<Result<void>>
@@ -388,7 +416,7 @@ export interface NovelTrackerApi {
   pauseEpub(id: string): Promise<Result<void>>
   resumeEpub(id: string): Promise<Result<void>>
   cancelEpub(id: string): Promise<Result<void>>
-  moveQueuedEpub(id: string, direction: 'up' | 'down'): Promise<Result<void>>
+  moveQueuedEpub(id: string, direction: 'up' | 'down' | 'top' | 'bottom'): Promise<Result<void>>
   removeDiscoveryQueueItem(id: string): Promise<Result<void>>
   clearDiscoveryQueue(): Promise<Result<void>>
   clearCompletedDiscoveryQueueItems(): Promise<Result<void>>
@@ -397,12 +425,13 @@ export interface NovelTrackerApi {
   updateLibraryScanOptions(scanOldFolder: boolean, scanOldCompletedFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItemSummary[]) => void): () => void
-  getLibraryIndex(): Promise<LibraryIndex | null>
-  getLibraryIndexBackup(): Promise<LibraryIndex | null>
-  restoreLibraryIndexBackup(): Promise<Result<LibraryIndex>>
-  scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndex>>
+  getLibraryIndexSummary(): Promise<LibraryIndexSummary | null>
+  getLibraryNovelFiles(novelKey: string): Promise<Result<LibraryFileRecord[]>>
+  getLibraryIndexBackupDate(): Promise<string | null>
+  restoreLibraryIndexBackup(): Promise<Result<LibraryIndexSummary>>
+  scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndexSummary>>
   cancelLibraryScan(): Promise<void>
-  correctLibraryFile(fileId: string, correction: LibraryFileCorrection): Promise<Result<LibraryIndex>>
+  correctLibraryFile(fileId: string, correction: LibraryFileCorrection): Promise<Result<LibraryIndexSummary>>
   mergeLibraryEpubs(fileIds: string[], filename: string): Promise<LibraryEpubMergeResponse>
   convertEpubToAzw3(inputPath: string): Promise<EbookConversionResponse>
   convertAzw3ToEpub(fileId: string): Promise<EbookConversionResponse>

@@ -21,9 +21,9 @@ import type {
   GenerateEpubInput,
   LibraryFileCorrection,
   LibraryFileRecord,
+  LibraryIndexSummary,
   LibraryOperation,
   LibraryEpubMergeResponse,
-  LibraryIndex,
   LibraryProgress,
   QueueChapter,
   Result
@@ -56,6 +56,7 @@ import {
   readDownloadHistory,
   readLibraryIndex,
   readLibraryIndexBackup,
+  readLibraryIndexBackupDate,
   readLibraryOperations,
   readSettings,
   saveDownloadHistoryEntry,
@@ -81,6 +82,7 @@ import {
 } from './services/scraper'
 import { writeEpub } from './services/epub'
 import { recommendArchiveCoverage } from '../shared/archiveRecommendation'
+import { summarizeLibraryIndex } from '../shared/libraryIndexSummary'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../shared/epubFilename'
 import type { EpubMergeInput, EpubMergeResult } from './services/epubMerger'
 import { convertAzw3ToEpub, convertEpubToAzw3 } from './services/azw3Converter'
@@ -112,6 +114,7 @@ let historyWrites = Promise.resolve()
 const pendingDiscoveries: string[] = []
 const browserAssistedDiscoveries = new Set<string>()
 const activeBrowserDiscoveries = new Map<string, AbortController>()
+const activeQueueDiscoveries = new Map<string, AbortController>()
 let activeDiscoveries = 0
 const activeDownloads = new Map<string, { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' }>()
 let downloadPumpRunning = false
@@ -585,7 +588,9 @@ function sendToCurrentFrame(
 async function discoverQueueItem(id: string, browserAssisted = false): Promise<void> {
   const item = discoveryQueue.find((candidate) => candidate.id === id)
   if (!item || item.status !== 'discovering') return
-  const browserController = browserAssisted ? new AbortController() : null
+  const controller = new AbortController()
+  activeQueueDiscoveries.set(id, controller)
+  const browserController = browserAssisted ? controller : null
   const browserOperationId = `queue:${id}`
   if (browserController) activeBrowserDiscoveries.set(browserOperationId, browserController)
   let previousChapters: QueueChapter[] = []
@@ -598,10 +603,31 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
     previousByUrl = new Map(previousChapters.map((chapter) => [chapter.url, chapter]))
     hadPreviousSnapshot = Boolean(item.discoveredAt && previousChapters.length > 0)
     const result = browserAssisted
-      ? await discoverChaptersUsingPageLoader(item.sourceUrl, readBrowserPage, undefined, browserController?.signal)
-      : await discoverChapters(item.sourceUrl)
-    if (item.status !== 'discovering') {
-      if (browserController) activeBrowserDiscoveries.delete(browserOperationId)
+      ? await discoverChaptersUsingPageLoader(
+          item.sourceUrl,
+          readBrowserPage,
+          (progress) => {
+            if (activeQueueDiscoveries.get(id) !== controller) return
+            item.progress = progress
+            notifyDiscoveryQueueChanged()
+          },
+          controller.signal
+        )
+      : await discoverChapters(
+          item.sourceUrl,
+          (progress) => {
+            if (activeQueueDiscoveries.get(id) !== controller) return
+            item.progress = progress
+            notifyDiscoveryQueueChanged()
+          },
+          controller.signal
+        )
+    if (controller.signal.aborted) throw new Error('Discovery was cancelled.')
+    if (activeQueueDiscoveries.get(id) !== controller || item.status !== 'discovering') {
+      if (activeBrowserDiscoveries.get(browserOperationId) === browserController) {
+        activeBrowserDiscoveries.delete(browserOperationId)
+      }
+      if (activeQueueDiscoveries.get(id) === controller) activeQueueDiscoveries.delete(id)
       if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
       return
     }
@@ -631,6 +657,18 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
       selected: previousByUrl.get(chapter.url)?.selected ?? true
     }))
     const libraryIndex = await readLibraryIndex(dataDirectory())
+    if (
+      controller.signal.aborted ||
+      activeQueueDiscoveries.get(id) !== controller ||
+      item.status !== 'discovering'
+    ) {
+      if (activeBrowserDiscoveries.get(browserOperationId) === browserController) {
+        activeBrowserDiscoveries.delete(browserOperationId)
+      }
+      if (activeQueueDiscoveries.get(id) === controller) activeQueueDiscoveries.delete(id)
+      if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
+      return
+    }
     const recommendation = recommendArchiveCoverage(
       { ...item, chapters: refreshedChapters },
       libraryIndex?.files ?? [],
@@ -647,11 +685,21 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
         ? `Chapter list changed: ${addedCount} added, ${removedCount} removed${orderChanged ? ', order changed' : ''}. Review your selection.`
         : ''
     item.status = 'needs-review'
+    item.progress = null
     item.error = ''
     item.discoveredAt = new Date().toISOString()
     item.updatedAt = item.discoveredAt
   } catch (error) {
+    if (activeQueueDiscoveries.get(id) !== controller) {
+      if (activeBrowserDiscoveries.get(browserOperationId) === browserController) {
+        activeBrowserDiscoveries.delete(browserOperationId)
+      }
+      if (activeQueueDiscoveries.get(id) === controller) activeQueueDiscoveries.delete(id)
+      if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
+      return
+    }
     item.status = 'failed'
+    item.progress = null
     item.error = errorMessage(error)
     item.updatedAt = new Date().toISOString()
   }
@@ -669,7 +717,10 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
       console.error(`Discovery queue item ${id} failure state could not be saved:`, saveError)
     }
   }
-  if (browserController) activeBrowserDiscoveries.delete(browserOperationId)
+  if (activeBrowserDiscoveries.get(browserOperationId) === browserController) {
+    activeBrowserDiscoveries.delete(browserOperationId)
+  }
+  if (activeQueueDiscoveries.get(id) === controller) activeQueueDiscoveries.delete(id)
   if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
   notifyDiscoveryQueueChanged()
 }
@@ -1526,11 +1577,12 @@ async function pumpDownloadQueue(): Promise<void> {
 }
 
 async function createWindow(): Promise<void> {
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1180,
     height: 820,
     minWidth: 820,
     minHeight: 620,
+    show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
@@ -1538,33 +1590,37 @@ async function createWindow(): Promise<void> {
       sandbox: true
     }
   })
-  mainWindow.maximize()
+  mainWindow = window
+  window.once('ready-to-show', () => {
+    window.maximize()
+    window.show()
+  })
 
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  mainWindow.webContents.on('unresponsive', () => {
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('unresponsive', () => {
     console.error('Renderer became unresponsive.')
   })
-  mainWindow.webContents.on('responsive', () => {
+  window.webContents.on('responsive', () => {
     console.info('Renderer became responsive.')
   })
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+  window.webContents.on('render-process-gone', (_event, details) => {
     console.error('Renderer process exited:', details.reason, details.exitCode)
   })
-  mainWindow.webContents.on('will-navigate', (event, target) => {
+  window.webContents.on('will-navigate', (event, target) => {
     try {
-      const current = new URL(mainWindow!.webContents.getURL())
+      const current = new URL(window.webContents.getURL())
       const next = new URL(target)
       if (next.origin !== current.origin || next.protocol !== current.protocol) event.preventDefault()
     } catch {
       event.preventDefault()
     }
   })
-  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault())
+  window.webContents.on('will-attach-webview', (event) => event.preventDefault())
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    await window.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    await mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    await window.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
 
@@ -1915,6 +1971,51 @@ function registerIpcHandlers(): void {
       return { ok: true, value: undefined }
     } catch (error) {
       console.error('Discovery queue retry failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:force-retry', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || item.status !== 'discovering' || item.downloadOptions) {
+        throw new Error('Only active discovery items can be force-retried.')
+      }
+
+      browserAssistedDiscoveries.delete(item.id)
+      const supersedingController = new AbortController()
+      const activeController = activeQueueDiscoveries.get(item.id)
+      activeQueueDiscoveries.set(item.id, supersedingController)
+      activeController?.abort()
+      for (let index = pendingDiscoveries.length - 1; index >= 0; index -= 1) {
+        if (pendingDiscoveries[index] === item.id) pendingDiscoveries.splice(index, 1)
+      }
+      item.error = ''
+      item.progress = { current: 0, total: 0, message: 'Restarting chapter discovery…' }
+      item.updatedAt = new Date().toISOString()
+
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        item.status = 'failed'
+        item.error = `The forced discovery retry could not be saved: ${errorMessage(error)}`
+        item.updatedAt = new Date().toISOString()
+        if (activeQueueDiscoveries.get(item.id) === supersedingController) {
+          activeQueueDiscoveries.delete(item.id)
+        }
+        await persistDiscoveryQueue().catch((saveError: unknown) => {
+          console.error(`Discovery retry failure state for ${item.id} could not be saved:`, saveError)
+        })
+        throw error
+      }
+
+      pendingDiscoveries.push(item.id)
+      notifyDiscoveryQueueChanged()
+      pumpDiscoveryQueue()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Forced discovery retry failed:', error)
       return { ok: false, error: errorMessage(error) }
     }
   })
@@ -2490,7 +2591,10 @@ function registerIpcHandlers(): void {
     'download-queue:move',
     async (_event, rawId: unknown, rawDirection: unknown): Promise<Result<void>> => {
       try {
-        if (typeof rawId !== 'string' || (rawDirection !== 'up' && rawDirection !== 'down')) {
+        if (
+          typeof rawId !== 'string' ||
+          (rawDirection !== 'up' && rawDirection !== 'down' && rawDirection !== 'top' && rawDirection !== 'bottom')
+        ) {
           throw new Error('Invalid queue reorder request.')
         }
         const queuedItems = discoveryQueue
@@ -2498,16 +2602,19 @@ function registerIpcHandlers(): void {
           .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))
         const index = queuedItems.findIndex((item) => item.id === rawId)
         if (index < 0) throw new Error('Only queued EPUB jobs can be reordered.')
-        const targetIndex = index + (rawDirection === 'up' ? -1 : 1)
-        if (targetIndex < 0 || targetIndex >= queuedItems.length) {
+        const targetIndex = rawDirection === 'top'
+          ? 0
+          : rawDirection === 'bottom'
+            ? queuedItems.length - 1
+            : index + (rawDirection === 'up' ? -1 : 1)
+        if (targetIndex < 0 || targetIndex >= queuedItems.length || targetIndex === index) {
           return { ok: true, value: undefined }
         }
         const oldTimes = new Map(queuedItems.map((item) => [item.id, { queuedAt: item.queuedAt, updatedAt: item.updatedAt }]))
         const movingItem = queuedItems[index]
-        const displacedItem = queuedItems[targetIndex]
-        if (!movingItem || !displacedItem) throw new Error('The queue order changed before the job could be moved.')
-        queuedItems[index] = displacedItem
-        queuedItems[targetIndex] = movingItem
+        if (!movingItem) throw new Error('The queue order changed before the job could be moved.')
+        queuedItems.splice(index, 1)
+        queuedItems.splice(targetIndex, 0, movingItem)
         const now = Date.now()
         queuedItems.forEach((item, position) => {
           item.queuedAt = new Date(now + position).toISOString()
@@ -2633,13 +2740,34 @@ function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('library:index', async () => readLibraryIndex(dataDirectory()))
+  ipcMain.handle('library:index-summary', async (): Promise<LibraryIndexSummary | null> => {
+    const index = await readLibraryIndex(dataDirectory())
+    return index ? summarizeLibraryIndex(index) : null
+  })
+
+  ipcMain.handle('library:novel-files', async (_event, rawNovelKey: unknown): Promise<Result<LibraryFileRecord[]>> => {
+    try {
+      if (typeof rawNovelKey !== 'string' || rawNovelKey.length > 300) {
+        throw new Error('Invalid library novel selection.')
+      }
+      const index = await readLibraryIndex(dataDirectory())
+      if (!index) throw new Error('Scan the library before viewing its files.')
+      return {
+        ok: true,
+        value: index.files.filter(
+          (file) => file.novelTitle.trim().toLocaleLowerCase() === rawNovelKey
+        )
+      }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
 
   ipcMain.handle('library:operations', () => copyLibraryOperations())
 
-  ipcMain.handle('library:index-backup', async () => readLibraryIndexBackup(dataDirectory()))
+  ipcMain.handle('library:index-backup-date', async () => readLibraryIndexBackupDate(dataDirectory()))
 
-  ipcMain.handle('library:restore-index-backup', async (): Promise<Result<LibraryIndex>> => {
+  ipcMain.handle('library:restore-index-backup', async (): Promise<Result<LibraryIndexSummary>> => {
     if (activeLibraryScan || libraryIndexRestoreActive) {
       return { ok: false, error: 'Wait for the current library operation to finish before restoring its backup.' }
     }
@@ -2657,7 +2785,7 @@ function registerIpcHandlers(): void {
         throw new Error('The saved index backup belongs to a different library root.')
       }
       await writeLibraryIndex(dataDirectory(), backup)
-      return { ok: true, value: backup }
+      return { ok: true, value: summarizeLibraryIndex(backup) }
     } catch (error) {
       console.error('Library index backup restore failed:', error)
       return { ok: false, error: errorMessage(error) }
@@ -2666,7 +2794,9 @@ function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('library:scan', async (event, rawForceRebuild: unknown = false): Promise<Result<LibraryIndex>> => {
+  ipcMain.handle(
+    'library:scan',
+    async (event, rawForceRebuild: unknown = false): Promise<Result<LibraryIndexSummary>> => {
     if (typeof rawForceRebuild !== 'boolean') return { ok: false, error: 'Invalid library scan option.' }
     if (activeLibraryScan || libraryIndexRestoreActive) {
       return { ok: false, error: 'Another library operation is already running.' }
@@ -2694,14 +2824,15 @@ function registerIpcHandlers(): void {
       })
       const index = await readLibraryIndex(dataDirectory())
       if (!index) throw new Error('The library scan completed without saving an index.')
-      return { ok: true, value: index }
+      return { ok: true, value: summarizeLibraryIndex(index) }
     } catch (error) {
       if (!scan.cancelRequested) console.error('Library scan failed:', error)
       return { ok: false, error: errorMessage(error) }
     } finally {
       if (activeLibraryScan === scan) activeLibraryScan = null
     }
-  })
+    }
+  )
 
   ipcMain.handle('library:cancel-scan', () => {
     if (!activeLibraryScan) return
@@ -2728,13 +2859,11 @@ function registerIpcHandlers(): void {
       ) {
         throw new Error('Chapter corrections must be a list of non-negative numbers.')
       }
-      return {
-        ok: true,
-        value: await writeLibraryCorrection(dataDirectory(), rawFileId, {
-          novelTitle: novelTitle as string | undefined,
-          chapterNumbers: chapterNumbers as number[] | undefined
-        } satisfies LibraryFileCorrection)
-      }
+      const index = await writeLibraryCorrection(dataDirectory(), rawFileId, {
+        novelTitle: novelTitle as string | undefined,
+        chapterNumbers: chapterNumbers as number[] | undefined
+      } satisfies LibraryFileCorrection)
+      return { ok: true, value: summarizeLibraryIndex(index) }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
     }
@@ -3170,7 +3299,6 @@ app.whenReady().then(async () => {
     if (item.status === 'downloading' || historyEntry.status === 'running' || historyEntry.status === 'interrupted') {
       item.status = 'queued'
       item.error = ''
-      item.queuedAt = new Date().toISOString()
       item.progress = {
         current: historyEntry.completedChapters,
         total: item.chapterSummary.selected,

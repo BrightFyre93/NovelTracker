@@ -12,8 +12,9 @@ import type {
   GenerateEpubInput,
   QueuedEpubJob,
   LibraryFileCorrection,
+  LibraryFileRecord,
   LibraryEpubMergeResult,
-  LibraryIndex,
+  LibraryIndexSummary,
   LibraryOperation,
   LibraryProgress,
   EpubRepairResponse,
@@ -52,6 +53,8 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('discovery-queue:add', items) as Promise<Result<DiscoveryQueueItem[]>>,
   retryDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:retry', id) as Promise<Result<void>>,
+  forceRetryDiscoveryQueueItem: (id: string) =>
+    ipcRenderer.invoke('discovery-queue:force-retry', id) as Promise<Result<void>>,
   retryDiscoveryQueueItemWithBrowser: (id: string) =>
     ipcRenderer.invoke('discovery-queue:retry-browser', id) as Promise<Result<void>>,
   refreshDiscoveryQueueItem: (id: string) =>
@@ -65,7 +68,7 @@ const api: NovelTrackerApi = {
   pauseEpub: (id: string) => ipcRenderer.invoke('download-queue:pause', id) as Promise<Result<void>>,
   resumeEpub: (id: string) => ipcRenderer.invoke('download-queue:resume', id) as Promise<Result<void>>,
   cancelEpub: (id: string) => ipcRenderer.invoke('download-queue:cancel', id) as Promise<Result<void>>,
-  moveQueuedEpub: (id: string, direction: 'up' | 'down') =>
+  moveQueuedEpub: (id: string, direction: 'up' | 'down' | 'top' | 'bottom') =>
     ipcRenderer.invoke('download-queue:move', id, direction) as Promise<Result<void>>,
   removeDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:remove', id) as Promise<Result<void>>,
@@ -80,10 +83,12 @@ const api: NovelTrackerApi = {
     ipcRenderer.on('discovery-queue:update', handler)
     return () => ipcRenderer.removeListener('discovery-queue:update', handler)
   },
-  getLibraryIndex: () => ipcRenderer.invoke('library:index') as Promise<LibraryIndex | null>,
-  getLibraryIndexBackup: () => ipcRenderer.invoke('library:index-backup') as Promise<LibraryIndex | null>,
+  getLibraryIndexSummary: () => ipcRenderer.invoke('library:index-summary') as Promise<LibraryIndexSummary | null>,
+  getLibraryNovelFiles: (novelKey: string) =>
+    ipcRenderer.invoke('library:novel-files', novelKey) as Promise<Result<LibraryFileRecord[]>>,
+  getLibraryIndexBackupDate: () => ipcRenderer.invoke('library:index-backup-date') as Promise<string | null>,
   restoreLibraryIndexBackup: () =>
-    ipcRenderer.invoke('library:restore-index-backup') as Promise<Result<LibraryIndex>>,
+    ipcRenderer.invoke('library:restore-index-backup') as Promise<Result<LibraryIndexSummary>>,
   convertEpubToAzw3: (inputPath: string) =>
     ipcRenderer.invoke('library:convert-azw3', inputPath) as Promise<EbookConversionResponse>,
   convertAzw3ToEpub: (fileId: string) =>
@@ -98,10 +103,10 @@ const api: NovelTrackerApi = {
     return () => ipcRenderer.removeListener('library:operations:update', handler)
   },
   scanLibrary: (forceRebuild = false) =>
-    ipcRenderer.invoke('library:scan', forceRebuild) as Promise<Result<LibraryIndex>>,
+    ipcRenderer.invoke('library:scan', forceRebuild) as Promise<Result<LibraryIndexSummary>>,
   cancelLibraryScan: () => ipcRenderer.invoke('library:cancel-scan') as Promise<void>,
   correctLibraryFile: (fileId: string, correction: LibraryFileCorrection) =>
-    ipcRenderer.invoke('library:correct-file', fileId, correction) as Promise<Result<LibraryIndex>>,
+    ipcRenderer.invoke('library:correct-file', fileId, correction) as Promise<Result<LibraryIndexSummary>>,
   mergeLibraryEpubs: (fileIds: string[], filename: string) =>
     ipcRenderer.invoke('library:merge-epubs', fileIds, filename) as Promise<Result<LibraryEpubMergeResult>>,
   onLibraryEpubMergeProgress: (listener: (progress: EpubMergeProgress) => void) => {

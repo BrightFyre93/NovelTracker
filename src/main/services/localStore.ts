@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
@@ -180,6 +180,16 @@ export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIn
 
 export async function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
   return supportedEbookIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null))
+}
+
+export async function readLibraryIndexBackupDate(dataDirectory: string): Promise<string | null> {
+  try {
+    const details = await stat(join(dataDirectory, 'library-index.backup.json'))
+    return details.isFile() ? details.mtime.toISOString() : null
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null
+    throw error
+  }
 }
 
 export async function writeLibraryIndex(

@@ -25,7 +25,7 @@ interface QueueStatusOption {
 }
 
 interface QueueStatusGroup {
-  status: DiscoveryQueueStatus | null
+  status: DiscoveryQueueStatus
   label: string
   items: DiscoveryQueueItemSummary[]
 }
@@ -46,7 +46,8 @@ const queueViewPreferencesKey = 'novel-tracker.queue-view-preferences'
 
 const items = ref<DiscoveryQueueItemSummary[]>([])
 const selectedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
-const groupQueueByStatus = ref(false)
+const collapsedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
+const selectedQueueItemIds = ref<string[]>([])
 const trackerNovels = ref<TrackerNovel[]>([])
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
@@ -125,9 +126,6 @@ const queueStatusCounts = computed(() => {
   return counts
 })
 const queueGroups = computed<QueueStatusGroup[]>(() => {
-  if (!groupQueueByStatus.value) {
-    return [{ status: null, label: '', items: filteredQueueItems.value }]
-  }
   return queueStatusOptions.flatMap(({ value, label }) => {
     const groupItems = filteredQueueItems.value
       .filter((item) => item.status === value)
@@ -140,11 +138,56 @@ const queueFilterSummary = computed(() =>
     ? 'All statuses'
     : `${selectedQueueStatuses.value.length} selected`
 )
+const selectedQueueableItems = computed(() =>
+  batchQueueableItems.value.filter((item) => selectedQueueItemIds.value.includes(item.id))
+)
+const allVisibleQueueSectionsCollapsed = computed(() =>
+  queueGroups.value.length > 0 &&
+  queueGroups.value.every((group) => isQueueSectionCollapsed(group.status))
+)
 
 function toggleQueueStatus(status: DiscoveryQueueStatus): void {
   selectedQueueStatuses.value = selectedQueueStatuses.value.includes(status)
     ? selectedQueueStatuses.value.filter((selected) => selected !== status)
     : [...selectedQueueStatuses.value, status]
+}
+
+function toggleQueueItemSelection(itemId: string): void {
+  selectedQueueItemIds.value = selectedQueueItemIds.value.includes(itemId)
+    ? selectedQueueItemIds.value.filter((id) => id !== itemId)
+    : [...selectedQueueItemIds.value, itemId]
+}
+
+function selectVisibleQueueableItems(): void {
+  const eligibleIds = filteredQueueItems.value
+    .filter((item) => isQueueItemSelectable(item.id))
+    .map((item) => item.id)
+  selectedQueueItemIds.value = [...new Set([...selectedQueueItemIds.value, ...eligibleIds])]
+}
+
+function isQueueItemSelectable(itemId: string): boolean {
+  return batchQueueableItems.value.some((item) => item.id === itemId)
+}
+
+function isQueueSectionCollapsed(status: DiscoveryQueueStatus): boolean {
+  return collapsedQueueStatuses.value.includes(status)
+}
+
+function updateQueueSectionCollapse(status: DiscoveryQueueStatus, event: Event): void {
+  if (!(event.currentTarget instanceof HTMLDetailsElement)) return
+  const collapsed = !event.currentTarget.open
+  collapsedQueueStatuses.value = collapsed
+    ? [...new Set([...collapsedQueueStatuses.value, status])]
+    : collapsedQueueStatuses.value.filter((candidate) => candidate !== status)
+}
+
+function toggleAllQueueSections(): void {
+  const statuses = queueGroups.value.map((group) => group.status)
+  if (allVisibleQueueSectionsCollapsed.value) {
+    collapsedQueueStatuses.value = collapsedQueueStatuses.value.filter((status) => !statuses.includes(status))
+  } else {
+    collapsedQueueStatuses.value = [...new Set([...collapsedQueueStatuses.value, ...statuses])]
+  }
 }
 
 function isQueueStatus(value: unknown): value is DiscoveryQueueStatus {
@@ -155,22 +198,27 @@ function loadQueueViewPreferences(): void {
   try {
     const saved = localStorage.getItem(queueViewPreferencesKey)
     if (!saved) return
-    const preferences = JSON.parse(saved) as { statuses?: unknown; groupByStatus?: unknown }
-    if (!Array.isArray(preferences.statuses) || typeof preferences.groupByStatus !== 'boolean') {
+    const preferences = JSON.parse(saved) as {
+      statuses?: unknown
+      collapsedStatuses?: unknown
+    }
+    if (!Array.isArray(preferences.statuses)) {
       throw new Error('The saved Queue display settings have an invalid format.')
     }
     selectedQueueStatuses.value = [...new Set(preferences.statuses.filter(isQueueStatus))]
-    groupQueueByStatus.value = preferences.groupByStatus
+    collapsedQueueStatuses.value = Array.isArray(preferences.collapsedStatuses)
+      ? [...new Set(preferences.collapsedStatuses.filter(isQueueStatus))]
+      : []
   } catch (reason) {
     error.value = `Queue display settings could not be loaded: ${reason instanceof Error ? reason.message : String(reason)}`
   }
 }
 
-watch([selectedQueueStatuses, groupQueueByStatus], () => {
+watch([selectedQueueStatuses, collapsedQueueStatuses], () => {
   try {
     localStorage.setItem(queueViewPreferencesKey, JSON.stringify({
       statuses: selectedQueueStatuses.value,
-      groupByStatus: groupQueueByStatus.value
+      collapsedStatuses: collapsedQueueStatuses.value
     }))
   } catch (reason) {
     error.value = `Queue display settings could not be saved: ${reason instanceof Error ? reason.message : String(reason)}`
@@ -193,6 +241,11 @@ function hasQueueableChapters(item: DiscoveryQueueItemSummary): boolean {
     item.chapterSummary.recommended > 0 ||
     (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
   )
+}
+
+function chaptersRemaining(item: DiscoveryQueueItemSummary): number | null {
+  if (!item.progress || item.progress.total <= 0) return null
+  return Math.max(0, item.progress.total - item.progress.current)
 }
 
 async function refreshQueue(): Promise<void> {
@@ -371,6 +424,24 @@ async function retryItem(item: DiscoveryQueueItemSummary): Promise<void> {
   try {
     const result = await window.novelTracker.retryDiscoveryQueueItem(item.id)
     if (!result.ok) error.value = result.error
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    retryingId.value = ''
+  }
+}
+
+async function forceRetryItem(item: DiscoveryQueueItemSummary): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  retryingId.value = item.id
+  try {
+    const result = await window.novelTracker.forceRetryDiscoveryQueueItem(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = `Restarted chapter discovery for ${item.title}.`
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
@@ -574,7 +645,36 @@ async function queueAllRecommendedEpubs(): Promise<void> {
   }
 }
 
-async function moveQueuedJob(item: DiscoveryQueueItemSummary, direction: 'up' | 'down'): Promise<void> {
+async function queueSelectedEpubs(): Promise<void> {
+  const selectedItems = [...selectedQueueableItems.value]
+  if (selectedItems.length === 0) return
+  error.value = ''
+  notice.value = ''
+  batchQueueing.value = true
+  const failures: string[] = []
+  let queued = 0
+  try {
+    for (const item of selectedItems) {
+      try {
+        const failure = await queueRecommendedEpub(item)
+        if (failure) failures.push(failure)
+        else queued += 1
+      } catch (reason) {
+        failures.push(`${item.title}: ${reason instanceof Error ? reason.message : String(reason)}`)
+      }
+    }
+    selectedQueueItemIds.value = []
+    notice.value = `Queued ${queued} selected EPUB job${queued === 1 ? '' : 's'}.`
+    if (failures.length) error.value = failures.join(' ')
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    batchQueueing.value = false
+  }
+}
+
+async function moveQueuedJob(item: DiscoveryQueueItemSummary, direction: 'up' | 'down' | 'top' | 'bottom'): Promise<void> {
   error.value = ''
   downloadActionId.value = item.id
   try {
@@ -913,54 +1013,108 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
         </div>
       </details>
-      <label class="queue-group-toggle">
-        <input v-model="groupQueueByStatus" type="checkbox" />
-        Group by status
-      </label>
+      <Button
+        v-if="queueGroups.length"
+        :label="allVisibleQueueSectionsCollapsed ? 'Expand all' : 'Collapse all'"
+        :icon="allVisibleQueueSectionsCollapsed ? 'pi pi-window-maximize' : 'pi pi-window-minimize'"
+        severity="secondary"
+        text
+        size="small"
+        @click="toggleAllQueueSections"
+      />
+      <Button
+        label="Select eligible"
+        icon="pi pi-check-square"
+        severity="secondary"
+        text
+        size="small"
+        :disabled="filteredQueueItems.every((item) => !isQueueItemSelectable(item.id))"
+        @click="selectVisibleQueueableItems"
+      />
+      <Button
+        :label="`Queue selected (${selectedQueueableItems.length})`"
+        icon="pi pi-bolt"
+        size="small"
+        :disabled="!outputDirectory || !selectedQueueableItems.length || batchQueueing || batchAccepting || Boolean(downloadActionId)"
+        @click="queueSelectedEpubs"
+      />
+      <Button
+        v-if="selectedQueueItemIds.length"
+        label="Clear selection"
+        severity="secondary"
+        text
+        size="small"
+        @click="selectedQueueItemIds = []"
+      />
       <span class="queue-visible-count">Showing {{ filteredQueueItems.length }} of {{ items.length }}</span>
     </div>
     <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration to queue downloads.</p>
     <p v-if="loading && items.length === 0" class="help-text">Loading saved queue…</p>
     <p v-else-if="items.length === 0" class="empty-state">No novels queued. Add a tracker selection or one or more URLs above.</p>
     <p v-else-if="filteredQueueItems.length === 0" class="empty-state">No jobs match the selected statuses.</p>
-    <template v-else v-for="group in queueGroups" :key="group.status ?? 'all'">
-      <h4 v-if="groupQueueByStatus" class="queue-status-group-heading">
-        <span>{{ group.label }}</span>
-        <small>{{ group.items.length }}</small>
-      </h4>
-      <div v-for="item in group.items" :key="item.id" class="queue-item">
-      <div class="queue-item-summary">
-        <strong>{{ item.title }}</strong>
-        <span>{{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}</span>
-        <span v-if="item.chapterSummary.total">
-          {{ item.chapterSummary.selected.toLocaleString() }} selected ·
-          {{ (item.chapterSummary.recommended + (item.includeOverlap ? item.chapterSummary.deliberateOverlap : 0)).toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
-          <template v-if="item.chapterSummary.latestTitle"> · latest: {{ item.chapterSummary.latestTitle }}</template>
-        </span>
-        <span v-if="item.recommendationSummary" class="queue-item-recommendation">{{ item.recommendationSummary }}</span>
-        <span
-          v-if="item.repackageOnly && ['queued', 'downloading'].includes(item.status)"
-          class="queue-item-rechecking"
-        >
-          <i class="pi pi-box" aria-hidden="true"></i>
-          Offline repackaging from saved content — no network requests
-        </span>
-        <span v-else-if="item.status === 'discovering' && item.downloadOptions" class="queue-item-rechecking">
-          <i class="pi pi-spin pi-spinner" aria-hidden="true"></i>
-          {{ item.progress?.message ?? 'Rechecking the chapter list before download…' }}
-        </span>
-        <span v-else-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
-        <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
-        <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
-        <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
-        <span v-if="item.error" class="queue-item-error">{{ item.error }}</span>
-        <span v-for="failed in item.failedChapters" :key="failed.url" class="queue-item-error">
-          {{ failed.title }}: {{ failed.error }}
-        </span>
-        <span v-if="item.failedChapterCount > item.failedChapters.length" class="queue-item-error">
-          {{ item.failedChapterCount - item.failedChapters.length }} additional chapter failures
-        </span>
-      </div>
+    <template v-else v-for="group in queueGroups" :key="group.status">
+      <details
+        class="queue-status-section"
+        :open="!isQueueSectionCollapsed(group.status)"
+        @toggle="updateQueueSectionCollapse(group.status, $event)"
+      >
+        <summary class="queue-status-group-heading">
+          <span>{{ group.label }}</span>
+          <small>{{ group.items.length }}</small>
+        </summary>
+        <div v-for="item in group.items" :key="item.id" class="queue-item">
+          <div class="queue-item-summary">
+            <div class="queue-item-heading">
+              <label v-if="isQueueItemSelectable(item.id)" class="queue-item-select">
+                <input
+                  type="checkbox"
+                  :checked="selectedQueueItemIds.includes(item.id)"
+                  :aria-label="`Select ${item.title} for batch queueing`"
+                  @change="toggleQueueItemSelection(item.id)"
+                />
+              </label>
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}</span>
+            </div>
+            <span v-if="item.chapterSummary.total">
+              {{ item.chapterSummary.selected.toLocaleString() }} selected ·
+              {{ (item.chapterSummary.recommended + (item.includeOverlap ? item.chapterSummary.deliberateOverlap : 0)).toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
+              <template v-if="item.chapterSummary.latestTitle"> · latest: {{ item.chapterSummary.latestTitle }}</template>
+            </span>
+            <span v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status) && chaptersRemaining(item) !== null" class="queue-remaining-chapters">
+              {{ chaptersRemaining(item)?.toLocaleString() }} chapters left ·
+              {{ item.progress?.current.toLocaleString() }} of {{ item.progress?.total.toLocaleString() }} complete
+            </span>
+            <span v-if="item.recommendationSummary" class="queue-item-recommendation">{{ item.recommendationSummary }}</span>
+            <span
+              v-if="item.repackageOnly && ['queued', 'downloading'].includes(item.status)"
+              class="queue-item-rechecking"
+            >
+              <i class="pi pi-box" aria-hidden="true"></i>
+              Offline repackaging from saved content — no network requests
+            </span>
+            <div v-else-if="item.status === 'discovering' && !item.downloadOptions" class="queue-item-rechecking">
+              <span><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> {{ item.progress?.message ?? 'Discovering chapters…' }}</span>
+              <ProgressBar
+                v-if="item.progress && item.progress.total > 0"
+                :value="Math.round((item.progress.current / item.progress.total) * 100)"
+                :show-value="false"
+                class="queue-item-progress"
+                :aria-label="`${item.title} chapter discovery progress`"
+              />
+            </div>
+            <span v-else-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
+            <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
+            <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
+            <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
+            <span v-if="item.error" class="queue-item-error">{{ item.error }}</span>
+            <span v-for="failed in item.failedChapters" :key="failed.url" class="queue-item-error">
+              {{ failed.title }}: {{ failed.error }}
+            </span>
+            <span v-if="item.failedChapterCount > item.failedChapters.length" class="queue-item-error">
+              {{ item.failedChapterCount - item.failedChapters.length }} additional chapter failures
+            </span>
+          </div>
       <span class="history-status" :class="`status-${item.status}`">
         <i v-if="item.status === 'discovering' && item.downloadOptions" class="pi pi-spin pi-spinner" aria-hidden="true"></i>
         {{ item.status === 'discovering' && item.downloadOptions ? 'rechecking chapters' : item.status.replace('-', ' ') }}
@@ -1027,6 +1181,17 @@ async function clearCompletedQueueItems(): Promise<void> {
             :loading="retryingId === item.id"
             :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="retryItem(item)"
+          />
+          <Button
+            v-if="item.status === 'discovering' && !item.downloadOptions"
+            label="Force retry"
+            icon="pi pi-refresh"
+            size="small"
+            severity="secondary"
+            outlined
+            :loading="retryingId === item.id"
+            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
+            @click="forceRetryItem(item)"
           />
           <template v-if="item.status === 'failed' && !item.downloadOptions">
             <Button
@@ -1105,22 +1270,48 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <template v-if="item.status === 'queued'">
             <Button
-              label="Move up"
-              icon="pi pi-arrow-up"
-              size="small"
+              icon="pi pi-angle-double-up"
               severity="secondary"
               text
+              rounded
+              size="small"
+              aria-label="Move to top of queue"
+              title="Move to top of queue"
+              :disabled="queuedItems.findIndex((queued) => queued.id === item.id) === 0 || Boolean(downloadActionId)"
+              @click="moveQueuedJob(item, 'top')"
+            />
+            <Button
+              icon="pi pi-arrow-up"
+              severity="secondary"
+              text
+              rounded
+              size="small"
+              aria-label="Move up in queue"
+              title="Move up"
               :disabled="queuedItems.findIndex((queued) => queued.id === item.id) === 0 || Boolean(downloadActionId)"
               @click="moveQueuedJob(item, 'up')"
             />
             <Button
-              label="Move down"
               icon="pi pi-arrow-down"
-              size="small"
               severity="secondary"
               text
+              rounded
+              size="small"
+              aria-label="Move down in queue"
+              title="Move down"
               :disabled="queuedItems.findIndex((queued) => queued.id === item.id) === queuedItems.length - 1 || Boolean(downloadActionId)"
               @click="moveQueuedJob(item, 'down')"
+            />
+            <Button
+              icon="pi pi-angle-double-down"
+              severity="secondary"
+              text
+              rounded
+              size="small"
+              aria-label="Move to bottom of queue"
+              title="Move to bottom of queue"
+              :disabled="queuedItems.findIndex((queued) => queued.id === item.id) === queuedItems.length - 1 || Boolean(downloadActionId)"
+              @click="moveQueuedJob(item, 'bottom')"
             />
           </template>
           <Button
@@ -1145,7 +1336,6 @@ async function clearCompletedQueueItems(): Promise<void> {
             :disabled="Boolean(downloadActionId)"
             @click="runDownloadAction(item, 'cancel')"
           />
-          <span v-if="item.status === 'discovering' && !item.downloadOptions" class="help-text">Discovering…</span>
           <Button
             label="Remove"
             icon="pi pi-times"
@@ -1166,6 +1356,7 @@ async function clearCompletedQueueItems(): Promise<void> {
         :aria-label="`${item.title} download progress`"
       />
     </div>
+      </details>
     </template>
   </section>
 </template>

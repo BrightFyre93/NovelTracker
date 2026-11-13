@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import type { EpubMergeProgress, LibraryFileRecord, LibraryIndex } from '../../../shared/contracts'
+import type {
+  EpubMergeProgress,
+  LibraryFileRecord,
+  LibraryIndexSummary
+} from '../../../shared/contracts'
 import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
@@ -15,9 +19,11 @@ const emit = defineEmits<{
 const libraryState = useLibraryStore()
 const libraryRoot = ref('')
 const outputDirectory = ref('')
-const index = shallowRef<LibraryIndex | null>(null)
-const backupIndex = shallowRef<LibraryIndex | null>(null)
+const index = shallowRef<LibraryIndexSummary | null>(null)
+const backupDate = ref<string | null>(null)
+const selectedFiles = shallowRef<LibraryFileRecord[]>([])
 const search = ref('')
+const multipleFilesOnly = ref(false)
 const selectedNovel = ref('')
 const selectedFileId = ref('')
 const restoringBackup = ref(false)
@@ -36,59 +42,38 @@ const busy = computed(() =>
 const error = ref('')
 const success = ref('')
 const visibleFileLimit = 100
-
-const visibleLibraryFiles = computed(() =>
-  index.value?.files ?? []
-)
+const loadingNovelFiles = ref(false)
 
 const novelSummaries = computed(() => {
-  const grouped = new Map<string, { key: string; title: string; files: LibraryFileRecord[] }>()
-  for (const file of visibleLibraryFiles.value) {
-    const key = file.novelTitle.trim().toLocaleLowerCase()
-    const group = grouped.get(key) ?? { key, title: file.novelTitle, files: [] }
-    group.files.push(file)
-    grouped.set(key, group)
-  }
   const query = search.value.trim().toLocaleLowerCase()
-  return [...grouped.values()]
-    .map((group) => {
-      const stateCounts = {
-        Completed: group.files.filter((file) => file.folderState === 'Completed').length,
-        Downloaded: group.files.filter((file) => file.folderState === 'Downloaded').length,
-        Sent: group.files.filter((file) => file.folderState === 'Sent').length,
-        Old: group.files.filter((file) => file.folderState === 'Old').length,
-        'Old Completed': group.files.filter((file) => file.folderState === 'Old Completed').length
-      }
-      const coverage = analyzeLibraryCoverage(group.files.filter((file) => file.format === 'EPUB'))
-      return {
-        ...group,
-        stateCounts,
-        coverage
-      }
-    })
+  return (index.value?.novels ?? [])
     .filter((group) =>
-      !query ||
-      group.title.toLocaleLowerCase().includes(query) ||
-      group.files.some((file) => file.filename.toLocaleLowerCase().includes(query))
+      (!multipleFilesOnly.value || group.files.length > 1) &&
+      (
+        !query ||
+        group.title.toLocaleLowerCase().includes(query) ||
+        group.files.some((file) => file.filename.toLocaleLowerCase().includes(query))
+      )
     )
-    .sort((left, right) => left.title.localeCompare(right.title))
 })
 
 const selectedGroup = computed(() => novelSummaries.value.find((group) => group.key === selectedNovel.value))
 const filteredFiles = computed(() => {
   const query = search.value.trim().toLocaleLowerCase()
-  const allFiles = selectedGroup.value?.files ?? []
+  const allFiles = selectedFiles.value
   if (selectedGroup.value?.title.toLocaleLowerCase().includes(query)) return allFiles.slice(0, visibleFileLimit)
   return allFiles
     .filter((file) => !query || `${file.filename} ${file.relativePath}`.toLocaleLowerCase().includes(query))
     .slice(0, visibleFileLimit)
 })
 const selectedFile = computed(() =>
-  selectedGroup.value?.files.find((file) => file.id === selectedFileId.value) ?? null
+  selectedFiles.value.find((file) => file.id === selectedFileId.value) ?? null
 )
-const selectedCoverageWarnings = computed(() => selectedGroup.value?.coverage.warnings ?? [])
+const selectedCoverageWarnings = computed(() =>
+  analyzeLibraryCoverage(selectedFiles.value.filter((file) => file.format === 'EPUB')).warnings
+)
 const selectedMergeFiles = computed(() =>
-  (index.value?.files ?? [])
+  selectedFiles.value
     .filter((file) => file.format === 'EPUB' && mergeFileIds.value.includes(file.id))
     .sort((left, right) => {
       const leftStart = left.chapterNumbers[0] ?? left.filenameRange?.start ?? Number.MAX_SAFE_INTEGER
@@ -96,6 +81,18 @@ const selectedMergeFiles = computed(() =>
       return leftStart - rightStart || left.filename.localeCompare(right.filename)
     })
 )
+
+watch(novelSummaries, (summaries) => {
+  if (selectedNovel.value && !summaries.some((group) => group.key === selectedNovel.value)) {
+    selectedNovel.value = ''
+    selectedFileId.value = ''
+    selectedFiles.value = []
+    mergeFileIds.value = []
+    mergeFilename.value = ''
+    latestMergedPath.value = ''
+    loadingNovelFiles.value = false
+  }
+})
 let removeProgressListener: (() => void) | undefined
 let removeMergeProgressListener: (() => void) | undefined
 
@@ -116,7 +113,7 @@ onMounted(async () => {
     error.value = reason instanceof Error ? reason.message : String(reason)
   }
   try {
-    const savedIndex = await window.novelTracker.getLibraryIndex()
+    const savedIndex = await window.novelTracker.getLibraryIndexSummary()
     index.value = savedIndex && (!configuredRoot || savedIndex.libraryRoot === configuredRoot)
       ? savedIndex
       : null
@@ -128,7 +125,7 @@ onMounted(async () => {
     if (!error.value) error.value = reason instanceof Error ? reason.message : String(reason)
   }
   try {
-    backupIndex.value = await window.novelTracker.getLibraryIndexBackup()
+    backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
   } catch (reason) {
     if (!error.value) error.value = reason instanceof Error ? reason.message : String(reason)
   }
@@ -162,8 +159,34 @@ function mergeProgressStepStatus(index: number): 'done' | 'active' | 'pending' |
 }
 
 function selectFirstNovel(): void {
-  if (!selectedNovel.value && novelSummaries.value.length > 0) {
-    selectedNovel.value = novelSummaries.value[0].key
+  const firstNovel = novelSummaries.value[0]
+  if (!selectedNovel.value && firstNovel) void selectNovel(firstNovel.key)
+  else if (!firstNovel) {
+    selectedFiles.value = []
+    selectedFileId.value = ''
+    loadingNovelFiles.value = false
+  }
+}
+
+async function selectNovel(key: string): Promise<void> {
+  selectedNovel.value = key
+  selectedFileId.value = ''
+  selectedFiles.value = []
+  mergeFileIds.value = []
+  mergeFilename.value = ''
+  latestMergedPath.value = ''
+  loadingNovelFiles.value = true
+  try {
+    const result = await window.novelTracker.getLibraryNovelFiles(key)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    if (selectedNovel.value === key) selectedFiles.value = result.value
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    if (selectedNovel.value === key) loadingNovelFiles.value = false
   }
 }
 
@@ -181,7 +204,7 @@ async function scan(forceRebuild = false): Promise<void> {
       return
     }
     index.value = result.value
-    backupIndex.value = await window.novelTracker.getLibraryIndexBackup()
+    backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
     selectedNovel.value = ''
     selectedFileId.value = ''
     mergeFileIds.value = []
@@ -194,7 +217,7 @@ async function scan(forceRebuild = false): Promise<void> {
     const errorMessage = result.value.scanErrors
       ? ` ${result.value.scanErrors.toLocaleString()} files need attention.`
       : ''
-    success.value = `${forceRebuild ? 'Rebuilt' : 'Indexed'} ${result.value.files.length.toLocaleString()} files.${cacheMessage}${errorMessage}`
+    success.value = `${forceRebuild ? 'Rebuilt' : 'Indexed'} ${result.value.fileCount.toLocaleString()} files.${cacheMessage}${errorMessage}`
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
@@ -206,7 +229,7 @@ async function scan(forceRebuild = false): Promise<void> {
 }
 
 async function restoreBackup(): Promise<void> {
-  if (!backupIndex.value || restoringBackup.value) return
+  if (!backupDate.value || restoringBackup.value) return
   if (!window.confirm('Restore the saved library index backup? The current index will be preserved as the new backup.')) {
     return
   }
@@ -226,7 +249,7 @@ async function restoreBackup(): Promise<void> {
     mergeFileIds.value = []
     mergeFilename.value = ''
     selectFirstNovel()
-    backupIndex.value = await window.novelTracker.getLibraryIndexBackup()
+    backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
     success.value = 'Library index backup restored.'
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -257,7 +280,7 @@ function toggleMergeFile(file: LibraryFileRecord): void {
     error.value = 'Select no more than 20 EPUBs for one merge.'
     return
   }
-  const selected = (index.value?.files ?? []).filter((candidate) => mergeFileIds.value.includes(candidate.id))
+  const selected = selectedFiles.value.filter((candidate) => mergeFileIds.value.includes(candidate.id))
   if (selected.length === 0) {
     mergeFilename.value = ''
     return
@@ -417,7 +440,8 @@ async function saveCorrection(): Promise<void> {
   success.value = ''
   try {
     const chapterNumbers = parseCoverage(correctedCoverage.value)
-    const result = await window.novelTracker.correctLibraryFile(selectedFile.value.id, {
+    const correctedFileId = selectedFile.value.id
+    const result = await window.novelTracker.correctLibraryFile(correctedFileId, {
       novelTitle: correctedTitle.value.trim() || undefined,
       chapterNumbers
     })
@@ -426,6 +450,10 @@ async function saveCorrection(): Promise<void> {
       return
     }
     index.value = result.value
+    const correctedGroup = result.value.novels.find((group) =>
+      group.files.some((file) => file.id === correctedFileId)
+    )
+    if (correctedGroup) await selectNovel(correctedGroup.key)
     success.value = 'Library correction saved locally.'
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -474,12 +502,12 @@ function chapterRangeLabel(start: number, end: number): string {
             @click="scan(true)"
           />
           <Button
-            v-if="backupIndex"
+            v-if="backupDate"
             label="Restore backup"
             icon="pi pi-history"
             severity="secondary"
             outlined
-            :title="`Last index backup: ${new Date(backupIndex.scannedAt).toLocaleString()}`"
+            :title="`Last index backup saved: ${new Date(backupDate).toLocaleString()}`"
             :disabled="busy"
             :loading="restoringBackup"
             @click="restoreBackup"
@@ -491,11 +519,11 @@ function chapterRangeLabel(start: number, end: number): string {
       </p>
       <div v-if="index" class="library-summary">
         <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>visible novels</span></div>
-        <div><strong>{{ visibleLibraryFiles.length.toLocaleString() }}</strong><span>indexed ebook files</span></div>
+        <div><strong>{{ index.fileCount.toLocaleString() }}</strong><span>indexed ebook files</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
       <Message v-if="!index && !busy" severity="info" :closable="false" class="feedback">
-        {{ backupIndex
+        {{ backupDate
           ? 'No current index is loaded. Restore the saved backup or rebuild the index from the configured library root.'
           : libraryRoot
             ? 'Your library root is configured. Scan it to build the index; the scan will not move or modify files.'
@@ -509,13 +537,17 @@ function chapterRangeLabel(start: number, end: number): string {
           <h3>Novels</h3>
           <InputText v-model="search" class="library-search" placeholder="Search title or file" />
         </div>
+        <label class="library-multi-file-filter">
+          <input v-model="multipleFilesOnly" type="checkbox" />
+          <span>Show novels with more than one file</span>
+        </label>
         <div class="novel-list">
           <button
             v-for="novel in novelSummaries"
             :key="novel.key"
             class="novel-choice"
             :class="{ active: selectedNovel === novel.key }"
-            @click="selectedNovel = novel.key; selectedFileId = ''; mergeFileIds = []; mergeFilename = ''; latestMergedPath = ''"
+            @click="selectNovel(novel.key)"
           >
             <span class="novel-choice-title">{{ novel.title }}</span>
             <span class="novel-choice-count">
@@ -556,7 +588,8 @@ function chapterRangeLabel(start: number, end: number): string {
             <p v-if="selectedGroup" class="chapter-toolbar-note">{{ selectedGroup.files.length.toLocaleString() }} indexed files</p>
           </div>
         </div>
-        <div v-if="selectedGroup" class="library-file-list">
+        <div v-if="selectedGroup && loadingNovelFiles" class="help-text">Loading this novel's chapter and coverage details…</div>
+        <div v-else-if="selectedGroup" class="library-file-list">
           <button
             v-for="file in filteredFiles"
             :key="file.id"
