@@ -327,7 +327,7 @@ async function resetEpubCss(): Promise<void> {
           <input id="scan-old-folder" v-model="scanOldFolderDraft" type="checkbox" />
           <span>
             <strong>Scan the Old folder</strong>
-            <small class="help-text">Include archived EPUB volumes in Old when scanning. Off by default.</small>
+            <small class="help-text">Include archived EPUB and AZW3 files in Old when scanning. AZW3 contents are not inspected. Off by default.</small>
           </span>
         </label>
       </div>

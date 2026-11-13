@@ -19,6 +19,7 @@ import type {
   ChapterContent,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
+  LibraryOperation,
   LibraryFileCorrection,
   LibraryIndex
 } from '../../shared/contracts'
@@ -142,16 +143,16 @@ export function writeSettings(dataDirectory: string, settings: AppSettings): Pro
   return writeJson(join(dataDirectory, 'settings.json'), settings)
 }
 
-function epubOnlyIndex(index: LibraryIndex | null): LibraryIndex | null {
+function supportedEbookIndex(index: LibraryIndex | null): LibraryIndex | null {
   if (!index || !Array.isArray(index.files)) return index
   const files = index.files
-    .filter((file) => file.format === 'EPUB')
+    .filter((file) => file.format === 'EPUB' || file.format === 'AZW3')
     .map((file) => ({
       id: file.id,
       path: file.path,
       relativePath: file.relativePath,
       filename: file.filename,
-      format: 'EPUB' as const,
+      format: file.format,
       folderState: file.folderState,
       size: file.size,
       modifiedAt: file.modifiedAt,
@@ -169,11 +170,11 @@ function epubOnlyIndex(index: LibraryIndex | null): LibraryIndex | null {
 }
 
 export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIndex | null> {
-  return epubOnlyIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.json'), null))
+  return supportedEbookIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.json'), null))
 }
 
 export async function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
-  return epubOnlyIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null))
+  return supportedEbookIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null))
 }
 
 export async function writeLibraryIndex(
@@ -200,6 +201,40 @@ export async function writeLibraryIndex(
 
 export function readDownloadHistory(dataDirectory: string): Promise<DownloadHistoryEntry[]> {
   return readJson(join(dataDirectory, 'download-history.json'), [])
+}
+
+function isLibraryOperation(value: unknown): value is LibraryOperation {
+  if (typeof value !== 'object' || value === null) return false
+  const operation = value as Partial<LibraryOperation>
+  return (
+    typeof operation.id === 'string' &&
+    ['merge-epubs', 'epub-to-azw3', 'azw3-to-epub', 'repair-epub'].includes(operation.kind ?? '') &&
+    ['running', 'completed', 'failed', 'interrupted'].includes(operation.status ?? '') &&
+    Array.isArray(operation.inputFiles) &&
+    operation.inputFiles.every((path) => typeof path === 'string') &&
+    typeof operation.outputPath === 'string' &&
+    (operation.progress === null ||
+      (typeof operation.progress === 'number' && Number.isFinite(operation.progress) &&
+        operation.progress >= 0 && operation.progress <= 100)) &&
+    typeof operation.message === 'string' &&
+    typeof operation.error === 'string' &&
+    typeof operation.startedAt === 'string' &&
+    typeof operation.updatedAt === 'string'
+  )
+}
+
+export async function readLibraryOperations(dataDirectory: string): Promise<LibraryOperation[]> {
+  const saved = await readJson<unknown>(join(dataDirectory, 'library-operations.json'), [])
+  if (!Array.isArray(saved)) throw new Error('The saved library operation history is invalid.')
+  const operations = saved.filter(isLibraryOperation)
+  if (operations.length !== saved.length) {
+    console.warn('Invalid entries in library operation history were ignored.')
+  }
+  return operations.slice(0, 30)
+}
+
+export function writeLibraryOperations(dataDirectory: string, operations: LibraryOperation[]): Promise<void> {
+  return writeJson(join(dataDirectory, 'library-operations.json'), operations.slice(0, 30))
 }
 
 function serializeDownloadHistoryWrite<T>(operation: () => Promise<T>): Promise<T> {

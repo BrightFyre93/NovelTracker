@@ -4,6 +4,7 @@ import { extname, relative, resolve } from 'node:path'
 import type {
   LibraryFileRecord,
   LibraryIndex,
+  LibraryFileFormat,
   LibraryProgress,
   LibraryFolderState
 } from '../../shared/contracts'
@@ -17,6 +18,7 @@ interface ScannableFile {
   size: number
   modifiedAt: string
   id: string
+  format: LibraryFileFormat
 }
 
 export interface LibraryScanOptions {
@@ -75,7 +77,7 @@ function cachedFile(
     path: file.path,
     relativePath: file.relativePath,
     filename: cached.filename,
-    format: 'EPUB',
+    format: file.format,
     folderState: file.folderState,
     size: file.size,
     modifiedAt: file.modifiedAt,
@@ -105,7 +107,7 @@ function emptyFile(file: ScannableFile, error: unknown): LibraryFileRecord {
     path: file.path,
     relativePath: file.relativePath,
     filename,
-    format: 'EPUB',
+    format: file.format,
     folderState: file.folderState,
     size: file.size,
     modifiedAt: file.modifiedAt,
@@ -159,7 +161,7 @@ async function enumerateFiles(
           }
           if (!details.isFile()) continue
           const extension = extname(entry.name).toLowerCase()
-          if (extension !== '.epub') continue
+          if (extension !== '.epub' && extension !== '.azw3') continue
 
           const relativePath = relative(root, path)
           files.push({
@@ -168,7 +170,8 @@ async function enumerateFiles(
             folderState: folder,
             size: details.size,
             modifiedAt: details.mtime.toISOString(),
-            id: fileId(relativePath)
+            id: fileId(relativePath),
+            format: extension === '.epub' ? 'EPUB' : 'AZW3'
           })
           if (files.length % 200 === 0) {
             onProgress({
@@ -275,17 +278,43 @@ export async function scanLibrary(
     if (!record) {
       inspectedFiles += 1
       try {
-        if (file.size > MAX_EPUB_INPUT_BYTES) {
+        if (file.format === 'EPUB' && file.size > MAX_EPUB_INPUT_BYTES) {
           throw new Error(`EPUB exceeds the ${MAX_EPUB_INPUT_BYTES / (1024 * 1024)} MB inspection limit.`)
         }
-        record = await inspectEpub(
-          file.path,
-          file.relativePath,
-          file.folderState,
-          file.size,
-          file.modifiedAt,
-          file.id
-        )
+        if (file.format === 'EPUB') {
+          record = await inspectEpub(
+            file.path,
+            file.relativePath,
+            file.folderState,
+            file.size,
+            file.modifiedAt,
+            file.id
+          )
+        } else {
+          const filename = file.relativePath.split(/[\\/]/).pop() ?? file.relativePath
+          const novelTitle = filename
+            .replace(/\.azw3$/i, '')
+            .replace(/\s+\d+\s*[-–]\s*\d+$/, '')
+          record = {
+            id: file.id,
+            path: file.path,
+            relativePath: file.relativePath,
+            filename,
+            format: 'AZW3',
+            folderState: file.folderState,
+            size: file.size,
+            modifiedAt: file.modifiedAt,
+            novelTitle: novelTitle || filename,
+            author: '',
+            language: '',
+            chapterTitles: [],
+            chapterNumbers: [],
+            filenameRange: parseFilenameRange(filename),
+            coverageConfidence: 'unknown',
+            coverPath: null,
+            inspectionError: ''
+          }
+        }
       } catch (error) {
         record = emptyFile(file, error)
         scanErrors += 1

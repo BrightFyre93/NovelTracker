@@ -222,7 +222,7 @@ export interface DiscoveryQueueInput {
 }
 
 export type LibraryFolderState = 'Completed' | 'Downloaded' | 'Sent' | 'Old'
-export type LibraryFileFormat = 'EPUB'
+export type LibraryFileFormat = 'EPUB' | 'AZW3'
 export type CoverageConfidence = 'extracted-toc' | 'filename' | 'user-corrected' | 'unknown'
 
 export interface LibraryFileCorrection {
@@ -282,6 +282,25 @@ export interface LibraryEpubMergeResult {
   lastChapter: number | null
 }
 
+export interface EbookConversionResult {
+  outputPath: string
+  outputBytes: number
+}
+
+export interface EpubRepairResult {
+  outputPath: string
+  outputBytes: number
+  repairedWebpImages: number
+  upscaledCover: boolean
+  fixedMimetype: boolean
+}
+
+export interface EpubRepairProgress {
+  stage: 'checking' | 'converting-images' | 'rewriting' | 'validating' | 'saving' | 'complete'
+  percentage: number
+  message: string
+}
+
 export interface EpubMergeProgress {
   stage: 'reading' | 'extracting' | 'merging' | 'packaging' | 'validating' | 'saving' | 'complete' | 'cancelled' | 'failed'
   percentage: number
@@ -300,6 +319,30 @@ export type Result<T> =
 
 export type LibraryEpubMergeResponse =
   | Result<LibraryEpubMergeResult>
+  | { ok: false; cancelled: true }
+
+export type LibraryOperationKind = 'merge-epubs' | 'epub-to-azw3' | 'azw3-to-epub' | 'repair-epub'
+export type LibraryOperationStatus = 'running' | 'completed' | 'failed' | 'interrupted'
+
+export interface LibraryOperation {
+  id: string
+  kind: LibraryOperationKind
+  status: LibraryOperationStatus
+  inputFiles: string[]
+  outputPath: string
+  progress: number | null
+  message: string
+  error: string
+  startedAt: string
+  updatedAt: string
+}
+
+export type EbookConversionResponse =
+  | Result<EbookConversionResult>
+  | { ok: false; cancelled: true }
+
+export type EpubRepairResponse =
+  | Result<EpubRepairResult>
   | { ok: false; cancelled: true }
 
 export interface NovelTrackerApi {
@@ -343,6 +386,11 @@ export interface NovelTrackerApi {
   cancelLibraryScan(): Promise<void>
   correctLibraryFile(fileId: string, correction: LibraryFileCorrection): Promise<Result<LibraryIndex>>
   mergeLibraryEpubs(fileIds: string[], filename: string): Promise<LibraryEpubMergeResponse>
+  convertEpubToAzw3(inputPath: string): Promise<EbookConversionResponse>
+  convertAzw3ToEpub(fileId: string): Promise<EbookConversionResponse>
+  repairEpub(fileId: string): Promise<EpubRepairResponse>
+  getLibraryOperations(): Promise<LibraryOperation[]>
+  onLibraryOperationsUpdate(listener: (operations: LibraryOperation[]) => void): () => void
   onLibraryEpubMergeProgress(listener: (progress: EpubMergeProgress) => void): () => void
   openLibraryPath(path: string, reveal: boolean): Promise<Result<void>>
   onLibraryProgress(listener: (progress: LibraryProgress) => void): () => void

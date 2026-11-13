@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DiscoveryResult,
   AppSettings,
+  EbookConversionResponse,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
@@ -12,7 +13,9 @@ import type {
   LibraryFileCorrection,
   LibraryEpubMergeResult,
   LibraryIndex,
+  LibraryOperation,
   LibraryProgress,
+  EpubRepairResponse,
   NovelTrackerApi,
   Result,
   TrackerNovel
@@ -76,6 +79,19 @@ const api: NovelTrackerApi = {
   getLibraryIndexBackup: () => ipcRenderer.invoke('library:index-backup') as Promise<LibraryIndex | null>,
   restoreLibraryIndexBackup: () =>
     ipcRenderer.invoke('library:restore-index-backup') as Promise<Result<LibraryIndex>>,
+  convertEpubToAzw3: (inputPath: string) =>
+    ipcRenderer.invoke('library:convert-azw3', inputPath) as Promise<EbookConversionResponse>,
+  convertAzw3ToEpub: (fileId: string) =>
+    ipcRenderer.invoke('library:convert-azw3-to-epub', fileId) as Promise<EbookConversionResponse>,
+  repairEpub: (fileId: string) =>
+    ipcRenderer.invoke('library:repair-epub', fileId) as Promise<EpubRepairResponse>,
+  getLibraryOperations: () =>
+    ipcRenderer.invoke('library:operations') as Promise<LibraryOperation[]>,
+  onLibraryOperationsUpdate: (listener: (operations: LibraryOperation[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, operations: LibraryOperation[]) => listener(operations)
+    ipcRenderer.on('library:operations:update', handler)
+    return () => ipcRenderer.removeListener('library:operations:update', handler)
+  },
   scanLibrary: (forceRebuild = false) =>
     ipcRenderer.invoke('library:scan', forceRebuild) as Promise<Result<LibraryIndex>>,
   cancelLibraryScan: () => ipcRenderer.invoke('library:cancel-scan') as Promise<void>,

@@ -4,13 +4,47 @@ import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import type { DiscoveryQueueInput, DiscoveryQueueItem, GenerateEpubInput, TrackerNovel } from '../../../shared/contracts'
+import type {
+  DiscoveryQueueInput,
+  DiscoveryQueueItem,
+  DiscoveryQueueStatus,
+  GenerateEpubInput,
+  TrackerNovel
+} from '../../../shared/contracts'
 
 const emit = defineEmits<{
   openItem: [item: DiscoveryQueueItem]
 }>()
 
+const queueStatusFilterElement = ref<HTMLDetailsElement | null>(null)
+
+interface QueueStatusOption {
+  value: DiscoveryQueueStatus
+  label: string
+}
+
+interface QueueStatusGroup {
+  status: DiscoveryQueueStatus | null
+  label: string
+  items: DiscoveryQueueItem[]
+}
+
+const queueStatusOptions: QueueStatusOption[] = [
+  { value: 'discovering', label: 'Discovering' },
+  { value: 'needs-review', label: 'Needs review' },
+  { value: 'ready', label: 'Ready' },
+  { value: 'queued', label: 'Queued' },
+  { value: 'downloading', label: 'Downloading' },
+  { value: 'paused', label: 'Paused' },
+  { value: 'completed', label: 'Completed / downloaded' },
+  { value: 'partially-completed', label: 'Partially completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' }
+]
+
 const items = ref<DiscoveryQueueItem[]>([])
+const selectedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
+const groupQueueByStatus = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
@@ -51,7 +85,7 @@ const activeDownloadCount = computed(() => items.value.filter((item) => item.sta
 const queuedItems = computed(() =>
   items.value
     .filter((item) => item.status === 'queued' && item.downloadOptions)
-    .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))
+    .sort(compareQueuedItems)
 )
 const batchQueueableItems = computed(() =>
   items.value.filter((item) =>
@@ -73,6 +107,50 @@ const batchAcceptableItems = computed(() =>
   )
 )
 const batchAccepting = ref(false)
+const filteredQueueItems = computed(() =>
+  selectedQueueStatuses.value.length === 0
+    ? items.value
+    : items.value.filter((item) => selectedQueueStatuses.value.includes(item.status))
+)
+const queueStatusCounts = computed(() => {
+  const counts = new Map<DiscoveryQueueStatus, number>()
+  for (const { value } of queueStatusOptions) {
+    counts.set(value, items.value.filter((item) => item.status === value).length)
+  }
+  return counts
+})
+const queueGroups = computed<QueueStatusGroup[]>(() => {
+  if (!groupQueueByStatus.value) {
+    return [{ status: null, label: '', items: filteredQueueItems.value }]
+  }
+  return queueStatusOptions.flatMap(({ value, label }) => {
+    const groupItems = filteredQueueItems.value
+      .filter((item) => item.status === value)
+      .sort(value === 'queued' ? compareQueuedItems : compareQueueItemsByTitle)
+    return groupItems.length > 0 ? [{ status: value, label, items: groupItems }] : []
+  })
+})
+const queueFilterSummary = computed(() =>
+  selectedQueueStatuses.value.length === 0
+    ? 'All statuses'
+    : `${selectedQueueStatuses.value.length} selected`
+)
+
+function toggleQueueStatus(status: DiscoveryQueueStatus): void {
+  selectedQueueStatuses.value = selectedQueueStatuses.value.includes(status)
+    ? selectedQueueStatuses.value.filter((selected) => selected !== status)
+    : [...selectedQueueStatuses.value, status]
+}
+
+function compareQueuedItems(left: DiscoveryQueueItem, right: DiscoveryQueueItem): number {
+  return left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id)
+}
+
+function compareQueueItemsByTitle(left: DiscoveryQueueItem, right: DiscoveryQueueItem): number {
+  return left.title.localeCompare(right.title, 'en', { numeric: true, sensitivity: 'base' }) ||
+    left.title.localeCompare(right.title) ||
+    left.id.localeCompare(right.id)
+}
 
 function hasQueueableChapters(item: DiscoveryQueueItem): boolean {
   if (item.status === 'ready') return item.chapters.some((chapter) => chapter.selected)
@@ -94,6 +172,7 @@ async function refreshQueue(): Promise<void> {
 }
 
 onMounted(() => {
+  document.addEventListener('pointerdown', closeQueueStatusFilterOnOutsideClick)
   removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate((updatedItems) => {
     items.value = updatedItems
   })
@@ -106,7 +185,17 @@ onMounted(() => {
   })
 })
 
-onUnmounted(() => removeQueueListener?.())
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', closeQueueStatusFilterOnOutsideClick)
+  removeQueueListener?.()
+})
+
+function closeQueueStatusFilterOnOutsideClick(event: PointerEvent): void {
+  const filter = queueStatusFilterElement.value
+  if (filter && event.target instanceof Node && !filter.contains(event.target)) {
+    filter.open = false
+  }
+}
 
 async function toggleTrackerPicker(): Promise<void> {
   trackerVisible.value = !trackerVisible.value
@@ -309,6 +398,7 @@ async function runDownloadAction(
   error.value = ''
   notice.value = ''
   downloadActionId.value = item.id
+  let shouldRefresh = false
   try {
     const result = action === 'retry'
       ? await window.novelTracker.retryEpub(item.id)
@@ -325,12 +415,13 @@ async function runDownloadAction(
     else if (action === 'pause') notice.value = `Paused the EPUB job for ${item.title}.`
     else if (action === 'resume') notice.value = `Resumed the EPUB job for ${item.title}.`
     else notice.value = `Queued ${item.title} for retry.`
-    await refreshQueue()
+    shouldRefresh = true
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     downloadActionId.value = ''
   }
+  if (shouldRefresh) void refreshQueue()
 }
 
 async function repackageOffline(item: DiscoveryQueueItem): Promise<void> {
@@ -722,10 +813,46 @@ async function clearQueue(): Promise<void> {
         />
       </div>
     </div>
+    <div class="queue-list-controls">
+      <details ref="queueStatusFilterElement" class="queue-status-filter">
+        <summary>Filter status · {{ queueFilterSummary }}</summary>
+        <div class="queue-status-options" role="group" aria-label="Filter queue by status">
+          <label v-for="status in queueStatusOptions" :key="status.value" class="queue-status-option">
+            <input
+              type="checkbox"
+              :checked="selectedQueueStatuses.includes(status.value)"
+              @change="toggleQueueStatus(status.value)"
+            />
+            <span>{{ status.label }}</span>
+            <small>{{ queueStatusCounts.get(status.value) ?? 0 }}</small>
+          </label>
+          <Button
+            v-if="selectedQueueStatuses.length"
+            label="Clear filters"
+            severity="secondary"
+            text
+            size="small"
+            class="queue-status-clear"
+            @click="selectedQueueStatuses = []"
+          />
+        </div>
+      </details>
+      <label class="queue-group-toggle">
+        <input v-model="groupQueueByStatus" type="checkbox" />
+        Group by status
+      </label>
+      <span class="queue-visible-count">Showing {{ filteredQueueItems.length }} of {{ items.length }}</span>
+    </div>
     <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration to queue downloads.</p>
     <p v-if="loading && items.length === 0" class="help-text">Loading saved queue…</p>
     <p v-else-if="items.length === 0" class="empty-state">No novels queued. Add a tracker selection or one or more URLs above.</p>
-    <div v-for="item in items" :key="item.id" class="queue-item">
+    <p v-else-if="filteredQueueItems.length === 0" class="empty-state">No jobs match the selected statuses.</p>
+    <template v-else v-for="group in queueGroups" :key="group.status ?? 'all'">
+      <h4 v-if="groupQueueByStatus" class="queue-status-group-heading">
+        <span>{{ group.label }}</span>
+        <small>{{ group.items.length }}</small>
+      </h4>
+      <div v-for="item in group.items" :key="item.id" class="queue-item">
       <div class="queue-item-summary">
         <strong>{{ item.title }}</strong>
         <span>{{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}</span>
@@ -747,12 +874,6 @@ async function clearQueue(): Promise<void> {
           {{ item.progress?.message ?? 'Rechecking the chapter list before download…' }}
         </span>
         <span v-else-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
-        <ProgressBar
-          v-if="item.downloadOptions && item.progress && item.progress.total > 0 && ['queued', 'downloading', 'paused', 'partially-completed'].includes(item.status)"
-          :value="Math.round((item.progress.current / item.progress.total) * 100)"
-          :show-value="false"
-          :aria-label="`${item.title} download progress`"
-        />
         <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
         <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
         <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
@@ -958,6 +1079,14 @@ async function clearQueue(): Promise<void> {
           />
         </div>
       </div>
+      <ProgressBar
+        v-if="item.downloadOptions && item.progress && item.progress.total > 0 && ['queued', 'downloading', 'paused', 'partially-completed'].includes(item.status)"
+        :value="Math.round((item.progress.current / item.progress.total) * 100)"
+        :show-value="false"
+        class="queue-item-progress"
+        :aria-label="`${item.title} download progress`"
+      />
     </div>
+    </template>
   </section>
 </template>

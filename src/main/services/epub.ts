@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import JSZip from 'jszip'
+import sharp from 'sharp'
 import { XMLValidator } from 'fast-xml-parser'
 import type {
   ChapterContent,
@@ -19,6 +20,7 @@ import {
   type EpubImageMediaType
 } from '../../shared/constants'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../../shared/epubFilename'
+import { resizeSmallKindleCover } from './kindleCover'
 
 function escapeXml(value: string): string {
   return value
@@ -52,15 +54,43 @@ function decodeImage(image: ChapterImage): Buffer {
   return data
 }
 
-function collectPackagedImages(
+async function normalizeKindleImage(
+  image: ChapterImage,
+  isCover = false
+): Promise<{ mediaType: EpubImageMediaType; data: Buffer }> {
+  const data = decodeImage(image)
+  try {
+    if (isCover) {
+      const resizedCover = await resizeSmallKindleCover(data)
+      if (resizedCover) return { mediaType: 'image/jpeg', data: resizedCover }
+    }
+    if (image.mediaType !== 'image/webp') return { mediaType: image.mediaType, data }
+    const jpeg = await sharp(data, { failOn: 'error', limitInputPixels: 40_000_000 })
+      .rotate()
+      .jpeg({ quality: 90 })
+      .toBuffer()
+    if (jpeg.length === 0) throw new Error('The converted image is empty.')
+    return { mediaType: 'image/jpeg', data: jpeg }
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      isCover
+        ? `A Kindle cover could not be normalized: ${details}`
+        : `A WebP image could not be converted to a Kindle-compatible JPEG: ${details}`
+    )
+  }
+}
+
+async function collectPackagedImages(
   chapters: ChapterContent[],
   cover?: ChapterImage
-): { images: PackagedImage[]; chapterHrefs: string[][]; coverHref: string } {
+): Promise<{ images: PackagedImage[]; chapterHrefs: string[][]; coverHref: string }> {
   const images: PackagedImage[] = []
   const byHash = new Map<string, PackagedImage>()
   let totalBytes = 0
-  const addImage = (image: ChapterImage, isCover = false): PackagedImage => {
-    const data = decodeImage(image)
+  const addImage = async (image: ChapterImage, isCover = false): Promise<PackagedImage> => {
+    const normalized = await normalizeKindleImage(image, isCover)
+    const { data, mediaType } = normalized
     const hash = createHash('sha256').update(data).digest('hex')
     const existing = byHash.get(hash)
     if (existing) {
@@ -71,11 +101,11 @@ function collectPackagedImages(
     if (totalBytes > MAX_TOTAL_EPUB_IMAGE_BYTES) {
       throw new Error('The selected chapters contain more than 128 MB of images.')
     }
-    const extension = EPUB_IMAGE_TYPES[image.mediaType]
+    const extension = EPUB_IMAGE_TYPES[mediaType]
     const packaged = {
       id: `image-${images.length + 1}`,
       href: `images/${hash}.${extension}`,
-      mediaType: image.mediaType,
+      mediaType,
       data,
       isCover
     }
@@ -84,10 +114,13 @@ function collectPackagedImages(
     return packaged
   }
 
-  const chapterHrefs = chapters.map((chapter) =>
-    (chapter.images ?? []).map((image) => addImage(image).href)
-  )
-  const coverHref = cover ? addImage(cover, true).href : ''
+  const chapterHrefs: string[][] = []
+  for (const chapter of chapters) {
+    const hrefs: string[] = []
+    for (const image of chapter.images ?? []) hrefs.push((await addImage(image)).href)
+    chapterHrefs.push(hrefs)
+  }
+  const coverHref = cover ? (await addImage(cover, true)).href : ''
   return { images, chapterHrefs, coverHref }
 }
 
@@ -274,7 +307,7 @@ export async function buildEpubBuffer(
 
   const zip = new JSZip()
   zip.file('mimetype', EPUB_MIMETYPE, { compression: 'STORE' })
-  const packagedImages = collectPackagedImages(chapters, metadata.cover)
+  const packagedImages = await collectPackagedImages(chapters, metadata.cover)
   const files = createPackageFiles(
     title.trim() || 'Untitled',
     author.trim(),
@@ -371,7 +404,11 @@ export async function validateEpubBuffer(
     throw new Error('EPUB validation failed: the novel information page must be first in the reading order.')
   }
 
-  const imageFiles = names.filter((name) => /^images\/[a-f0-9]{64}\.(?:jpg|png|gif|webp)$/.test(name))
+  const webpImages = names.filter((name) => /^images\/.*\.webp$/i.test(name))
+  if (webpImages.length > 0) {
+    throw new Error('EPUB validation failed: WebP images are not supported for Kindle output.')
+  }
+  const imageFiles = names.filter((name) => /^images\/[a-f0-9]{64}\.(?:jpg|png|gif)$/.test(name))
   const xhtmlFiles = ['text/novel-info.xhtml', ...chapterFiles]
   onProgress?.({ stage: 'validating', percentage: 0, message: 'Validating EPUB resources…' })
   const xhtmlUpdateInterval = Math.max(1, Math.ceil(xhtmlFiles.length / 100))

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { lstat, realpath, stat } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type {
   AppSettings,
@@ -13,8 +13,14 @@ import type {
   DiscoveryQueueItem,
   DownloadHistoryEntry,
   EpubMergeProgress,
+  EpubRepairProgress,
+  EpubRepairResult,
+  EpubRepairResponse,
+  EbookConversionResponse,
   GenerateEpubInput,
   LibraryFileCorrection,
+  LibraryFileRecord,
+  LibraryOperation,
   LibraryEpubMergeResponse,
   LibraryIndex,
   LibraryProgress,
@@ -48,11 +54,13 @@ import {
   readDownloadHistory,
   readLibraryIndex,
   readLibraryIndexBackup,
+  readLibraryOperations,
   readSettings,
   saveDownloadHistoryEntry,
   removeChapterArtifacts,
   writeLibraryCorrection,
   writeLibraryIndex,
+  writeLibraryOperations,
   writeCoverArtifact,
   writeDiscoveryQueue,
   writeChapterArtifact,
@@ -72,9 +80,14 @@ import { writeEpub } from './services/epub'
 import { recommendArchiveCoverage } from '../shared/archiveRecommendation'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../shared/epubFilename'
 import type { EpubMergeInput, EpubMergeResult } from './services/epubMerger'
+import { convertAzw3ToEpub, convertEpubToAzw3 } from './services/azw3Converter'
 
 let mainWindow: BrowserWindow | null = null
 const approvedOutputDirectories = new Set<string>()
+let discoveryQueueNotificationTimer: ReturnType<typeof setTimeout> | null = null
+let libraryOperationFlushTimer: ReturnType<typeof setTimeout> | null = null
+let libraryOperationWrites = Promise.resolve()
+let libraryOperations: LibraryOperation[] = []
 interface ActiveLibraryScan {
   worker: Worker | null
   cancelRequested: boolean
@@ -97,6 +110,96 @@ let activeDiscoveries = 0
 const activeDownloads = new Map<string, { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' }>()
 let downloadPumpRunning = false
 let downloadPumpRequested = false
+
+function copyLibraryOperations(): LibraryOperation[] {
+  return libraryOperations.map((operation) => ({
+    ...operation,
+    inputFiles: [...operation.inputFiles]
+  }))
+}
+
+function persistLibraryOperations(): Promise<void> {
+  const snapshot = copyLibraryOperations()
+  const write = libraryOperationWrites.then(() => writeLibraryOperations(dataDirectory(), snapshot))
+  libraryOperationWrites = write.then(() => undefined, () => undefined)
+  return write
+}
+
+function broadcastLibraryOperations(): void {
+  const operations = copyLibraryOperations()
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed() || webContents.isLoadingMainFrame()) continue
+    const frame = webContents.mainFrame
+    if (frame.isDestroyed()) continue
+    frame.send('library:operations:update', operations)
+  }
+}
+
+async function flushLibraryOperations(): Promise<void> {
+  if (libraryOperationFlushTimer) {
+    clearTimeout(libraryOperationFlushTimer)
+    libraryOperationFlushTimer = null
+  }
+  broadcastLibraryOperations()
+  try {
+    await persistLibraryOperations()
+  } catch (error) {
+    console.error('Library operation history could not be saved:', error)
+  }
+}
+
+function scheduleLibraryOperationFlush(): void {
+  if (libraryOperationFlushTimer) return
+  libraryOperationFlushTimer = setTimeout(() => {
+    libraryOperationFlushTimer = null
+    void flushLibraryOperations()
+  }, 500)
+}
+
+async function startLibraryOperation(
+  input: Omit<LibraryOperation, 'id' | 'status' | 'startedAt' | 'updatedAt'>
+): Promise<string> {
+  const now = new Date().toISOString()
+  const operation: LibraryOperation = {
+    ...input,
+    id: randomUUID(),
+    status: 'running',
+    startedAt: now,
+    updatedAt: now,
+    inputFiles: [...input.inputFiles]
+  }
+  libraryOperations.unshift(operation)
+  while (libraryOperations.length > 30) {
+    let removableIndex = -1
+    for (let index = libraryOperations.length - 1; index >= 0; index -= 1) {
+      if (libraryOperations[index]?.status !== 'running') {
+        removableIndex = index
+        break
+      }
+    }
+    if (removableIndex < 0) break
+    libraryOperations.splice(removableIndex, 1)
+  }
+  await flushLibraryOperations()
+  return operation.id
+}
+
+async function updateLibraryOperation(
+  id: string,
+  update: Partial<Pick<LibraryOperation, 'status' | 'outputPath' | 'progress' | 'message' | 'error'>>,
+  flushImmediately = false
+): Promise<void> {
+  const index = libraryOperations.findIndex((operation) => operation.id === id)
+  if (index < 0) return
+  const operation = libraryOperations[index]
+  if (!operation) return
+  Object.assign(operation, update, { updatedAt: new Date().toISOString() })
+  libraryOperations.splice(index, 1)
+  libraryOperations.unshift(operation)
+  if (flushImmediately) await flushLibraryOperations()
+  else scheduleLibraryOperationFlush()
+}
 
 function dataDirectory(): string {
   return app.getPath('userData')
@@ -226,11 +329,157 @@ function expectedOutputPath(
   return resolve(outputDirectory, sanitizeEpubFilename(requestedFilename)).toLowerCase()
 }
 
-function notifyDiscoveryQueueChanged(): void {
-  const items = copyDiscoveryQueue()
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.webContents.isDestroyed()) window.webContents.send('discovery-queue:update', items)
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const relativePath = relative(directory, candidate)
+  return relativePath === '' ||
+    (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+}
+
+async function getIndexedLibraryFile(
+  rawFileId: unknown,
+  expectedFormat: LibraryFileRecord['format']
+): Promise<string> {
+  if (typeof rawFileId !== 'string' || !rawFileId) throw new Error('Select an indexed library file.')
+  const [index, settings] = await Promise.all([
+    readLibraryIndex(dataDirectory()),
+    readSettings(dataDirectory())
+  ])
+  if (!index) throw new Error('Scan the library before working with indexed files.')
+  if (!settings.libraryRoot) throw new Error('Go to Configuration and choose a historical library root first.')
+  const file = index.files.find((candidate) => candidate.id === rawFileId)
+  if (!file || file.format !== expectedFormat) {
+    throw new Error(`The selected ${expectedFormat} is no longer indexed. Rescan and try again.`)
   }
+  const [libraryRoot, indexRoot] = await Promise.all([
+    realpath(settings.libraryRoot),
+    realpath(index.libraryRoot)
+  ])
+  if (libraryRoot.toLocaleLowerCase() !== indexRoot.toLocaleLowerCase()) {
+    throw new Error('The saved library index belongs to a different root. Scan the configured library first.')
+  }
+  const inputDetails = await lstat(file.path)
+  const inputPath = await realpath(file.path)
+  if (
+    inputDetails.isSymbolicLink() ||
+    !inputDetails.isFile() ||
+    !isWithinDirectory(libraryRoot, inputPath) ||
+    extname(inputPath).toLowerCase() !== (expectedFormat === 'EPUB' ? '.epub' : '.azw3')
+  ) {
+    throw new Error(`The selected ${expectedFormat} is not a regular file inside the configured library.`)
+  }
+  if (inputDetails.size !== file.size || inputDetails.mtime.toISOString() !== file.modifiedAt) {
+    throw new Error(`The source file changed since the last scan: ${file.filename}. Rescan and try again.`)
+  }
+  return inputPath
+}
+
+async function getSiblingOutputPath(
+  inputPath: string,
+  suffix: string
+): Promise<string | null> {
+  const sourceName = basename(inputPath, extname(inputPath))
+  const outputPath = join(dirname(inputPath), `${sourceName}${suffix}.epub`)
+  if (resolve(outputPath).toLocaleLowerCase() === inputPath.toLocaleLowerCase()) {
+    throw new Error('The output cannot replace the source file.')
+  }
+  try {
+    const existing = await lstat(outputPath)
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error(`The output path is already used by a folder or symbolic link: ${basename(outputPath)}`)
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      throw new Error('The app window is not available to confirm replacing the existing EPUB.')
+    }
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Replace', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Replace existing EPUB?',
+      message: `Replace "${basename(outputPath)}"?`
+    })
+    if (confirmation.response !== 0) return null
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+  return outputPath
+}
+
+async function chooseConversionOutputPath(
+  window: BrowserWindow,
+  inputPath: string,
+  outputDirectory: string,
+  extension: 'azw3' | 'epub',
+  defaultFilename?: string
+): Promise<string | null> {
+  const formatName = extension.toUpperCase()
+  const sourceName = basename(inputPath).replace(/\.[^.]+$/, '')
+  const saveResult = await dialog.showSaveDialog(window, {
+    defaultPath: join(outputDirectory, defaultFilename ?? `${sourceName}.${extension}`),
+    filters: [{ name: `${formatName} books`, extensions: [extension] }]
+  })
+  if (saveResult.canceled || !saveResult.filePath) return null
+
+  const outputPath = extname(saveResult.filePath).toLowerCase() === `.${extension}`
+    ? saveResult.filePath
+    : `${saveResult.filePath}.${extension}`
+  if (resolve(outputPath).toLocaleLowerCase() === inputPath.toLocaleLowerCase()) {
+    throw new Error(`The ${formatName} output cannot replace the source file.`)
+  }
+  const outputFolderDetails = await stat(dirname(outputPath))
+  if (!outputFolderDetails.isDirectory()) throw new Error(`The ${formatName} output location is not a folder.`)
+
+  try {
+    const existing = await lstat(outputPath)
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error(`The ${formatName} output path is already used by a folder or symbolic link.`)
+    }
+    const confirmation = await dialog.showMessageBox(window, {
+      type: 'warning',
+      buttons: ['Replace', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: `Replace existing ${formatName}?`,
+      message: `Replace "${basename(outputPath)}"?`
+    })
+    if (confirmation.response !== 0) return null
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+  return outputPath
+}
+
+function notifyDiscoveryQueueChanged(): void {
+  if (discoveryQueueNotificationTimer) return
+  discoveryQueueNotificationTimer = setTimeout(() => {
+    discoveryQueueNotificationTimer = null
+    const items = copyDiscoveryQueue()
+    for (const window of BrowserWindow.getAllWindows()) {
+      const webContents = window.webContents
+      if (webContents.isDestroyed() || webContents.isLoadingMainFrame()) continue
+      const frame = webContents.mainFrame
+      if (frame.isDestroyed()) continue
+      frame.send('discovery-queue:update', items)
+    }
+  }, 1000)
+}
+
+function sendToCurrentFrame(
+  webContents: Electron.WebContents,
+  frame: Electron.WebFrameMain | null,
+  channel: string,
+  value: unknown
+): void {
+  if (
+    webContents.isDestroyed() ||
+    webContents.isLoadingMainFrame() ||
+    !frame ||
+    frame.isDestroyed() ||
+    webContents.mainFrame !== frame
+  ) {
+    return
+  }
+  frame.send(channel, value)
 }
 
 async function discoverQueueItem(id: string, browserAssisted = false): Promise<void> {
@@ -536,6 +785,47 @@ function runEpubMergeWorker(
   })
 }
 
+function runEpubRepairWorker(
+  worker: Worker,
+  onProgress: (progress: EpubRepairProgress) => void
+): Promise<EpubRepairResult> {
+  return new Promise((resolveRepair, rejectRepair) => {
+    let result: EpubRepairResult | null = null
+    let failure = ''
+    let settled = false
+    const rejectOnce = (error: Error): void => {
+      if (settled) return
+      settled = true
+      rejectRepair(error)
+    }
+
+    worker.on('message', (message: {
+      type: string
+      result?: EpubRepairResult
+      error?: string
+      progress?: EpubRepairProgress
+    }) => {
+      if (message.type === 'progress' && message.progress) onProgress(message.progress)
+      else if (message.type === 'complete' && message.result) result = message.result
+      else if (message.type === 'error') failure = message.error || 'EPUB repair failed.'
+    })
+    worker.once('error', rejectOnce)
+    worker.once('exit', (code) => {
+      if (settled) return
+      if (code !== 0) {
+        rejectOnce(new Error(`EPUB repair worker exited unexpectedly (code ${code}).`))
+      } else if (failure) {
+        rejectOnce(new Error(failure))
+      } else if (result) {
+        settled = true
+        resolveRepair(result)
+      } else {
+        rejectOnce(new Error('EPUB repair worker exited without creating an EPUB.'))
+      }
+    })
+  })
+}
+
 function parseGenerateInput(value: unknown): GenerateEpubInput {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid EPUB request.')
   const input = value as Record<string, unknown>
@@ -701,13 +991,16 @@ function canRetryChapter(error: unknown): boolean {
 
 async function persistDownloadState(
   item: DiscoveryQueueItem,
-  historyEntry: DownloadHistoryEntry
+  historyEntry: DownloadHistoryEntry,
+  checkpoint = true
 ): Promise<void> {
   const now = new Date().toISOString()
   item.updatedAt = now
   historyEntry.updatedAt = now
-  await persistDiscoveryQueue()
-  await persistHistoryEntry(historyEntry)
+  if (checkpoint) {
+    await persistDiscoveryQueue()
+    await persistHistoryEntry(historyEntry)
+  }
   notifyDiscoveryQueueChanged()
 }
 
@@ -720,6 +1013,23 @@ async function runQueuedDownload(
   if (!item || !item.downloadOptions) return
   const options = item.downloadOptions
   const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+  const selectedChapterUrls = new Set(selectedChapters.map((chapter) => chapter.url))
+  const completedChapterUrls = new Set(item.completedChapterUrls)
+  let completedSelectedChapterCount = [...completedChapterUrls]
+    .filter((url) => selectedChapterUrls.has(url)).length
+  let chaptersSinceCheckpoint = 0
+  let lastCheckpointAt = Date.now()
+
+  const persistChapterProgress = async (): Promise<void> => {
+    chaptersSinceCheckpoint += 1
+    const now = Date.now()
+    const shouldCheckpoint = chaptersSinceCheckpoint >= 25 || now - lastCheckpointAt >= 5000
+    await persistDownloadState(item, historyEntry, shouldCheckpoint)
+    if (shouldCheckpoint) {
+      chaptersSinceCheckpoint = 0
+      lastCheckpointAt = now
+    }
+  }
 
   try {
     if (selectedChapters.length === 0) throw new Error('Select at least one chapter before queueing this EPUB.')
@@ -735,13 +1045,17 @@ async function runQueuedDownload(
           total: selectedChapters.length,
           message: `Validating saved chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
         }
-        await persistDownloadState(item, historyEntry)
+        await persistDownloadState(item, historyEntry, false)
         savedContent = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
         if (!savedContent || savedContent.url !== chapter.url) {
           throw new Error(`Saved chapter content is missing or invalid for "${chapter.title}".`)
         }
-        if (!item.completedChapterUrls.includes(chapter.url)) item.completedChapterUrls.push(chapter.url)
-      } else if (item.completedChapterUrls.includes(chapter.url)) {
+        if (!completedChapterUrls.has(chapter.url)) {
+          completedChapterUrls.add(chapter.url)
+          item.completedChapterUrls.push(chapter.url)
+          if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount += 1
+        }
+      } else {
         try {
           savedContent = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
           if (savedContent && savedContent.url !== chapter.url) {
@@ -751,8 +1065,14 @@ async function runQueuedDownload(
         } catch (error) {
           console.warn(`Saved chapter artifact for ${chapter.url} will be fetched again:`, errorMessage(error))
         }
-        if (!savedContent && !item.repackageOnly) {
+        if (savedContent && !completedChapterUrls.has(chapter.url)) {
+          completedChapterUrls.add(chapter.url)
+          item.completedChapterUrls.push(chapter.url)
+          if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount += 1
+        } else if (!savedContent && completedChapterUrls.has(chapter.url)) {
+          completedChapterUrls.delete(chapter.url)
           item.completedChapterUrls = item.completedChapterUrls.filter((url) => url !== chapter.url)
+          if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount -= 1
         }
       }
 
@@ -762,7 +1082,7 @@ async function runQueuedDownload(
           total: selectedChapters.length,
           message: `Fetching chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
         }
-        await persistDownloadState(item, historyEntry)
+        await persistDownloadState(item, historyEntry, false)
 
         let lastError: unknown = new Error('Chapter could not be fetched.')
         for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -786,7 +1106,11 @@ async function runQueuedDownload(
         if (controller.signal.aborted) break
         if (savedContent) {
           await writeChapterArtifact(dataDirectory(), itemId, savedContent)
-          if (!item.completedChapterUrls.includes(chapter.url)) item.completedChapterUrls.push(chapter.url)
+          if (!completedChapterUrls.has(chapter.url)) {
+            completedChapterUrls.add(chapter.url)
+            item.completedChapterUrls.push(chapter.url)
+            if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount += 1
+          }
           item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
         } else {
           item.failedChapters = [
@@ -797,9 +1121,7 @@ async function runQueuedDownload(
         }
       }
 
-      historyEntry.completedChapters = selectedChapters.filter((selected) =>
-        item.completedChapterUrls.includes(selected.url)
-      ).length
+      historyEntry.completedChapters = completedSelectedChapterCount
       item.progress = {
         current: historyEntry.completedChapters,
         total: selectedChapters.length,
@@ -809,7 +1131,7 @@ async function runQueuedDownload(
             : `Fetched ${chapter.title}`
           : `Failed ${chapter.title}`
       }
-      await persistDownloadState(item, historyEntry)
+      await persistChapterProgress()
     }
 
     const requestedAction = activeDownloads.get(itemId)?.requestedAction ?? 'cancel'
@@ -980,13 +1302,13 @@ async function pumpDownloadQueue(): Promise<void> {
     while (activeDownloads.size < settings.maxSimultaneousDownloads) {
       const item = discoveryQueue
         .filter((candidate) => candidate.status === 'queued' && candidate.downloadOptions)
-        .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))[0]
+        .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))[0]
       if (!item) break
       const history = await readDownloadHistory(dataDirectory())
       const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
       const currentHead = discoveryQueue
         .filter((candidate) => candidate.status === 'queued' && candidate.downloadOptions)
-        .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))[0]
+        .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))[0]
       if (item.status !== 'queued' || currentHead?.id !== item.id) continue
       if (!historyEntry) {
         item.status = 'failed'
@@ -1101,6 +1423,15 @@ async function createWindow(): Promise<void> {
   })
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.webContents.on('unresponsive', () => {
+    console.error('Renderer became unresponsive.')
+  })
+  mainWindow.webContents.on('responsive', () => {
+    console.info('Renderer became responsive.')
+  })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('Renderer process exited:', details.reason, details.exitCode)
+  })
   mainWindow.webContents.on('will-navigate', (event, target) => {
     try {
       const current = new URL(mainWindow!.webContents.getURL())
@@ -1124,7 +1455,9 @@ function registerIpcHandlers(): void {
     try {
       return {
         ok: true,
-        value: await discoverChapters(value, (progress) => event.sender.send('job:progress', progress))
+        value: await discoverChapters(value, (progress) =>
+          sendToCurrentFrame(event.sender, event.senderFrame, 'job:progress', progress)
+        )
       }
     } catch (error) {
       console.error('Chapter discovery failed:', error)
@@ -1964,7 +2297,7 @@ function registerIpcHandlers(): void {
         }
         const queuedItems = discoveryQueue
           .filter((item) => item.status === 'queued' && item.downloadOptions)
-          .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt))
+          .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))
         const index = queuedItems.findIndex((item) => item.id === rawId)
         if (index < 0) throw new Error('Only queued EPUB jobs can be reordered.')
         const targetIndex = index + (rawDirection === 'up' ? -1 : 1)
@@ -2104,6 +2437,8 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('library:index', async () => readLibraryIndex(dataDirectory()))
 
+  ipcMain.handle('library:operations', () => copyLibraryOperations())
+
   ipcMain.handle('library:index-backup', async () => readLibraryIndexBackup(dataDirectory()))
 
   ipcMain.handle('library:restore-index-backup', async (): Promise<Result<LibraryIndex>> => {
@@ -2156,7 +2491,7 @@ function registerIpcHandlers(): void {
       scan.worker = worker
       if (scan.cancelRequested) worker.postMessage({ type: 'cancel' })
       await runLibraryScanWorker(worker, (progress) => {
-        if (!event.sender.isDestroyed()) event.sender.send('library:progress', progress)
+        sendToCurrentFrame(event.sender, event.senderFrame, 'library:progress', progress)
       })
       const index = await readLibraryIndex(dataDirectory())
       if (!index) throw new Error('The library scan completed without saving an index.')
@@ -2209,6 +2544,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     'library:merge-epubs',
     async (event, rawFileIds: unknown, rawFilename: unknown): Promise<LibraryEpubMergeResponse> => {
+      let operationId: string | null = null
       try {
         if (
           !Array.isArray(rawFileIds) ||
@@ -2312,16 +2648,207 @@ function registerIpcHandlers(): void {
             filenameRange: file.filenameRange
           }))
         }
+        const trackedOperationId = await startLibraryOperation({
+          kind: 'merge-epubs',
+          inputFiles: sourceFiles.map((file) => file.path),
+          outputPath,
+          progress: 0,
+          message: 'Preparing EPUB merge…',
+          error: ''
+        })
+        operationId = trackedOperationId
         const worker = new Worker(join(__dirname, 'epubMergeWorker.js'), {
           workerData: input,
           resourceLimits: { maxOldGenerationSizeMb: 1024 }
         })
         const result = await runEpubMergeWorker(worker, (progress) => {
-          if (!event.sender.isDestroyed()) event.sender.send('library:merge-progress', progress)
+          void updateLibraryOperation(trackedOperationId, {
+            progress: progress.percentage,
+            message: progress.message,
+            status: progress.stage === 'failed' ? 'failed' : 'running',
+            error: progress.stage === 'failed' ? progress.message : ''
+          }, progress.stage === 'failed')
+          sendToCurrentFrame(event.sender, event.senderFrame, 'library:merge-progress', progress)
         })
+        await updateLibraryOperation(operationId, {
+          status: 'completed',
+          outputPath: result.outputPath,
+          progress: 100,
+          message: 'Merged EPUB created and validated.',
+          error: ''
+        }, true)
         return { ok: true, value: result }
       } catch (error) {
+        if (operationId) {
+          await updateLibraryOperation(operationId, {
+            status: 'failed',
+            message: 'EPUB merge failed.',
+            error: errorMessage(error)
+          }, true)
+        }
         console.error('Existing EPUB merge failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'library:convert-azw3',
+    async (_event, rawInputPath: unknown): Promise<EbookConversionResponse> => {
+      let operationId: string | null = null
+      try {
+        if (typeof rawInputPath !== 'string' || extname(rawInputPath).toLowerCase() !== '.epub') {
+          throw new Error('Select an EPUB file to convert.')
+        }
+        if (!mainWindow || mainWindow.isDestroyed()) {
+          throw new Error('The app window is not available to choose an AZW3 output path.')
+        }
+
+        const settings = await readSettings(dataDirectory())
+        const inputFile = resolve(rawInputPath)
+        const inputDetails = await lstat(inputFile)
+        if (inputDetails.isSymbolicLink() || !inputDetails.isFile()) {
+          throw new Error('The selected EPUB is not a regular file.')
+        }
+        const inputPath = await realpath(inputFile)
+        const allowedRoots: string[] = []
+        for (const rootPath of [settings.libraryRoot, settings.outputDirectory]) {
+          if (!rootPath) continue
+          try {
+            allowedRoots.push(await realpath(rootPath))
+          } catch (error) {
+            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+          }
+        }
+        if (!allowedRoots.some((rootPath) => isWithinDirectory(rootPath, inputPath))) {
+          throw new Error('The selected EPUB must be inside the configured library or EPUB output folder.')
+        }
+
+        const outputDirectory = settings.outputDirectory || dirname(inputPath)
+        const outputPath = await chooseConversionOutputPath(mainWindow, inputPath, outputDirectory, 'azw3')
+        if (!outputPath) return { ok: false, cancelled: true }
+
+        operationId = await startLibraryOperation({
+          kind: 'epub-to-azw3',
+          inputFiles: [inputPath],
+          outputPath,
+          progress: null,
+          message: 'Converting EPUB to AZW3 with Calibre…',
+          error: ''
+        })
+        const result = await convertEpubToAzw3(inputPath, outputPath)
+        await updateLibraryOperation(operationId, {
+          status: 'completed',
+          outputPath: result.outputPath,
+          progress: 100,
+          message: 'AZW3 conversion completed.',
+          error: ''
+        }, true)
+        return { ok: true, value: result }
+      } catch (error) {
+        if (operationId) {
+          await updateLibraryOperation(operationId, {
+            status: 'failed',
+            message: 'EPUB to AZW3 conversion failed.',
+            error: errorMessage(error)
+          }, true)
+        }
+        console.error('EPUB to AZW3 conversion failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'library:convert-azw3-to-epub',
+    async (_event, rawFileId: unknown): Promise<EbookConversionResponse> => {
+      let operationId: string | null = null
+      try {
+        const inputPath = await getIndexedLibraryFile(rawFileId, 'AZW3')
+        const outputPath = await getSiblingOutputPath(inputPath, '')
+        if (!outputPath) return { ok: false, cancelled: true }
+
+        operationId = await startLibraryOperation({
+          kind: 'azw3-to-epub',
+          inputFiles: [inputPath],
+          outputPath,
+          progress: null,
+          message: 'Converting AZW3 to EPUB with Calibre…',
+          error: ''
+        })
+        const result = await convertAzw3ToEpub(inputPath, outputPath)
+        await updateLibraryOperation(operationId, {
+          status: 'completed',
+          outputPath: result.outputPath,
+          progress: 100,
+          message: 'EPUB conversion completed.',
+          error: ''
+        }, true)
+        return { ok: true, value: result }
+      } catch (error) {
+        if (operationId) {
+          await updateLibraryOperation(operationId, {
+            status: 'failed',
+            message: 'AZW3 to EPUB conversion failed.',
+            error: errorMessage(error)
+          }, true)
+        }
+        console.error('AZW3 to EPUB conversion failed:', error)
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'library:repair-epub',
+    async (_event, rawFileId: unknown): Promise<EpubRepairResponse> => {
+      let operationId: string | null = null
+      try {
+        const inputPath = await getIndexedLibraryFile(rawFileId, 'EPUB')
+        const outputPath = await getSiblingOutputPath(inputPath, '-repaired')
+        if (!outputPath) return { ok: false, cancelled: true }
+
+        operationId = await startLibraryOperation({
+          kind: 'repair-epub',
+          inputFiles: [inputPath],
+          outputPath,
+          progress: 0,
+          message: 'Preparing EPUB check and repair…',
+          error: ''
+        })
+        const trackedOperationId = operationId
+        const worker = new Worker(join(__dirname, 'epubRepairWorker.js'), {
+          workerData: { inputPath, outputPath },
+          resourceLimits: { maxOldGenerationSizeMb: 1024 }
+        })
+        const result = await runEpubRepairWorker(worker, (progress) => {
+          void updateLibraryOperation(trackedOperationId, {
+            progress: progress.percentage,
+            message: progress.message
+          })
+        })
+        const summary = result.repairedWebpImages > 0
+          ? `Converted ${result.repairedWebpImages.toLocaleString()} WebP image(s) to JPEG.`
+          : 'No WebP images needed conversion.'
+        const coverSummary = result.upscaledCover ? ' Upscaled the undersized cover to Kindle minimum dimensions.' : ''
+        const mimetypeSummary = result.fixedMimetype ? ' Corrected EPUB mimetype and ZIP ordering.' : ''
+        await updateLibraryOperation(operationId, {
+          status: 'completed',
+          outputPath: result.outputPath,
+          progress: 100,
+          message: `${summary}${coverSummary}${mimetypeSummary}`,
+          error: ''
+        }, true)
+        return { ok: true, value: result }
+      } catch (error) {
+        if (operationId) {
+          await updateLibraryOperation(operationId, {
+            status: 'failed',
+            message: 'EPUB check and repair failed.',
+            error: errorMessage(error)
+          }, true)
+        }
+        console.error('EPUB repair failed:', error)
         return { ok: false, error: errorMessage(error) }
       }
     }
@@ -2353,6 +2880,17 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(async () => {
   registerIpcHandlers()
+  libraryOperations = await readLibraryOperations(dataDirectory())
+  let interruptedLibraryOperations = false
+  for (const operation of libraryOperations) {
+    if (operation.status !== 'running') continue
+    operation.status = 'interrupted'
+    operation.message = 'The app closed before this operation finished.'
+    operation.error = operation.message
+    operation.updatedAt = new Date().toISOString()
+    interruptedLibraryOperations = true
+  }
+  if (interruptedLibraryOperations) await flushLibraryOperations()
   await markInterruptedDownloadJobs(dataDirectory())
   discoveryQueue = (await readDiscoveryQueue(dataDirectory())).map(hydrateQueueItem)
   const history = await readDownloadHistory(dataDirectory())

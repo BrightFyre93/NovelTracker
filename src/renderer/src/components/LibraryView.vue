@@ -22,12 +22,17 @@ const selectedNovel = ref('')
 const selectedFileId = ref('')
 const restoringBackup = ref(false)
 const merging = ref(false)
+const converting = ref(false)
+const repairing = ref(false)
 const mergeProgress = ref<EpubMergeProgress | null>(null)
 const mergeFileIds = ref<string[]>([])
 const mergeFilename = ref('')
+const latestMergedPath = ref('')
 const correctedTitle = ref('')
 const correctedCoverage = ref('')
-const busy = computed(() => libraryState.scanning || restoringBackup.value || merging.value)
+const busy = computed(() =>
+  libraryState.scanning || restoringBackup.value || merging.value || converting.value || repairing.value
+)
 const error = ref('')
 const success = ref('')
 const visibleFileLimit = 100
@@ -53,7 +58,7 @@ const novelSummaries = computed(() => {
         Sent: group.files.filter((file) => file.folderState === 'Sent').length,
         Old: group.files.filter((file) => file.folderState === 'Old').length
       }
-      const coverage = analyzeLibraryCoverage(group.files)
+      const coverage = analyzeLibraryCoverage(group.files.filter((file) => file.format === 'EPUB'))
       return {
         ...group,
         stateCounts,
@@ -83,7 +88,7 @@ const selectedFile = computed(() =>
 const selectedCoverageWarnings = computed(() => selectedGroup.value?.coverage.warnings ?? [])
 const selectedMergeFiles = computed(() =>
   (index.value?.files ?? [])
-    .filter((file) => mergeFileIds.value.includes(file.id))
+    .filter((file) => file.format === 'EPUB' && mergeFileIds.value.includes(file.id))
     .sort((left, right) => {
       const leftStart = left.chapterNumbers[0] ?? left.filenameRange?.start ?? Number.MAX_SAFE_INTEGER
       const rightStart = right.chapterNumbers[0] ?? right.filenameRange?.start ?? Number.MAX_SAFE_INTEGER
@@ -242,6 +247,7 @@ function selectFile(file: LibraryFileRecord): void {
 }
 
 function toggleMergeFile(file: LibraryFileRecord): void {
+  if (file.format !== 'EPUB') return
   if (mergeFileIds.value.includes(file.id)) {
     mergeFileIds.value = mergeFileIds.value.filter((id) => id !== file.id)
   } else if (mergeFileIds.value.length < 20) {
@@ -271,6 +277,7 @@ async function mergeSelectedEpubs(): Promise<void> {
   if (mergeFileIds.value.length < 2) return
   error.value = ''
   success.value = ''
+  latestMergedPath.value = ''
   merging.value = true
   mergeProgress.value = {
     stage: 'reading',
@@ -303,6 +310,7 @@ async function mergeSelectedEpubs(): Promise<void> {
       ? ` ${result.value.conflictingChapterCount.toLocaleString()} overlap(s) had different text; the earlier-range copy was kept.`
       : ''
     success.value = `Created ${result.value.chapterCount.toLocaleString()} chapters at ${result.value.outputPath}.${overlap}${conflicts}`
+    latestMergedPath.value = result.value.outputPath
     mergeFileIds.value = []
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -313,6 +321,69 @@ async function mergeSelectedEpubs(): Promise<void> {
     }
   } finally {
     merging.value = false
+  }
+}
+
+async function convertEpubToAzw3(inputPath: string): Promise<void> {
+  error.value = ''
+  success.value = ''
+  converting.value = true
+  try {
+    const result = await window.novelTracker.convertEpubToAzw3(inputPath)
+    if (!result.ok) {
+      if (!('cancelled' in result)) error.value = result.error
+      return
+    }
+    success.value = `Created ${result.value.outputPath} (${(result.value.outputBytes / 1024 / 1024).toFixed(1)} MB). AZW3 conversion does not guarantee Send-to-Kindle acceptance.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    converting.value = false
+  }
+}
+
+async function convertAzw3ToEpub(fileId: string): Promise<void> {
+  error.value = ''
+  success.value = ''
+  converting.value = true
+  try {
+    const result = await window.novelTracker.convertAzw3ToEpub(fileId)
+    if (!result.ok) {
+      if (!('cancelled' in result)) error.value = result.error
+      return
+    }
+    success.value = `Created ${result.value.outputPath} (${(result.value.outputBytes / 1024 / 1024).toFixed(1)} MB). Review the EPUB in Kindle Previewer before sending.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    converting.value = false
+  }
+}
+
+async function repairExistingEpub(fileId: string): Promise<void> {
+  error.value = ''
+  success.value = ''
+  repairing.value = true
+  try {
+    const result = await window.novelTracker.repairEpub(fileId)
+    if (!result.ok) {
+      if (!('cancelled' in result)) error.value = result.error
+      return
+    }
+    const imageSummary = result.value.repairedWebpImages
+      ? ` Converted ${result.value.repairedWebpImages.toLocaleString()} WebP image(s) to JPEG.`
+      : ' No WebP images needed conversion.'
+    const coverSummary = result.value.upscaledCover
+      ? ' Upscaled the undersized cover to Kindle minimum dimensions; it may appear soft.'
+      : ''
+    const mimetypeSummary = result.value.fixedMimetype
+      ? ' Corrected EPUB mimetype and ZIP ordering.'
+      : ''
+    success.value = `Checked and repaired EPUB copy at ${result.value.outputPath}.${imageSummary}${coverSummary}${mimetypeSummary} Review it in Kindle Previewer.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    repairing.value = false
   }
 }
 
@@ -415,11 +486,11 @@ function chapterRangeLabel(start: number, end: number): string {
         </div>
       </div>
       <p class="help-text library-note">
-        Set or change the historical library root in Configuration. Scans are read-only and inspect EPUB metadata and chapter lists.
+        Set or change the historical library root in Configuration. Scans are read-only; EPUB chapter lists are inspected, while AZW3 files are indexed by filename and file metadata only.
       </p>
       <div v-if="index" class="library-summary">
         <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>visible novels</span></div>
-        <div><strong>{{ visibleLibraryFiles.length.toLocaleString() }}</strong><span>indexed EPUBs</span></div>
+        <div><strong>{{ visibleLibraryFiles.length.toLocaleString() }}</strong><span>indexed ebook files</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
       <Message v-if="!index && !busy" severity="info" :closable="false" class="feedback">
@@ -443,7 +514,7 @@ function chapterRangeLabel(start: number, end: number): string {
             :key="novel.key"
             class="novel-choice"
             :class="{ active: selectedNovel === novel.key }"
-            @click="selectedNovel = novel.key; selectedFileId = ''; mergeFileIds = []; mergeFilename = ''"
+            @click="selectedNovel = novel.key; selectedFileId = ''; mergeFileIds = []; mergeFilename = ''; latestMergedPath = ''"
           >
             <span class="novel-choice-title">{{ novel.title }}</span>
             <span class="novel-choice-count">
@@ -562,6 +633,15 @@ function chapterRangeLabel(start: number, end: number): string {
             </ol>
           </div>
           <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration before merging.</p>
+          <div v-if="latestMergedPath" class="merge-filename-row">
+            <Button
+              label="Convert merged EPUB to AZW3"
+              icon="pi pi-file-export"
+              :loading="converting"
+              :disabled="busy"
+              @click="convertEpubToAzw3(latestMergedPath)"
+            />
+          </div>
         </section>
 
         <details
@@ -637,6 +717,40 @@ function chapterRangeLabel(start: number, end: number): string {
               <Button label="Open" severity="secondary" text size="small" @click="openFile(selectedFile, false)" />
               <Button label="Show in folder" severity="secondary" text size="small" @click="openFile(selectedFile, true)" />
               <Button
+                v-if="selectedFile.format === 'EPUB'"
+                label="Convert to AZW3"
+                icon="pi pi-file-export"
+                severity="secondary"
+                text
+                size="small"
+                :loading="converting"
+                :disabled="busy"
+                @click="convertEpubToAzw3(selectedFile.path)"
+              />
+              <Button
+                v-if="selectedFile.format === 'AZW3'"
+                label="Convert to EPUB"
+                icon="pi pi-file-export"
+                severity="secondary"
+                text
+                size="small"
+                :loading="converting"
+                :disabled="busy"
+                @click="convertAzw3ToEpub(selectedFile.id)"
+              />
+              <Button
+                v-if="selectedFile.format === 'EPUB'"
+                label="Check / repair"
+                icon="pi pi-wrench"
+                severity="secondary"
+                text
+                size="small"
+                :loading="repairing"
+                :disabled="busy"
+                @click="repairExistingEpub(selectedFile.id)"
+              />
+              <Button
+                v-if="selectedFile.format === 'EPUB'"
                 :label="mergeFileIds.includes(selectedFile.id) ? 'Remove from merge' : 'Add to merge'"
                 :icon="mergeFileIds.includes(selectedFile.id) ? 'pi pi-minus-circle' : 'pi pi-plus-circle'"
                 severity="secondary"
@@ -657,8 +771,8 @@ function chapterRangeLabel(start: number, end: number): string {
           <Message v-if="selectedFile.inspectionError" severity="warn" :closable="false">
             {{ selectedFile.inspectionError }}
           </Message>
-          <div class="correction-grid">
-            <div>
+          <div class="correction-grid" :class="{ 'azw3-correction-grid': selectedFile.format === 'AZW3' }">
+            <div v-if="selectedFile.format === 'EPUB'">
               <label class="field-label" for="corrected-novel-title">Match to novel</label>
               <InputText id="corrected-novel-title" v-model="correctedTitle" class="full-input" maxlength="300" />
             </div>

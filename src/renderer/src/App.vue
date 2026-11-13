@@ -6,7 +6,12 @@ import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import type { DiscoveryQueueItem, DownloadHistoryEntry, TrackerNovel } from '../../shared/contracts'
+import type {
+  DiscoveryQueueItem,
+  DownloadHistoryEntry,
+  LibraryOperation,
+  TrackerNovel
+} from '../../shared/contracts'
 import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
 import { suggestEpubFilename } from '../../shared/epubFilename'
 import ConfigurationView from './components/ConfigurationView.vue'
@@ -37,6 +42,8 @@ const trackerSources = ref<Record<string, string>>({})
 const trackerCsvPath = ref('')
 const chapterSearch = ref('')
 const downloadHistory = ref<DownloadHistoryEntry[]>([])
+const convertingHistoryId = ref('')
+const libraryOperations = ref<LibraryOperation[]>([])
 const {
   url,
   title,
@@ -128,8 +135,17 @@ watch(url, (value) => {
 })
 
 let removeQueueListener: (() => void) | undefined
+let removeLibraryOperationsListener: (() => void) | undefined
 
 onMounted(() => {
+  removeLibraryOperationsListener = window.novelTracker.onLibraryOperationsUpdate((operations) => {
+    libraryOperations.value = operations
+  })
+  void window.novelTracker.getLibraryOperations().then((operations) => {
+    libraryOperations.value = operations
+  }).catch((error: unknown) => {
+    store.error = error instanceof Error ? error.message : String(error)
+  })
   removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate(() => {
     void window.novelTracker.getDownloadHistory().then((history) => {
       downloadHistory.value = history
@@ -151,7 +167,19 @@ onMounted(() => {
   })
 })
 
-onUnmounted(() => removeQueueListener?.())
+onUnmounted(() => {
+  removeQueueListener?.()
+  removeLibraryOperationsListener?.()
+})
+
+function libraryOperationLabel(operation: LibraryOperation): string {
+  switch (operation.kind) {
+    case 'merge-epubs': return 'Merge EPUBs'
+    case 'epub-to-azw3': return 'EPUB to AZW3'
+    case 'azw3-to-epub': return 'AZW3 to EPUB'
+    case 'repair-epub': return 'Check / repair EPUB'
+  }
+}
 
 async function discover(): Promise<void> {
   store.error = ''
@@ -483,6 +511,25 @@ async function createEpub(): Promise<void> {
   }
 }
 
+async function convertHistoryEpub(job: DownloadHistoryEntry): Promise<void> {
+  if (job.status !== 'completed' || !job.outputPath.toLocaleLowerCase().endsWith('.epub')) return
+  store.error = ''
+  store.success = ''
+  convertingHistoryId.value = job.id
+  try {
+    const result = await window.novelTracker.convertEpubToAzw3(job.outputPath)
+    if (!result.ok) {
+      if (!('cancelled' in result)) store.error = result.error
+      return
+    }
+    store.success = `Created ${result.value.outputPath} (${(result.value.outputBytes / 1024 / 1024).toFixed(1)} MB). AZW3 conversion does not guarantee Send-to-Kindle acceptance.`
+  } catch (reason) {
+    store.error = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    convertingHistoryId.value = ''
+  }
+}
+
 function toggleAll(selected: boolean): void {
   for (const chapter of store.chapters) chapter.selected = selected
 }
@@ -511,6 +558,75 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <button :class="{ active: activeView === 'configuration' }" @click="activeView = 'configuration'">Configuration</button>
       </nav>
     </header>
+
+    <section
+      v-if="activeView === 'library' && libraryOperations.length"
+      class="card operation-history-card"
+      aria-label="Library operation history"
+      aria-live="polite"
+    >
+      <div class="section-heading">
+        <div>
+          <p class="step-label">MERGES AND CONVERSIONS</p>
+          <h3>Library activity</h3>
+        </div>
+        <span>{{ libraryOperations.filter((operation) => operation.status === 'running').length }} active</span>
+      </div>
+      <div
+        v-for="operation in libraryOperations.slice(0, 6)"
+        :key="operation.id"
+        class="operation-history-row"
+      >
+        <div class="operation-history-summary">
+          <strong>{{ libraryOperationLabel(operation) }}</strong>
+          <span>{{ operation.inputFiles.map((path) => path.split(/[\\/]/).pop()).join(', ') }}</span>
+          <span>{{ operation.message }}</span>
+          <span>{{ new Date(operation.updatedAt).toLocaleString() }}</span>
+          <span v-if="operation.outputPath && operation.status === 'completed'">
+            Output: {{ operation.outputPath }}
+          </span>
+          <details v-if="operation.error" class="operation-history-error">
+            <summary>{{ operation.error.split(/\r?\n/, 1)[0] }}</summary>
+            <pre>{{ operation.error }}</pre>
+          </details>
+        </div>
+        <span class="history-status" :class="`status-${operation.status}`">{{ operation.status }}</span>
+        <ProgressBar
+          v-if="operation.status === 'running' && operation.progress !== null"
+          :value="operation.progress"
+          :show-value="false"
+          class="operation-history-progress"
+        />
+        <ProgressBar
+          v-else-if="operation.status === 'running'"
+          mode="indeterminate"
+          :show-value="false"
+          class="operation-history-progress"
+        />
+      </div>
+      <details v-if="libraryOperations.length > 6" class="operation-history-older">
+        <summary>Show {{ libraryOperations.length - 6 }} older operations</summary>
+        <div
+          v-for="operation in libraryOperations.slice(6)"
+          :key="operation.id"
+          class="operation-history-row"
+        >
+          <div class="operation-history-summary">
+            <strong>{{ libraryOperationLabel(operation) }}</strong>
+            <span>{{ operation.inputFiles.map((path) => path.split(/[\\/]/).pop()).join(', ') }}</span>
+            <span>{{ operation.message }} · {{ new Date(operation.updatedAt).toLocaleString() }}</span>
+            <span v-if="operation.outputPath && operation.status === 'completed'">
+              Output: {{ operation.outputPath }}
+            </span>
+            <details v-if="operation.error" class="operation-history-error">
+              <summary>{{ operation.error.split(/\r?\n/, 1)[0] }}</summary>
+              <pre>{{ operation.error }}</pre>
+            </details>
+          </div>
+          <span class="history-status" :class="`status-${operation.status}`">{{ operation.status }}</span>
+        </div>
+      </details>
+    </section>
 
     <template v-if="activeView === 'create'">
     <section class="intro">
@@ -756,6 +872,17 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <span class="history-status" :class="`status-${job.status}`">{{ job.status }}</span>
         <span v-if="job.error" class="history-error">{{ job.error }}</span>
         <span v-else-if="job.outputPath" class="history-error">{{ job.outputPath }}</span>
+        <Button
+          v-if="job.status === 'completed' && job.outputPath.toLocaleLowerCase().endsWith('.epub')"
+          label="Convert to AZW3"
+          icon="pi pi-file-export"
+          severity="secondary"
+          text
+          size="small"
+          :loading="convertingHistoryId === job.id"
+          :disabled="Boolean(convertingHistoryId)"
+          @click="convertHistoryEpub(job)"
+        />
       </div>
     </section>
 
