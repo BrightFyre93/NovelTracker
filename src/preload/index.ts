@@ -17,6 +17,7 @@ import type {
   LibraryIndexSummary,
   LibraryOperation,
   LibraryProgress,
+  SiteExtractionPreference,
   EpubRepairResponse,
   NovelTrackerApi,
   Result,
@@ -40,6 +41,10 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('settings:discovery-freshness', hours) as Promise<Result<AppSettings>>,
   updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
     ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
+  updateChapterConcurrency: (maxSimultaneousChaptersPerNovel: number) =>
+    ipcRenderer.invoke('settings:chapter-concurrency', maxSimultaneousChaptersPerNovel) as Promise<Result<AppSettings>>,
+  updateSiteExtractionPreferences: (preferences: SiteExtractionPreference[]) =>
+    ipcRenderer.invoke('settings:site-extraction-preferences', preferences) as Promise<Result<AppSettings>>,
   updateLibraryScanOptions: (scanOldFolder: boolean, scanOldCompletedFolder: boolean) =>
     ipcRenderer.invoke('settings:library-scan-options', scanOldFolder, scanOldCompletedFolder) as Promise<Result<AppSettings>>,
   chooseLibraryRoot: () => ipcRenderer.invoke('dialog:choose-library-root') as Promise<string | null>,
@@ -64,6 +69,7 @@ const api: NovelTrackerApi = {
   enqueueEpub: (input: GenerateEpubInput, queueItemId?: string) =>
     ipcRenderer.invoke('download-queue:enqueue', input, queueItemId) as Promise<Result<QueuedEpubJob>>,
   retryEpub: (id: string) => ipcRenderer.invoke('download-queue:retry', id) as Promise<Result<void>>,
+  recoverEpubQueueItem: (id: string) => ipcRenderer.invoke('download-queue:recover', id) as Promise<Result<void>>,
   repackageEpub: (id: string) => ipcRenderer.invoke('download-queue:repackage', id) as Promise<Result<void>>,
   pauseEpub: (id: string) => ipcRenderer.invoke('download-queue:pause', id) as Promise<Result<void>>,
   resumeEpub: (id: string) => ipcRenderer.invoke('download-queue:resume', id) as Promise<Result<void>>,

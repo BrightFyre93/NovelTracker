@@ -530,6 +530,27 @@ async function runDownloadAction(
   if (shouldRefresh) void refreshQueue()
 }
 
+async function recoverQueueItem(item: DiscoveryQueueItemSummary): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  downloadActionId.value = item.id
+  try {
+    const result = await window.novelTracker.recoverEpubQueueItem(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = item.downloadOptions
+      ? `Restored saved job history and queued ${item.title} without rediscovering chapters.`
+      : `Restarted chapter discovery for ${item.title} using its saved source URL.`
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    downloadActionId.value = ''
+  }
+}
+
 async function repackageOffline(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
@@ -1107,13 +1128,10 @@ async function clearCompletedQueueItems(): Promise<void> {
             <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
             <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
             <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
-            <span v-if="item.error" class="queue-item-error">{{ item.error }}</span>
-            <span v-for="failed in item.failedChapters" :key="failed.url" class="queue-item-error">
-              {{ failed.title }}: {{ failed.error }}
+            <span v-if="item.failedChapterCount" class="queue-item-error">
+              {{ item.failedChapterCount.toLocaleString() }} chapter{{ item.failedChapterCount === 1 ? '' : 's' }} failed
             </span>
-            <span v-if="item.failedChapterCount > item.failedChapters.length" class="queue-item-error">
-              {{ item.failedChapterCount - item.failedChapters.length }} additional chapter failures
-            </span>
+            <span v-else-if="item.error" class="queue-item-error">{{ item.error }}</span>
           </div>
       <span class="history-status" :class="`status-${item.status}`">
         <i v-if="item.status === 'discovering' && item.downloadOptions" class="pi pi-spin pi-spinner" aria-hidden="true"></i>
@@ -1234,6 +1252,17 @@ async function clearCompletedQueueItems(): Promise<void> {
             :loading="downloadActionId === item.id"
             :disabled="Boolean(downloadActionId)"
             @click="runDownloadAction(item, 'retry')"
+          />
+          <Button
+            v-if="item.status === 'failed' && /history entry is missing/i.test(item.error)"
+            label="Restore & retry"
+            icon="pi pi-refresh"
+            size="small"
+            severity="warning"
+            outlined
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="recoverQueueItem(item)"
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"

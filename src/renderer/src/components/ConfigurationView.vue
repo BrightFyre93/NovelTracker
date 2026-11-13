@@ -2,17 +2,28 @@
 import { computed, onMounted, ref } from 'vue'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
-import type { AppSettings } from '../../../shared/contracts'
+import type {
+  AppSettings,
+  SiteExtractionMode,
+  SiteExtractionPreference
+} from '../../../shared/contracts'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   DEFAULT_EPUB_CSS,
+  DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   MAX_DISCOVERY_FRESHNESS_HOURS,
   MAX_EPUB_CSS_LENGTH,
+  MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MAX_SIMULTANEOUS_DOWNLOADS,
   MIN_DISCOVERY_FRESHNESS_HOURS,
+  MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MIN_SIMULTANEOUS_DOWNLOADS
 } from '../../../shared/constants'
+import {
+  normalizeSiteExtractionPreferences,
+  normalizeSiteHostname
+} from '../../../shared/siteExtractionPreferences'
 
 const emit = defineEmits<{
   themeChanged: [theme: AppSettings['appTheme']]
@@ -25,12 +36,18 @@ const settings = ref<AppSettings>({
   scanOldFolder: false,
   scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
+  siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
   appTheme: 'light'
 })
 const freshnessHoursDraft = ref(DEFAULT_DISCOVERY_FRESHNESS_HOURS)
 const concurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS)
+const chapterConcurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL)
+const siteExtractionPreferencesDraft = ref<SiteExtractionPreference[]>([])
+const sitePreferenceHostnameDraft = ref('')
+const sitePreferenceModeDraft = ref<SiteExtractionMode>('generic-html')
 const themeDraft = ref<AppSettings['appTheme']>('light')
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
 const scanOldFolderDraft = ref(false)
@@ -39,8 +56,18 @@ const concurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_DOWNLOADS - MIN_SIMULTANEOUS_DOWNLOADS + 1 },
   (_, index) => MIN_SIMULTANEOUS_DOWNLOADS + index
 )
+const chapterConcurrencyOptions = Array.from(
+  { length: MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL - MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL + 1 },
+  (_, index) => MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL + index
+)
 const freshnessDirty = computed(() => freshnessHoursDraft.value !== settings.value.discoveryFreshnessHours)
 const concurrencyDirty = computed(() => concurrencyDraft.value !== settings.value.maxSimultaneousDownloads)
+const chapterConcurrencyDirty = computed(() =>
+  chapterConcurrencyDraft.value !== settings.value.maxSimultaneousChaptersPerNovel
+)
+const siteExtractionPreferencesDirty = computed(() =>
+  JSON.stringify(siteExtractionPreferencesDraft.value) !== JSON.stringify(settings.value.siteExtractionPreferences)
+)
 const themeDirty = computed(() => themeDraft.value !== settings.value.appTheme)
 const epubCssDirty = computed(() => epubCssDraft.value !== settings.value.epubCss)
 const libraryScanOptionsDirty = computed(() =>
@@ -56,6 +83,8 @@ const error = ref('')
 const success = ref('')
 const savingFreshness = ref(false)
 const savingConcurrency = ref(false)
+const savingChapterConcurrency = ref(false)
+const savingSiteExtractionPreferences = ref(false)
 const savingTheme = ref(false)
 const savingEpubCss = ref(false)
 const savingLibraryScanOptions = ref(false)
@@ -65,6 +94,8 @@ onMounted(async () => {
     settings.value = await window.novelTracker.getSettings()
     freshnessHoursDraft.value = settings.value.discoveryFreshnessHours
     concurrencyDraft.value = settings.value.maxSimultaneousDownloads
+    chapterConcurrencyDraft.value = settings.value.maxSimultaneousChaptersPerNovel
+    siteExtractionPreferencesDraft.value = settings.value.siteExtractionPreferences.map((preference) => ({ ...preference }))
     scanOldFolderDraft.value = settings.value.scanOldFolder
     scanOldCompletedFolderDraft.value = settings.value.scanOldCompletedFolder
     themeDraft.value = settings.value.appTheme
@@ -150,6 +181,66 @@ async function saveConcurrency(): Promise<void> {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     savingConcurrency.value = false
+  }
+}
+
+async function saveChapterConcurrency(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingChapterConcurrency.value = true
+  try {
+    const result = await window.novelTracker.updateChapterConcurrency(chapterConcurrencyDraft.value)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    chapterConcurrencyDraft.value = result.value.maxSimultaneousChaptersPerNovel
+    success.value = 'Per-novel chapter concurrency saved.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    savingChapterConcurrency.value = false
+  }
+}
+
+function addSiteExtractionPreference(): void {
+  error.value = ''
+  try {
+    const hostname = normalizeSiteHostname(sitePreferenceHostnameDraft.value)
+    siteExtractionPreferencesDraft.value = normalizeSiteExtractionPreferences([
+      ...siteExtractionPreferencesDraft.value.filter((preference) => preference.hostname !== hostname),
+      { hostname, mode: sitePreferenceModeDraft.value }
+    ])
+    sitePreferenceHostnameDraft.value = ''
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  }
+}
+
+function removeSiteExtractionPreference(hostname: string): void {
+  siteExtractionPreferencesDraft.value = siteExtractionPreferencesDraft.value.filter(
+    (preference) => preference.hostname !== hostname
+  )
+}
+
+async function saveSiteExtractionPreferences(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingSiteExtractionPreferences.value = true
+  try {
+    const result = await window.novelTracker.updateSiteExtractionPreferences(siteExtractionPreferencesDraft.value)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    siteExtractionPreferencesDraft.value = result.value.siteExtractionPreferences.map((preference) => ({ ...preference }))
+    success.value = 'Site extraction preferences saved.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    savingSiteExtractionPreferences.value = false
   }
 }
 
@@ -283,6 +374,20 @@ async function resetEpubCss(): Promise<void> {
           />
         </div>
         <div class="configuration-setting">
+          <label class="field-label" for="chapter-concurrency">Maximum active chapter requests per novel</label>
+          <select id="chapter-concurrency" v-model.number="chapterConcurrencyDraft" class="configuration-select">
+            <option v-for="limit in chapterConcurrencyOptions" :key="limit" :value="limit">{{ limit }} chapter{{ limit === 1 ? '' : 's' }}</option>
+          </select>
+          <small class="help-text">Independent of novel downloads. Same-site requests still share the site's rate limit and a two-request host cap.</small>
+          <Button
+            label="Save chapter concurrency"
+            size="small"
+            :loading="savingChapterConcurrency"
+            :disabled="savingChapterConcurrency || !chapterConcurrencyDirty"
+            @click="saveChapterConcurrency"
+          />
+        </div>
+        <div class="configuration-setting">
           <label class="field-label" for="discovery-freshness-hours">Refresh chapter list after</label>
           <div class="configuration-inline-control">
             <input
@@ -322,6 +427,53 @@ async function resetEpubCss(): Promise<void> {
             @click="saveTheme"
           />
         </div>
+      </div>
+      <div class="site-extraction-settings">
+        <div>
+          <strong>Per-site chapter-list parser</strong>
+          <p class="help-text">Automatic uses the built-in site detector. Use Generic HTML only when automatic discovery does not fit a site's chapter-list page. These preferences are saved locally.</p>
+        </div>
+        <div class="site-extraction-preference-form">
+          <input
+            v-model="sitePreferenceHostnameDraft"
+            class="site-extraction-hostname"
+            type="text"
+            placeholder="example.com"
+            aria-label="Website hostname"
+            :disabled="savingSiteExtractionPreferences"
+          />
+          <select v-model="sitePreferenceModeDraft" class="configuration-select" aria-label="Chapter-list parser">
+            <option value="automatic">Automatic</option>
+            <option value="generic-html">Generic HTML</option>
+          </select>
+          <Button label="Add / update site" size="small" :disabled="savingSiteExtractionPreferences" @click="addSiteExtractionPreference" />
+        </div>
+        <div v-if="siteExtractionPreferencesDraft.length" class="site-extraction-preference-list">
+          <div v-for="preference in siteExtractionPreferencesDraft" :key="preference.hostname" class="site-extraction-preference-row">
+            <strong>{{ preference.hostname }}</strong>
+            <select v-model="preference.mode" class="configuration-select" aria-label="Saved chapter-list parser">
+              <option value="automatic">Automatic</option>
+              <option value="generic-html">Generic HTML</option>
+            </select>
+            <Button
+              icon="pi pi-trash"
+              severity="danger"
+              text
+              rounded
+              size="small"
+              :aria-label="`Remove extraction preference for ${preference.hostname}`"
+              :disabled="savingSiteExtractionPreferences"
+              @click="removeSiteExtractionPreference(preference.hostname)"
+            />
+          </div>
+        </div>
+        <Button
+          label="Save site preferences"
+          size="small"
+          :loading="savingSiteExtractionPreferences"
+          :disabled="savingSiteExtractionPreferences || !siteExtractionPreferencesDirty"
+          @click="saveSiteExtractionPreferences"
+        />
       </div>
     </section>
 

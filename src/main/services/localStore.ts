@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   DEFAULT_EPUB_CSS,
+  DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   EPUB_IMAGE_TYPES,
   MAX_CHAPTER_IMAGE_BYTES,
@@ -11,8 +12,11 @@ import {
   MAX_DISCOVERY_FRESHNESS_HOURS,
   MAX_EPUB_CSS_LENGTH,
   MAX_IMAGE_BYTES,
-  MIN_DISCOVERY_FRESHNESS_HOURS
+  MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MIN_DISCOVERY_FRESHNESS_HOURS,
+  MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL
 } from '../../shared/constants'
+import { normalizeSiteExtractionPreferences } from '../../shared/siteExtractionPreferences'
 import type {
   AppSettings,
   ChapterImage,
@@ -31,7 +35,9 @@ const EMPTY_SETTINGS: AppSettings = {
   scanOldFolder: false,
   scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
+  siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
   appTheme: 'light'
 }
@@ -141,6 +147,16 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       `The saved discovery freshness window must be a whole number from ${MIN_DISCOVERY_FRESHNESS_HOURS} to ${MAX_DISCOVERY_FRESHNESS_HOURS} hours.`
     )
   }
+  if (
+    !Number.isInteger(settings.maxSimultaneousChaptersPerNovel) ||
+    settings.maxSimultaneousChaptersPerNovel < MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL ||
+    settings.maxSimultaneousChaptersPerNovel > MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL
+  ) {
+    throw new Error(
+      `The saved per-novel chapter concurrency must be a whole number from ${MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL} to ${MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL}.`
+    )
+  }
+  settings.siteExtractionPreferences = normalizeSiteExtractionPreferences(settings.siteExtractionPreferences)
   return settings
 }
 
@@ -426,7 +442,8 @@ export async function removeChapterArtifacts(dataDirectory: string, queueItemId:
 
 export async function saveDownloadHistoryEntry(
   dataDirectory: string,
-  entry: DownloadHistoryEntry
+  entry: DownloadHistoryEntry,
+  queueReferencedIds: readonly string[] = []
 ): Promise<DownloadHistoryEntry[]> {
   return serializeDownloadHistoryWrite(async () => {
     const history = await readDownloadHistory(dataDirectory)
@@ -436,9 +453,19 @@ export async function saveDownloadHistoryEntry(
     history.sort((left, right) =>
       (right.startedAt || right.updatedAt).localeCompare(left.startedAt || left.updatedAt)
     )
-    const latest = history.slice(0, 50)
-    await writeJson(join(dataDirectory, 'download-history.json'), latest)
-    return latest
+    const activeQueue = await readDiscoveryQueue(dataDirectory)
+    const referencedHistoryIds = new Set(
+      [
+        ...activeQueue.map((item) => item.downloadHistoryId),
+        ...queueReferencedIds
+      ].filter((id) => typeof id === 'string' && id.length > 0)
+    )
+    const recentHistoryIds = new Set(history.slice(0, 50).map((item) => item.id))
+    const retained = history.filter(
+      (item) => referencedHistoryIds.has(item.id) || recentHistoryIds.has(item.id)
+    )
+    await writeJson(join(dataDirectory, 'download-history.json'), retained)
+    return retained
   })
 }
 

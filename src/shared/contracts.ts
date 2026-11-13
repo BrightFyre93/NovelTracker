@@ -104,9 +104,18 @@ export interface AppSettings {
   scanOldFolder: boolean
   scanOldCompletedFolder: boolean
   maxSimultaneousDownloads: number
+  maxSimultaneousChaptersPerNovel: number
   discoveryFreshnessHours: number
+  siteExtractionPreferences: SiteExtractionPreference[]
   epubCss: string
   appTheme: 'light' | 'dark'
+}
+
+export type SiteExtractionMode = 'automatic' | 'generic-html'
+
+export interface SiteExtractionPreference {
+  hostname: string
+  mode: SiteExtractionMode
 }
 
 export interface BrowserSessionInfo {
@@ -204,6 +213,7 @@ export interface DiscoveryQueueItem {
   trackerRow: GenerateEpubInput['trackerRow'] | null
   status: DiscoveryQueueStatus
   parserName: string
+  siteExtractionMode?: SiteExtractionMode
   chapters: QueueChapter[]
   chapterSummary: QueueChapterSummary
   targetOutputPath: string
@@ -413,6 +423,7 @@ export interface NovelTrackerApi {
   acceptQueueRecommendations(id: string, includeOverlap: boolean, overlapCount: number): Promise<Result<void>>
   enqueueEpub(input: GenerateEpubInput, queueItemId?: string): Promise<Result<QueuedEpubJob>>
   retryEpub(id: string): Promise<Result<void>>
+  recoverEpubQueueItem(id: string): Promise<Result<void>>
   pauseEpub(id: string): Promise<Result<void>>
   resumeEpub(id: string): Promise<Result<void>>
   cancelEpub(id: string): Promise<Result<void>>
@@ -422,6 +433,8 @@ export interface NovelTrackerApi {
   clearCompletedDiscoveryQueueItems(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
   updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
+  updateChapterConcurrency(maxSimultaneousChaptersPerNovel: number): Promise<Result<AppSettings>>
+  updateSiteExtractionPreferences(preferences: SiteExtractionPreference[]): Promise<Result<AppSettings>>
   updateLibraryScanOptions(scanOldFolder: boolean, scanOldCompletedFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItemSummary[]) => void): () => void

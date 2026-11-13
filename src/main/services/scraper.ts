@@ -8,13 +8,15 @@ import type {
   ChapterImage,
   ChapterLink,
   DiscoveryResult,
-  JobProgress
+  JobProgress,
+  SiteExtractionMode
 } from '../../shared/contracts'
 import {
   APP_USER_AGENT,
   BLOCKED_PAGE_PATTERN,
   CHAPTER_LABEL_PATTERN,
   CHAPTER_URL_PATTERN,
+  DEFAULT_HTTP_429_RETRY_DELAY_MS,
   DEFAULT_DOMAIN_REQUEST_DELAY_MS,
   DOMAIN_REQUEST_DELAYS_MS,
   EPUB_IMAGE_TYPES,
@@ -24,6 +26,7 @@ import {
   MAX_CHAPTER_IMAGE_BYTES,
   MAX_CHAPTER_IMAGES,
   MAX_IMAGE_BYTES,
+  MAX_ACTIVE_REQUESTS_PER_DOMAIN,
   MAX_NOVEL_DESCRIPTION_LENGTH,
   MAX_NOVELFULL_CATALOG_PAGES,
   NOVELFULL_HOSTS,
@@ -32,6 +35,8 @@ import {
 
 const domainTails = new Map<string, Promise<void>>()
 const domainNextRequestAt = new Map<string, number>()
+const domainActiveRequests = new Map<string, number>()
+const domainRequestWaiters = new Map<string, Set<() => void>>()
 
 export class HttpStatusError extends Error {
   constructor(
@@ -63,6 +68,23 @@ export function validateHttpUrl(value: unknown): string {
   return url.href
 }
 
+function releaseDomainRequest(hostname: string): void {
+  const active = domainActiveRequests.get(hostname) ?? 0
+  if (active <= 1) domainActiveRequests.delete(hostname)
+  else domainActiveRequests.set(hostname, active - 1)
+
+  const waiters = domainRequestWaiters.get(hostname)
+  const nextWaiter = waiters?.values().next().value
+  nextWaiter?.()
+}
+
+function recordDomainRetryAfter(url: string, retryAfterMs: number | null): void {
+  if (retryAfterMs === null) return
+  const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
+  const retryAt = Date.now() + retryAfterMs
+  domainNextRequestAt.set(hostname, Math.max(domainNextRequestAt.get(hostname) ?? 0, retryAt))
+}
+
 async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() => void> {
   const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
   const requestDelayMs = DOMAIN_REQUEST_DELAYS_MS[hostname] ?? DEFAULT_DOMAIN_REQUEST_DELAY_MS
@@ -78,7 +100,6 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
   }
   void tail.then(removeTailWhenSettled, removeTailWhenSettled)
 
-  let requestStarted = false
   try {
     if (signal) {
       await new Promise<void>((resolveTurn, rejectTurn) => {
@@ -99,8 +120,33 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
     } else {
       await previous
     }
-    const wait = Math.max(0, (domainNextRequestAt.get(hostname) ?? 0) - Date.now())
-    if (wait > 0) {
+    while ((domainActiveRequests.get(hostname) ?? 0) >= MAX_ACTIVE_REQUESTS_PER_DOMAIN) {
+      await new Promise<void>((resolveWait, rejectWait) => {
+        let waiters = domainRequestWaiters.get(hostname)
+        if (!waiters) {
+          waiters = new Set()
+          domainRequestWaiters.set(hostname, waiters)
+        }
+        const cleanup = (): void => {
+          waiters?.delete(onAvailable)
+          signal?.removeEventListener('abort', abort)
+          if (waiters?.size === 0) domainRequestWaiters.delete(hostname)
+        }
+        const onAvailable = (): void => {
+          cleanup()
+          resolveWait()
+        }
+        const abort = (): void => {
+          cleanup()
+          rejectWait(new Error('EPUB creation was cancelled.'))
+        }
+        waiters.add(onAvailable)
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+      })
+    }
+    let wait = Math.max(0, (domainNextRequestAt.get(hostname) ?? 0) - Date.now())
+    while (wait > 0) {
       await new Promise<void>((resolveWait, rejectWait) => {
         let timer: ReturnType<typeof setTimeout>
         const abort = (): void => {
@@ -115,13 +161,13 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
         signal?.addEventListener('abort', abort, { once: true })
         if (signal?.aborted) abort()
       })
+      wait = Math.max(0, (domainNextRequestAt.get(hostname) ?? 0) - Date.now())
     }
     if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
-    requestStarted = true
-    return () => {
-      if (requestStarted) domainNextRequestAt.set(hostname, Date.now() + requestDelayMs)
-      release()
-    }
+    domainActiveRequests.set(hostname, (domainActiveRequests.get(hostname) ?? 0) + 1)
+    domainNextRequestAt.set(hostname, Date.now() + requestDelayMs)
+    release()
+    return () => releaseDomainRequest(hostname)
   } catch (error) {
     release()
     throw error
@@ -147,16 +193,10 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     })
 
     if (!response.ok) {
-      const retryAfter = response.headers.get('retry-after')
-      let retryAfterMs: number | null = null
-      if (retryAfter) {
-        const seconds = Number(retryAfter)
-        const retryDate = Date.parse(retryAfter)
-        if (Number.isFinite(seconds) && seconds >= 0 && Number.isFinite(seconds * 1000)) {
-          retryAfterMs = seconds * 1000
-        }
-        else if (Number.isFinite(retryDate)) retryAfterMs = Math.max(0, retryDate - Date.now())
-      }
+      const retryAfterMs =
+        responseRetryAfter(response) ??
+        (response.status === 429 ? DEFAULT_HTTP_429_RETRY_DELAY_MS : null)
+      recordDomainRetryAfter(url, retryAfterMs)
       throw new HttpStatusError(response.status, retryAfterMs)
     }
 
@@ -330,7 +370,13 @@ export async function fetchImageResource(
         url = redirectedUrl
         continue
       }
-      if (!response.ok) throw new HttpStatusError(response.status, responseRetryAfter(response))
+      if (!response.ok) {
+        const retryAfter =
+          responseRetryAfter(response) ??
+          (response.status === 429 ? DEFAULT_HTTP_429_RETRY_DELAY_MS : null)
+        recordDomainRetryAfter(url, retryAfter)
+        throw new HttpStatusError(response.status, retryAfter)
+      }
       const finalUrl = validateHttpUrl(response.url || url)
       await validateImageHost(finalUrl, pageOrigin)
       const declaredLength = Number(response.headers.get('content-length') ?? 0)
@@ -813,19 +859,25 @@ async function discoverNovelFullChapters(
 export async function discoverChapters(
   value: unknown,
   onProgress?: (progress: JobProgress) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  extractionMode: SiteExtractionMode = 'automatic'
 ): Promise<DiscoveryResult> {
-  return discoverChaptersUsingPageLoader(value, fetchHtml, onProgress, signal)
+  return discoverChaptersUsingPageLoader(value, fetchHtml, onProgress, signal, extractionMode)
 }
 
 export async function discoverChaptersUsingPageLoader(
   value: unknown,
   loadPage: HtmlPageLoader,
   onProgress?: (progress: JobProgress) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  extractionMode: SiteExtractionMode = 'automatic'
 ): Promise<DiscoveryResult> {
   const url = validateHttpUrl(value)
-  if (isNovelFullUrl(url) && !CHAPTER_URL_PATTERN.test(new URL(url).pathname)) {
+  if (
+    extractionMode !== 'generic-html' &&
+    isNovelFullUrl(url) &&
+    !CHAPTER_URL_PATTERN.test(new URL(url).pathname)
+  ) {
     return discoverNovelFullChapters(url, loadPage, onProgress, signal)
   }
   const { html, finalUrl } = await loadPage(url, signal)

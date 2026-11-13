@@ -1068,6 +1068,67 @@ footer {
   justify-self: start;
 }
 
+.site-extraction-settings {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 13px;
+  border: 1px solid #e7ecf2;
+  border-radius: 9px;
+  background: #fafbfd;
+}
+
+.site-extraction-settings > div:first-child strong {
+  color: #34445a;
+  font-size: 12px;
+}
+
+.site-extraction-settings > div:first-child .help-text {
+  margin: 5px 0 0;
+  line-height: 1.45;
+}
+
+.site-extraction-preference-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(150px, 0.6fr) auto;
+  gap: 8px;
+}
+
+.site-extraction-hostname {
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid #dce3ed;
+  border-radius: 7px;
+  color: #34445a;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+}
+
+.site-extraction-preference-list {
+  display: grid;
+  gap: 6px;
+}
+
+.site-extraction-preference-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(150px, 0.6fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.site-extraction-preference-row > strong {
+  overflow: hidden;
+  color: #435167;
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.site-extraction-settings > .p-button {
+  justify-self: start;
+}
+
 .configuration-toggle {
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: start;
@@ -1616,7 +1677,8 @@ html[data-theme='dark'] .tracker-picker,
 html[data-theme='dark'] .epub-css-settings,
 html[data-theme='dark'] .output-row,
 html[data-theme='dark'] .library-path,
-html[data-theme='dark'] .configuration-setting {
+html[data-theme='dark'] .configuration-setting,
+html[data-theme='dark'] .site-extraction-settings {
   border-color: #354154;
   background: #1d293a;
 }
@@ -1632,6 +1694,9 @@ html[data-theme='dark'] .tracker-title strong,
 html[data-theme='dark'] .tracker-source select,
 html[data-theme='dark'] .chapter-title,
 html[data-theme='dark'] .configuration-setting,
+html[data-theme='dark'] .site-extraction-settings,
+html[data-theme='dark'] .site-extraction-settings > div:first-child strong,
+html[data-theme='dark'] .site-extraction-preference-row > strong,
 html[data-theme='dark'] .configuration-inline-control,
 html[data-theme='dark'] .epub-css-settings summary,
 html[data-theme='dark'] .file-detail-heading strong {
@@ -1642,6 +1707,7 @@ html[data-theme='dark'] .queue-url-input,
 html[data-theme='dark'] .tracker-source select,
 html[data-theme='dark'] .configuration-select,
 html[data-theme='dark'] .configuration-number,
+html[data-theme='dark'] .site-extraction-hostname,
 html[data-theme='dark'] .epub-css-editor,
 html[data-theme='dark'] .p-inputtext {
   border-color: #3b485b;
@@ -1850,6 +1916,11 @@ html[data-theme='dark'] .p-message {
 
   .library-browser {
     grid-template-columns: 1fr;
+  }
+
+  .site-extraction-preference-form,
+  .site-extraction-preference-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .queue-item {

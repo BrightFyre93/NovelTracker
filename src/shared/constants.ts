@@ -5,6 +5,10 @@ export { DEFAULT_EPUB_CSS }
 export const DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS = 2
 export const MIN_SIMULTANEOUS_DOWNLOADS = 1
 export const MAX_SIMULTANEOUS_DOWNLOADS = 5
+export const DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 2
+export const MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 1
+export const MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 4
+export const MAX_SITE_EXTRACTION_PREFERENCES = 50
 
 export const DEFAULT_DISCOVERY_FRESHNESS_HOURS = 24
 export const MIN_DISCOVERY_FRESHNESS_HOURS = 1
@@ -43,9 +47,11 @@ export const HTTP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 export const MAX_NOVELFULL_CATALOG_PAGES = 200
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 export const DEFAULT_DOMAIN_REQUEST_DELAY_MS = 250
+export const MAX_ACTIVE_REQUESTS_PER_DOMAIN = 2
+export const DEFAULT_HTTP_429_RETRY_DELAY_MS = 30_000
 export const DOMAIN_REQUEST_DELAYS_MS: Readonly<Record<string, number>> = {
-  'novelfull.com': 250,
-  'novelfull.net': 500
+  'novelfull.com': 1000,
+  'novelfull.net': 1000
 }
 export const HTTP_IMAGE_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
 export const APP_USER_AGENT = 'NovelTrackerEPUB/1.0'

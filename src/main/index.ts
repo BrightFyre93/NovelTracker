@@ -37,10 +37,16 @@ import {
   MAX_NOVEL_DESCRIPTION_LENGTH,
   MAX_SELECTED_CHAPTERS,
   MAX_TIMER_DELAY_MS,
+  MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MAX_SIMULTANEOUS_DOWNLOADS,
   MIN_DISCOVERY_FRESHNESS_HOURS,
+  MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MIN_SIMULTANEOUS_DOWNLOADS
 } from '../shared/constants'
+import {
+  normalizeSiteExtractionPreferences,
+  siteExtractionModeForUrl
+} from '../shared/siteExtractionPreferences'
 import {
   clearBrowserSession,
   closeBrowserSession,
@@ -355,9 +361,72 @@ function persistDiscoveryQueue(): Promise<void> {
 }
 
 function persistHistoryEntry(entry: DownloadHistoryEntry): Promise<DownloadHistoryEntry[]> {
-  const write = historyWrites.then(() => saveDownloadHistoryEntry(dataDirectory(), entry))
+  const write = historyWrites.then(() =>
+    saveDownloadHistoryEntry(
+      dataDirectory(),
+      entry,
+      discoveryQueue.map((item) => item.downloadHistoryId)
+    )
+  )
   historyWrites = write.then(() => undefined, () => undefined)
   return write
+}
+
+function historyEntryForQueueItem(item: DiscoveryQueueItem): DownloadHistoryEntry | null {
+  const options = item.downloadOptions
+  if (!options) return null
+  const now = new Date().toISOString()
+  const id = item.downloadHistoryId || randomUUID()
+  item.downloadHistoryId = id
+  const savedSelectedCount = item.chapterSummary.selected
+  const selectedChapterCount =
+    Number.isInteger(savedSelectedCount) && savedSelectedCount >= 0 ? savedSelectedCount : 0
+  const progress = item.progress?.current ?? 0
+  const completedChapters = Number.isInteger(progress)
+    ? Math.max(0, Math.min(progress, selectedChapterCount))
+    : 0
+  const statusByQueueStatus: Record<DiscoveryQueueItem['status'], DownloadHistoryEntry['status']> = {
+    queued: 'queued',
+    downloading: 'running',
+    paused: 'paused',
+    completed: 'completed',
+    'partially-completed': 'partially-completed',
+    failed: 'failed',
+    cancelled: 'cancelled',
+    discovering: 'failed',
+    'needs-review': 'failed',
+    ready: 'failed'
+  }
+  return {
+    id,
+    queueItemId: item.id,
+    title: options.title || item.title,
+    author: options.author || item.author,
+    sourceUrl: options.sourceUrl || item.sourceUrl,
+    trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
+    selectedChapterCount,
+    status: statusByQueueStatus[item.status],
+    completedChapters,
+    outputPath: item.outputPath || '',
+    error: item.error || '',
+    startedAt: item.queuedAt || item.updatedAt || item.discoveredAt || now,
+    updatedAt: item.updatedAt || now
+  }
+}
+
+async function ensureQueueItemHistoryEntry(
+  item: DiscoveryQueueItem,
+  history?: DownloadHistoryEntry[]
+): Promise<DownloadHistoryEntry | null> {
+  if (!item.downloadOptions) return null
+  const entries = history ?? await readDownloadHistory(dataDirectory())
+  const existing = entries.find((entry) => entry.id === item.downloadHistoryId)
+  if (existing) return existing
+  const restored = historyEntryForQueueItem(item)
+  if (!restored) return null
+  await persistHistoryEntry(restored)
+  entries.push(restored)
+  return restored
 }
 
 function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
@@ -599,6 +668,12 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
 
   try {
     await ensureQueueItemChapters(item)
+    if (item.siteExtractionMode === undefined) {
+      const settings = await readSettings(dataDirectory())
+      item.siteExtractionMode = siteExtractionModeForUrl(item.sourceUrl, settings.siteExtractionPreferences)
+      await persistDiscoveryQueue()
+      notifyDiscoveryQueueChanged()
+    }
     previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
     previousByUrl = new Map(previousChapters.map((chapter) => [chapter.url, chapter]))
     hadPreviousSnapshot = Boolean(item.discoveredAt && previousChapters.length > 0)
@@ -611,7 +686,8 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
             item.progress = progress
             notifyDiscoveryQueueChanged()
           },
-          controller.signal
+          controller.signal,
+          item.siteExtractionMode
         )
       : await discoverChapters(
           item.sourceUrl,
@@ -620,7 +696,8 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
             item.progress = progress
             notifyDiscoveryQueueChanged()
           },
-          controller.signal
+          controller.signal,
+          item.siteExtractionMode
         )
     if (controller.signal.aborted) throw new Error('Discovery was cancelled.')
     if (activeQueueDiscoveries.get(id) !== controller || item.status !== 'discovering') {
@@ -1171,38 +1248,43 @@ async function persistDownloadState(
 async function runQueuedDownload(
   itemId: string,
   controller: AbortController,
-  historyEntry: DownloadHistoryEntry
+  historyEntry: DownloadHistoryEntry,
+  maxSimultaneousChapters: number
 ): Promise<void> {
   const item = discoveryQueue.find((candidate) => candidate.id === itemId)
   if (!item || !item.downloadOptions) return
   const options = item.downloadOptions
   const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
   let completedSelectedChapterCount = 0
-  let chaptersSinceCheckpoint = 0
+  let activeChapterRequests = 0
   let lastCheckpointAt = Date.now()
+  let chaptersSinceCheckpoint = 0
+  let progressCheckpointTail = Promise.resolve()
 
-  const persistChapterProgress = async (): Promise<void> => {
-    chaptersSinceCheckpoint += 1
-    const now = Date.now()
-    const shouldCheckpoint = chaptersSinceCheckpoint >= 25 || now - lastCheckpointAt >= 5000
-    await persistDownloadState(item, historyEntry, shouldCheckpoint)
-    if (shouldCheckpoint) {
-      chaptersSinceCheckpoint = 0
-      lastCheckpointAt = now
-    }
+  const persistChapterProgress = (): Promise<void> => {
+    const operation = progressCheckpointTail.then(async () => {
+      chaptersSinceCheckpoint += 1
+      const now = Date.now()
+      const shouldCheckpoint = chaptersSinceCheckpoint >= 25 || now - lastCheckpointAt >= 5000
+      await persistDownloadState(item, historyEntry, shouldCheckpoint)
+      if (shouldCheckpoint) {
+        chaptersSinceCheckpoint = 0
+        lastCheckpointAt = now
+      }
+    })
+    progressCheckpointTail = operation
+    return operation
   }
 
   try {
     if (selectedChapters.length === 0) throw new Error('Select at least one chapter before queueing this EPUB.')
-    for (let index = 0; index < selectedChapters.length; index += 1) {
-      const chapter = selectedChapters[index]
+    const processChapter = async (index: number, chapter: ChapterLink): Promise<void> => {
       const active = activeDownloads.get(itemId)
-      if (!active || active.requestedAction !== 'none' || controller.signal.aborted) break
-
+      if (!active || active.requestedAction !== 'none' || controller.signal.aborted) return
       let savedContent: ChapterContent | null = null
       if (item.repackageOnly) {
         item.progress = {
-          current: index,
+          current: completedSelectedChapterCount,
           total: selectedChapters.length,
           message: `Validating saved chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
         }
@@ -1222,47 +1304,55 @@ async function runQueuedDownload(
         } catch (error) {
           console.warn(`Saved chapter artifact for ${chapter.url} will be fetched again:`, errorMessage(error))
         }
-        if (savedContent) completedSelectedChapterCount += 1
+        if (savedContent) {
+          completedSelectedChapterCount += 1
+          item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
+        }
       }
 
       if (!savedContent) {
-        item.progress = {
-          current: completedSelectedChapterCount,
-          total: selectedChapters.length,
-          message: `Fetching chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
-        }
-        await persistDownloadState(item, historyEntry, false)
-
         let lastError: unknown = new Error('Chapter could not be fetched.')
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          try {
-            savedContent = await fetchChapterContentWithBrowserFallback(chapter, controller.signal)
-            break
-          } catch (error) {
-            if (controller.signal.aborted) break
-            lastError = error
-            if (attempt === 2 || !canRetryChapter(error)) break
-            const retryAfter = error instanceof HttpStatusError ? error.retryAfterMs : null
-            const delay = retryAfter ?? 1000 * (2 ** attempt)
+        activeChapterRequests += 1
+        try {
+          item.progress = {
+            current: completedSelectedChapterCount,
+            total: selectedChapters.length,
+            message: `Fetching chapter ${index + 1} of ${selectedChapters.length} (${activeChapterRequests} active): ${chapter.title}`
+          }
+          await persistDownloadState(item, historyEntry, false)
+
+          for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
-              await cancellableDelay(delay, controller.signal)
-            } catch {
+              savedContent = await fetchChapterContentWithBrowserFallback(chapter, controller.signal)
               break
+            } catch (error) {
+              if (controller.signal.aborted) break
+              lastError = error
+              if (attempt === 2 || !canRetryChapter(error)) break
+              const retryAfter = error instanceof HttpStatusError ? error.retryAfterMs : null
+              const delay = retryAfter ?? 1000 * (2 ** attempt)
+              try {
+                await cancellableDelay(delay, controller.signal)
+              } catch {
+                break
+              }
             }
           }
-        }
 
-        if (controller.signal.aborted) break
-        if (savedContent) {
-          await writeChapterArtifact(dataDirectory(), itemId, savedContent)
-          completedSelectedChapterCount += 1
-          item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
-        } else {
-          item.failedChapters = [
-            ...item.failedChapters.filter((failed) => failed.url !== chapter.url),
-            { url: chapter.url, title: chapter.title, error: errorMessage(lastError) }
-          ]
-          item.error = `${item.failedChapters.length} chapter(s) failed. Retry failed chapters to continue.`
+          if (controller.signal.aborted) return
+          if (savedContent) {
+            await writeChapterArtifact(dataDirectory(), itemId, savedContent)
+            completedSelectedChapterCount += 1
+            item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
+          } else {
+            item.failedChapters = [
+              ...item.failedChapters.filter((failed) => failed.url !== chapter.url),
+              { url: chapter.url, title: chapter.title, error: errorMessage(lastError) }
+            ]
+            item.error = `${item.failedChapters.length} chapter(s) failed. Retry failed chapters to continue.`
+          }
+        } finally {
+          activeChapterRequests -= 1
         }
       }
 
@@ -1278,6 +1368,30 @@ async function runQueuedDownload(
       }
       await persistChapterProgress()
     }
+
+    let nextChapterIndex = 0
+    let fatalError: unknown
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const active = activeDownloads.get(itemId)
+        if (!active || active.requestedAction !== 'none' || controller.signal.aborted || fatalError) return
+        const index = nextChapterIndex
+        nextChapterIndex += 1
+        const chapter = selectedChapters[index]
+        if (!chapter) return
+        try {
+          await processChapter(index, chapter)
+        } catch (error) {
+          fatalError ??= error
+          controller.abort()
+          return
+        }
+      }
+    }
+    const workerCount = Math.min(maxSimultaneousChapters, selectedChapters.length)
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+    await progressCheckpointTail
+    if (fatalError) throw fatalError
 
     const requestedAction = activeDownloads.get(itemId)?.requestedAction ?? 'cancel'
     if (requestedAction === 'pause') {
@@ -1453,14 +1567,14 @@ async function pumpDownloadQueue(): Promise<void> {
         .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))[0]
       if (!item) break
       const history = await readDownloadHistory(dataDirectory())
-      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      const historyEntry = await ensureQueueItemHistoryEntry(item, history)
       const currentHead = discoveryQueue
         .filter((candidate) => candidate.status === 'queued' && candidate.downloadOptions)
         .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))[0]
       if (item.status !== 'queued' || currentHead?.id !== item.id) continue
       if (!historyEntry) {
         item.status = 'failed'
-        item.error = 'The saved job history entry is missing.'
+        item.error = 'The saved EPUB job details are missing and cannot be restored.'
         item.updatedAt = new Date().toISOString()
         await persistDiscoveryQueue()
         notifyDiscoveryQueueChanged()
@@ -1524,7 +1638,12 @@ async function pumpDownloadQueue(): Promise<void> {
         notifyDiscoveryQueueChanged()
         continue
       }
-      void runQueuedDownload(item.id, controller, historyEntry).finally(() => {
+      void runQueuedDownload(
+        item.id,
+        controller,
+        historyEntry,
+        settings.maxSimultaneousChaptersPerNovel
+      ).finally(() => {
         activeDownloads.delete(item.id)
         const finishedItem = discoveryQueue.find((candidate) => candidate.id === item.id)
         if (
@@ -1753,6 +1872,41 @@ function registerIpcHandlers(): void {
       return { ok: false, error: errorMessage(error) }
     }
   })
+
+  ipcMain.handle('settings:chapter-concurrency', async (_event, rawValue: unknown): Promise<Result<AppSettings>> => {
+    try {
+      if (
+        typeof rawValue !== 'number' ||
+        !Number.isInteger(rawValue) ||
+        rawValue < MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL ||
+        rawValue > MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL
+      ) {
+        throw new Error(
+          `Maximum chapter requests per novel must be a whole number from ${MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL} to ${MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL}.`
+        )
+      }
+      const settings = await readSettings(dataDirectory())
+      settings.maxSimultaneousChaptersPerNovel = rawValue
+      await writeSettings(dataDirectory(), settings)
+      return { ok: true, value: settings }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle(
+    'settings:site-extraction-preferences',
+    async (_event, rawPreferences: unknown): Promise<Result<AppSettings>> => {
+      try {
+        const settings = await readSettings(dataDirectory())
+        settings.siteExtractionPreferences = normalizeSiteExtractionPreferences(rawPreferences)
+        await writeSettings(dataDirectory(), settings)
+        return { ok: true, value: settings }
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) }
+      }
+    }
+  )
 
   ipcMain.handle(
     'settings:library-scan-options',
@@ -2061,12 +2215,16 @@ function registerIpcHandlers(): void {
       }
       const previousUpdatedAt = item.updatedAt
       const previousStatus = item.status
+      const previousExtractionMode = item.siteExtractionMode
+      const settings = await readSettings(dataDirectory())
+      item.siteExtractionMode = siteExtractionModeForUrl(item.sourceUrl, settings.siteExtractionPreferences)
       item.status = 'discovering'
       item.updatedAt = new Date().toISOString()
       try {
         await persistDiscoveryQueue()
       } catch (error) {
         item.status = previousStatus
+        item.siteExtractionMode = previousExtractionMode
         item.updatedAt = previousUpdatedAt
         throw error
       }
@@ -2523,6 +2681,63 @@ function registerIpcHandlers(): void {
       return { ok: true, value: undefined }
     } catch (error) {
       console.error('EPUB job retry failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('download-queue:recover', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid download queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || item.status !== 'failed') {
+        throw new Error('Only failed queue items can be recovered.')
+      }
+
+      if (!item.downloadOptions) {
+        if (!item.sourceUrl) throw new Error('This item has no saved source URL to rediscover.')
+        const previousError = item.error
+        item.status = 'discovering'
+        item.error = ''
+        item.progress = null
+        item.updatedAt = new Date().toISOString()
+        try {
+          await persistDiscoveryQueue()
+        } catch (error) {
+          item.status = 'failed'
+          item.error = previousError
+          throw error
+        }
+        notifyDiscoveryQueueChanged()
+        pendingDiscoveries.push(item.id)
+        pumpDiscoveryQueue()
+        return { ok: true, value: undefined }
+      }
+
+      await ensureQueueItemChapters(item)
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = await ensureQueueItemHistoryEntry(item, history)
+      if (!historyEntry) throw new Error('The saved EPUB job details could not be restored.')
+
+      item.status = 'queued'
+      item.repackageOnly = false
+      item.queuedAt ||= new Date().toISOString()
+      item.error = ''
+      item.progress = {
+        current: historyEntry.completedChapters,
+        total: historyEntry.selectedChapterCount,
+        message: 'Recovered and queued for download'
+      }
+      historyEntry.status = 'queued'
+      historyEntry.error = ''
+      historyEntry.updatedAt = new Date().toISOString()
+      await persistDownloadState(item, historyEntry)
+      releaseQueueItemChapters(item)
+      void pumpDownloadQueue().catch((error: unknown) => {
+        console.error('Download queue scheduler failed:', error)
+      })
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Failed queue item recovery failed:', error)
       return { ok: false, error: errorMessage(error) }
     }
   })
@@ -3257,6 +3472,29 @@ app.whenReady().then(async () => {
   for (const item of discoveryQueue) releaseQueueItemChapters(item)
   const history = await readDownloadHistory(dataDirectory())
   let interruptedDownloads = false
+  for (const item of discoveryQueue) {
+    if (!item.downloadOptions || history.some((entry) => entry.id === item.downloadHistoryId)) continue
+    const restoredHistory = await ensureQueueItemHistoryEntry(item, history)
+    if (!restoredHistory) continue
+    interruptedDownloads = true
+    if (
+      item.status === 'failed' &&
+      /history entry is missing/i.test(item.error)
+    ) {
+      item.status = 'queued'
+      item.error = ''
+      item.queuedAt ||= item.updatedAt || new Date().toISOString()
+      item.progress = {
+        current: restoredHistory.completedChapters,
+        total: restoredHistory.selectedChapterCount,
+        message: 'Recovered saved download history'
+      }
+      restoredHistory.status = 'queued'
+      restoredHistory.error = ''
+      restoredHistory.updatedAt = new Date().toISOString()
+      await persistHistoryEntry(restoredHistory)
+    }
+  }
   for (const item of discoveryQueue) {
     const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
     if (historyEntry && item.downloadOptions) {
