@@ -9,7 +9,6 @@ import type {
 } from '../../shared/contracts'
 import { LIBRARY_FOLDERS, MAX_EPUB_INPUT_BYTES } from '../../shared/constants'
 import { inspectEpub } from './epubInspector'
-import { inspectPdf } from './pdfInspector'
 
 interface ScannableFile {
   path: string
@@ -22,7 +21,6 @@ interface ScannableFile {
 
 export interface LibraryScanOptions {
   scanOldFolder: boolean
-  scanPdfs: boolean
 }
 
 function checkCancelled(signal: AbortSignal): void {
@@ -68,12 +66,29 @@ function cachedFile(
     cached.size !== file.size ||
     cached.modifiedAt !== file.modifiedAt ||
     !Array.isArray(cached.chapterTitles) ||
-    !Array.isArray(cached.chapterNumbers) ||
-    !Array.isArray(cached.chapterLocations)
+    !Array.isArray(cached.chapterNumbers)
   ) {
     return undefined
   }
-  return { ...cached, path: file.path, relativePath: file.relativePath, folderState: file.folderState }
+  return {
+    id: file.id,
+    path: file.path,
+    relativePath: file.relativePath,
+    filename: cached.filename,
+    format: 'EPUB',
+    folderState: file.folderState,
+    size: file.size,
+    modifiedAt: file.modifiedAt,
+    novelTitle: cached.novelTitle,
+    author: cached.author,
+    language: cached.language,
+    chapterTitles: cached.chapterTitles,
+    chapterNumbers: cached.chapterNumbers,
+    filenameRange: cached.filenameRange,
+    coverageConfidence: cached.coverageConfidence,
+    coverPath: cached.coverPath,
+    inspectionError: cached.inspectionError
+  }
 }
 
 function parseFilenameRange(value: string): { start: number; end: number } | null {
@@ -84,27 +99,23 @@ function parseFilenameRange(value: string): { start: number; end: number } | nul
 function emptyFile(file: ScannableFile, error: unknown): LibraryFileRecord {
   const parts = file.relativePath.split(/[\\/]/)
   const filename = parts[parts.length - 1]
-  const isPdf = extname(filename ?? '').toLowerCase() === '.pdf'
   const title = parts.length > 2 ? parts[1] : filename
   return {
     id: file.id,
     path: file.path,
     relativePath: file.relativePath,
     filename,
-    format: isPdf ? 'PDF' : 'EPUB',
+    format: 'EPUB',
     folderState: file.folderState,
     size: file.size,
     modifiedAt: file.modifiedAt,
     novelTitle: title,
     author: '',
     language: '',
-    pageCount: null,
     chapterTitles: [],
     chapterNumbers: [],
-    chapterLocations: [],
-    filenameRange: isPdf ? null : parseFilenameRange(filename),
+    filenameRange: parseFilenameRange(filename ?? ''),
     coverageConfidence: 'unknown',
-    pdfClassification: isPdf ? 'unknown' : null,
     coverPath: null,
     inspectionError: error instanceof Error ? error.message : String(error)
   }
@@ -117,8 +128,7 @@ async function enumerateFiles(
   onProgress: (progress: LibraryProgress) => void,
   currentFolderIndex: number,
   filesFoundBefore: number,
-  totalFolders: number,
-  options: LibraryScanOptions
+  totalFolders: number
 ): Promise<{ files: ScannableFile[]; errors: number }> {
   const files: ScannableFile[] = []
   let errors = 0
@@ -149,12 +159,7 @@ async function enumerateFiles(
           }
           if (!details.isFile()) continue
           const extension = extname(entry.name).toLowerCase()
-          if (
-            (extension !== '.epub' && extension !== '.pdf') ||
-            (extension === '.pdf' && !options.scanPdfs)
-          ) {
-            continue
-          }
+          if (extension !== '.epub') continue
 
           const relativePath = relative(root, path)
           files.push({
@@ -231,8 +236,7 @@ export async function scanLibrary(
       onProgress,
       index + 1,
       files.length,
-      folders.length,
-      options
+      folders.length
     )
     files.push(...result.files)
     scanErrors += result.errors
@@ -271,28 +275,17 @@ export async function scanLibrary(
     if (!record) {
       inspectedFiles += 1
       try {
-        if (extname(file.path).toLowerCase() === '.epub') {
-          if (file.size > MAX_EPUB_INPUT_BYTES) {
-            throw new Error(`EPUB exceeds the ${MAX_EPUB_INPUT_BYTES / (1024 * 1024)} MB inspection limit.`)
-          }
-          record = await inspectEpub(
-            file.path,
-            file.relativePath,
-            file.folderState,
-            file.size,
-            file.modifiedAt,
-            file.id
-          )
-        } else {
-          record = await inspectPdf(
-            file.path,
-            file.relativePath,
-            file.folderState,
-            file.size,
-            file.modifiedAt,
-            file.id
-          )
+        if (file.size > MAX_EPUB_INPUT_BYTES) {
+          throw new Error(`EPUB exceeds the ${MAX_EPUB_INPUT_BYTES / (1024 * 1024)} MB inspection limit.`)
         }
+        record = await inspectEpub(
+          file.path,
+          file.relativePath,
+          file.folderState,
+          file.size,
+          file.modifiedAt,
+          file.id
+        )
       } catch (error) {
         record = emptyFile(file, error)
         scanErrors += 1

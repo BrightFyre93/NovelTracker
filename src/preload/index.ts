@@ -35,8 +35,8 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('settings:discovery-freshness', hours) as Promise<Result<AppSettings>>,
   updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
     ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
-  updateLibraryScanOptions: (scanOldFolder: boolean, scanPdfs: boolean) =>
-    ipcRenderer.invoke('settings:library-scan-options', scanOldFolder, scanPdfs) as Promise<Result<AppSettings>>,
+  updateLibraryScanOptions: (scanOldFolder: boolean) =>
+    ipcRenderer.invoke('settings:library-scan-options', scanOldFolder) as Promise<Result<AppSettings>>,
   chooseLibraryRoot: () => ipcRenderer.invoke('dialog:choose-library-root') as Promise<string | null>,
   chooseTrackerCsv: () => ipcRenderer.invoke('dialog:choose-tracker-csv') as Promise<string | null>,
   getTrackerNovels: () => ipcRenderer.invoke('tracker:list') as Promise<Result<TrackerNovel[]>>,

@@ -102,7 +102,6 @@ export interface AppSettings {
   trackerCsvPath: string
   outputDirectory: string
   scanOldFolder: boolean
-  scanPdfs: boolean
   maxSimultaneousDownloads: number
   discoveryFreshnessHours: number
   epubCss: string
@@ -223,9 +222,8 @@ export interface DiscoveryQueueInput {
 }
 
 export type LibraryFolderState = 'Completed' | 'Downloaded' | 'Sent' | 'Old'
-export type LibraryFileFormat = 'EPUB' | 'PDF'
-export type PdfClassification = 'individual-chapter' | 'compiled-candidate' | 'unknown'
-export type CoverageConfidence = 'extracted-toc' | 'extracted-text' | 'filename' | 'user-corrected' | 'unknown'
+export type LibraryFileFormat = 'EPUB'
+export type CoverageConfidence = 'extracted-toc' | 'filename' | 'user-corrected' | 'unknown'
 
 export interface LibraryFileCorrection {
   novelTitle?: string
@@ -244,13 +242,10 @@ export interface LibraryFileRecord {
   novelTitle: string
   author: string
   language: string
-  pageCount: number | null
   chapterTitles: string[]
   chapterNumbers: number[]
-  chapterLocations: Array<{ chapter: number; page: number; title: string }>
   filenameRange: { start: number; end: number } | null
   coverageConfidence: CoverageConfidence
-  pdfClassification: PdfClassification | null
   coverPath: string | null
   inspectionError: string
 }
@@ -338,7 +333,7 @@ export interface NovelTrackerApi {
   clearDiscoveryQueue(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
   updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
-  updateLibraryScanOptions(scanOldFolder: boolean, scanPdfs: boolean): Promise<Result<AppSettings>>
+  updateLibraryScanOptions(scanOldFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItem[]) => void): () => void
   getLibraryIndex(): Promise<LibraryIndex | null>

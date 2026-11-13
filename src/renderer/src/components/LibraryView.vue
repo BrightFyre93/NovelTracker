@@ -20,7 +20,6 @@ const backupIndex = shallowRef<LibraryIndex | null>(null)
 const search = ref('')
 const selectedNovel = ref('')
 const selectedFileId = ref('')
-const includePdfs = ref(false)
 const restoringBackup = ref(false)
 const merging = ref(false)
 const mergeProgress = ref<EpubMergeProgress | null>(null)
@@ -34,7 +33,7 @@ const success = ref('')
 const visibleFileLimit = 100
 
 const visibleLibraryFiles = computed(() =>
-  (index.value?.files ?? []).filter((file) => includePdfs.value || file.format !== 'PDF')
+  index.value?.files ?? []
 )
 
 const novelSummaries = computed(() => {
@@ -54,7 +53,7 @@ const novelSummaries = computed(() => {
         Sent: group.files.filter((file) => file.folderState === 'Sent').length,
         Old: group.files.filter((file) => file.folderState === 'Old').length
       }
-      const coverage = analyzeLibraryCoverage(group.files, includePdfs.value)
+      const coverage = analyzeLibraryCoverage(group.files)
       return {
         ...group,
         stateCounts,
@@ -91,11 +90,6 @@ const selectedMergeFiles = computed(() =>
       return leftStart - rightStart || left.filename.localeCompare(right.filename)
     })
 )
-const formatCounts = computed(() => ({
-  epubs: (index.value?.files ?? []).filter((file) => file.format === 'EPUB').length,
-  pdfs: (index.value?.files ?? []).filter((file) => file.format === 'PDF').length
-}))
-
 let removeProgressListener: (() => void) | undefined
 let removeMergeProgressListener: (() => void) | undefined
 
@@ -421,13 +415,11 @@ function chapterRangeLabel(start: number, end: number): string {
         </div>
       </div>
       <p class="help-text library-note">
-        Set or change the historical library root in Configuration. Scans are read-only: EPUBs are inspected for metadata and chapter lists; PDFs are indexed from their content or chapter filenames.
+        Set or change the historical library root in Configuration. Scans are read-only and inspect EPUB metadata and chapter lists.
       </p>
       <div v-if="index" class="library-summary">
         <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>visible novels</span></div>
-        <div><strong>{{ visibleLibraryFiles.length.toLocaleString() }}</strong><span>shown files</span></div>
-        <div><strong>{{ formatCounts.epubs.toLocaleString() }}</strong><span>EPUBs</span></div>
-        <div><strong>{{ formatCounts.pdfs.toLocaleString() }}</strong><span>PDFs indexed</span></div>
+        <div><strong>{{ visibleLibraryFiles.length.toLocaleString() }}</strong><span>indexed EPUBs</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
       <Message v-if="!index && !busy" severity="info" :closable="false" class="feedback">
@@ -445,10 +437,6 @@ function chapterRangeLabel(start: number, end: number): string {
           <h3>Novels</h3>
           <InputText v-model="search" class="library-search" placeholder="Search title or file" />
         </div>
-        <label class="legacy-pdf-toggle">
-          <input v-model="includePdfs" type="checkbox" />
-          Include legacy PDFs in this list and its warnings ({{ formatCounts.pdfs.toLocaleString() }})
-        </label>
         <div class="novel-list">
           <button
             v-for="novel in novelSummaries"
@@ -512,10 +500,10 @@ function chapterRangeLabel(start: number, end: number): string {
         </div>
         <p v-else class="empty-state">Choose a novel to inspect its files.</p>
 
-        <section v-if="selectedGroup && selectedGroup.files.some((file) => file.format === 'EPUB')" class="library-merge-panel">
+        <section v-if="selectedGroup" class="library-merge-panel">
           <strong>Combine existing EPUBs offline</strong>
           <p class="help-text">
-            Select at least two EPUBs. They are ordered by chapter range; overlapping chapter numbers are included once, preferring the lower-range file. No network requests are made. PDFs are not supported.
+            Select at least two EPUBs. They are ordered by chapter range; overlapping chapter numbers are included once, preferring the lower-range file. No network requests are made.
           </p>
           <p class="file-evidence">{{ mergeFileIds.length }} of 20 EPUBs selected</p>
           <ul v-if="selectedMergeFiles.length" class="merge-source-list">
@@ -577,15 +565,12 @@ function chapterRangeLabel(start: number, end: number): string {
         </section>
 
         <details
-          v-if="selectedGroup && (selectedCoverageWarnings.length || selectedGroup.coverage.filenameEvidenceCount)"
+          v-if="selectedGroup && selectedCoverageWarnings.length"
           class="coverage-warning-panel"
         >
           <summary>Coverage warnings ({{ selectedCoverageWarnings.length }})</summary>
           <p class="coverage-warning-note">
             Gaps mean no chapter evidence was found between the neighboring numbers shown; they are not proof that a source chapter is missing. Beginning and ending gaps need a known source chapter list.
-          </p>
-          <p v-if="selectedGroup.coverage.filenameEvidenceCount" class="coverage-warning-note">
-            {{ selectedGroup.coverage.filenameEvidenceCount.toLocaleString() }} individual PDF chapter number(s) come from filenames, not file contents. They are used as lower-confidence evidence because the PDF list is visible.
           </p>
           <ul v-if="selectedCoverageWarnings.length" class="coverage-warning-list">
             <li v-for="warning in selectedCoverageWarnings" :key="warning.key">
@@ -639,7 +624,7 @@ function chapterRangeLabel(start: number, end: number): string {
               </template>
             </li>
           </ul>
-          <p v-else class="empty-state">No extracted-coverage warnings. Filename-only evidence is listed above for context.</p>
+          <p v-else class="empty-state">No extracted-coverage warnings.</p>
         </details>
 
         <div v-if="selectedFile" class="library-file-detail">
@@ -652,7 +637,6 @@ function chapterRangeLabel(start: number, end: number): string {
               <Button label="Open" severity="secondary" text size="small" @click="openFile(selectedFile, false)" />
               <Button label="Show in folder" severity="secondary" text size="small" @click="openFile(selectedFile, true)" />
               <Button
-                v-if="selectedFile.format === 'EPUB'"
                 :label="mergeFileIds.includes(selectedFile.id) ? 'Remove from merge' : 'Add to merge'"
                 :icon="mergeFileIds.includes(selectedFile.id) ? 'pi pi-minus-circle' : 'pi pi-plus-circle'"
                 severity="secondary"
@@ -665,9 +649,7 @@ function chapterRangeLabel(start: number, end: number): string {
           </div>
           <p class="file-evidence">
             {{ (selectedFile.size / 1024 / 1024).toFixed(1) }} MB
-            <span v-if="selectedFile.pageCount"> · {{ selectedFile.pageCount }} pages</span>
             · {{ coverageLabel(selectedFile) }} · {{ selectedFile.coverageConfidence }} evidence
-            <span v-if="selectedFile.pdfClassification"> · {{ selectedFile.pdfClassification }}</span>
           </p>
           <p v-if="selectedFile.chapterTitles.length" class="file-evidence">
             {{ selectedFile.chapterTitles.slice(0, 5).join(' · ') }}<span v-if="selectedFile.chapterTitles.length > 5"> …</span>

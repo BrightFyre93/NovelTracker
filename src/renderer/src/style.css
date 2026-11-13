@@ -1011,20 +1011,6 @@ footer {
   max-width: 240px;
 }
 
-.legacy-pdf-toggle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 10px;
-  color: #64758c;
-  font-size: 10px;
-  cursor: pointer;
-}
-
-.legacy-pdf-toggle input {
-  accent-color: #4678c9;
-}
-
 .novel-list,
 .library-file-list {
   max-height: 560px;

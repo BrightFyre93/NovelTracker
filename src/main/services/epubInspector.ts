@@ -189,13 +189,10 @@ export async function inspectEpub(
     novelTitle: title,
     author,
     language,
-    pageCount: null,
     chapterTitles: uniqueTitles,
     chapterNumbers,
-    chapterLocations: [],
     filenameRange: filenameRange(relativePath),
     coverageConfidence: confidence,
-    pdfClassification: null,
     coverPath,
     inspectionError: ''
   }

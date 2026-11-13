@@ -23,7 +23,6 @@ const settings = ref<AppSettings>({
   trackerCsvPath: '',
   outputDirectory: '',
   scanOldFolder: false,
-  scanPdfs: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   epubCss: DEFAULT_EPUB_CSS,
@@ -34,7 +33,6 @@ const concurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS)
 const themeDraft = ref<AppSettings['appTheme']>('light')
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
 const scanOldFolderDraft = ref(false)
-const scanPdfsDraft = ref(false)
 const concurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_DOWNLOADS - MIN_SIMULTANEOUS_DOWNLOADS + 1 },
   (_, index) => MIN_SIMULTANEOUS_DOWNLOADS + index
@@ -43,10 +41,7 @@ const freshnessDirty = computed(() => freshnessHoursDraft.value !== settings.val
 const concurrencyDirty = computed(() => concurrencyDraft.value !== settings.value.maxSimultaneousDownloads)
 const themeDirty = computed(() => themeDraft.value !== settings.value.appTheme)
 const epubCssDirty = computed(() => epubCssDraft.value !== settings.value.epubCss)
-const libraryScanOptionsDirty = computed(() =>
-  scanOldFolderDraft.value !== settings.value.scanOldFolder ||
-  scanPdfsDraft.value !== settings.value.scanPdfs
-)
+const libraryScanOptionsDirty = computed(() => scanOldFolderDraft.value !== settings.value.scanOldFolder)
 const freshnessValid = computed(() =>
   Number.isInteger(freshnessHoursDraft.value) &&
   freshnessHoursDraft.value >= MIN_DISCOVERY_FRESHNESS_HOURS &&
@@ -66,7 +61,6 @@ onMounted(async () => {
     freshnessHoursDraft.value = settings.value.discoveryFreshnessHours
     concurrencyDraft.value = settings.value.maxSimultaneousDownloads
     scanOldFolderDraft.value = settings.value.scanOldFolder
-    scanPdfsDraft.value = settings.value.scanPdfs
     themeDraft.value = settings.value.appTheme
     epubCssDraft.value = settings.value.epubCss
   } catch (reason) {
@@ -158,17 +152,13 @@ async function saveLibraryScanOptions(): Promise<void> {
   success.value = ''
   savingLibraryScanOptions.value = true
   try {
-    const result = await window.novelTracker.updateLibraryScanOptions(
-      scanOldFolderDraft.value,
-      scanPdfsDraft.value
-    )
+    const result = await window.novelTracker.updateLibraryScanOptions(scanOldFolderDraft.value)
     if (!result.ok) {
       error.value = result.error
       return
     }
     settings.value = result.value
     scanOldFolderDraft.value = result.value.scanOldFolder
-    scanPdfsDraft.value = result.value.scanPdfs
     success.value = 'Library scan options saved. Rescan the library to apply them.'
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -329,7 +319,7 @@ async function resetEpubCss(): Promise<void> {
       <div class="section-heading">
         <div>
           <p class="step-label">LIBRARY SCANNING</p>
-          <h3 id="configuration-library-scan-heading">Optional scan sources</h3>
+          <h3 id="configuration-library-scan-heading">Optional scan source</h3>
         </div>
       </div>
       <div class="configuration-settings-grid">
@@ -337,21 +327,12 @@ async function resetEpubCss(): Promise<void> {
           <input id="scan-old-folder" v-model="scanOldFolderDraft" type="checkbox" />
           <span>
             <strong>Scan the Old folder</strong>
-            <small class="help-text">Include the historical Old folder in library scans. Off by default.</small>
-          </span>
-        </label>
-        <label class="configuration-setting configuration-toggle" for="scan-pdfs">
-          <input id="scan-pdfs" v-model="scanPdfsDraft" type="checkbox" />
-          <span>
-            <strong>Scan PDF files</strong>
-            <small class="help-text">
-              Inspect PDFs in included folders. To scan legacy PDFs in Old, enable both options. Off by default.
-            </small>
+            <small class="help-text">Include archived EPUB volumes in Old when scanning. Off by default.</small>
           </span>
         </label>
       </div>
       <Button
-        label="Save scan options"
+        label="Save scan preference"
         size="small"
         :loading="savingLibraryScanOptions"
         :disabled="savingLibraryScanOptions || !libraryScanOptionsDirty"

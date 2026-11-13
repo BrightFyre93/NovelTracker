@@ -35,22 +35,13 @@ export interface LibraryCoverageAnalysis {
   overlapNumberCount: number
   unverifiedCount: number
   rangeMismatchCount: number
-  filenameEvidenceCount: number
 }
 
-export function analyzeLibraryCoverage(
-  files: LibraryFileRecord[],
-  includeFilenamePdfEvidence: boolean
-): LibraryCoverageAnalysis {
+export function analyzeLibraryCoverage(files: LibraryFileRecord[]): LibraryCoverageAnalysis {
   const chapterSources = new Map<number, Map<string, LibraryFileRecord>>()
   const rangeMismatches: Array<{ file: LibraryFileRecord; chapters: number[] }> = []
   const coverageFiles = files.filter(
-    (file) =>
-      ['extracted-toc', 'extracted-text', 'user-corrected'].includes(file.coverageConfidence) ||
-      (includeFilenamePdfEvidence &&
-        file.format === 'PDF' &&
-        file.coverageConfidence === 'filename' &&
-        file.chapterNumbers.length > 0)
+    (file) => ['extracted-toc', 'user-corrected'].includes(file.coverageConfidence)
   )
 
   for (const file of coverageFiles) {
@@ -58,7 +49,7 @@ export function analyzeLibraryCoverage(
     const filenameRange = file.filenameRange
     if (
       file.coverageConfidence !== 'user-corrected' &&
-      ['extracted-toc', 'extracted-text'].includes(file.coverageConfidence) &&
+      file.coverageConfidence === 'extracted-toc' &&
       filenameRange
     ) {
       const outliers = chapters.filter(
@@ -154,11 +145,6 @@ export function analyzeLibraryCoverage(
     gapCount,
     overlapNumberCount: overlapNumbers.length,
     unverifiedCount: unverifiedFiles.length,
-    rangeMismatchCount: rangeMismatches.length,
-    filenameEvidenceCount: includeFilenamePdfEvidence
-      ? files.filter(
-          (file) => file.format === 'PDF' && file.coverageConfidence === 'filename' && file.chapterNumbers.length > 0
-        ).length
-      : 0
+    rangeMismatchCount: rangeMismatches.length
   }
 }

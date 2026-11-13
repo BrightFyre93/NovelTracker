@@ -27,7 +27,6 @@ const EMPTY_SETTINGS: AppSettings = {
   trackerCsvPath: '',
   outputDirectory: '',
   scanOldFolder: false,
-  scanPdfs: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   epubCss: DEFAULT_EPUB_CSS,
@@ -108,7 +107,14 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 export async function readSettings(dataDirectory: string): Promise<AppSettings> {
-  const saved = await readJson<Partial<AppSettings>>(join(dataDirectory, 'settings.json'), {})
+  const saved = await readJson<Partial<AppSettings> & { scanPdfs?: unknown }>(
+    join(dataDirectory, 'settings.json'),
+    {}
+  )
+  if (Object.prototype.hasOwnProperty.call(saved, 'scanPdfs')) {
+    delete saved.scanPdfs
+    await writeJson(join(dataDirectory, 'settings.json'), saved)
+  }
   const settings = { ...EMPTY_SETTINGS, ...saved }
   if (saved.epubCss === undefined) settings.epubCss = DEFAULT_EPUB_CSS
   else if (typeof settings.epubCss !== 'string' || settings.epubCss.length > MAX_EPUB_CSS_LENGTH) {
@@ -117,8 +123,8 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
   if (saved.appTheme !== undefined && saved.appTheme !== 'light' && saved.appTheme !== 'dark') {
     throw new Error('The saved app theme must be light or dark.')
   }
-  if (typeof settings.scanOldFolder !== 'boolean' || typeof settings.scanPdfs !== 'boolean') {
-    throw new Error('The saved library scan options must be boolean values.')
+  if (typeof settings.scanOldFolder !== 'boolean') {
+    throw new Error('The saved Old-folder scan option must be a boolean value.')
   }
   if (
     !Number.isInteger(settings.discoveryFreshnessHours) ||
@@ -136,12 +142,38 @@ export function writeSettings(dataDirectory: string, settings: AppSettings): Pro
   return writeJson(join(dataDirectory, 'settings.json'), settings)
 }
 
-export function readLibraryIndex(dataDirectory: string): Promise<LibraryIndex | null> {
-  return readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.json'), null)
+function epubOnlyIndex(index: LibraryIndex | null): LibraryIndex | null {
+  if (!index || !Array.isArray(index.files)) return index
+  const files = index.files
+    .filter((file) => file.format === 'EPUB')
+    .map((file) => ({
+      id: file.id,
+      path: file.path,
+      relativePath: file.relativePath,
+      filename: file.filename,
+      format: 'EPUB' as const,
+      folderState: file.folderState,
+      size: file.size,
+      modifiedAt: file.modifiedAt,
+      novelTitle: file.novelTitle,
+      author: file.author,
+      language: file.language,
+      chapterTitles: file.chapterTitles,
+      chapterNumbers: file.chapterNumbers,
+      filenameRange: file.filenameRange,
+      coverageConfidence: file.coverageConfidence,
+      coverPath: file.coverPath,
+      inspectionError: file.inspectionError
+    }))
+  return { ...index, files }
 }
 
-export function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
-  return readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null)
+export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIndex | null> {
+  return epubOnlyIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.json'), null))
+}
+
+export async function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
+  return epubOnlyIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null))
 }
 
 export async function writeLibraryIndex(

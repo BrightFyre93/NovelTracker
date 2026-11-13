@@ -1249,14 +1249,13 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     'settings:library-scan-options',
-    async (_event, rawScanOldFolder: unknown, rawScanPdfs: unknown): Promise<Result<AppSettings>> => {
+    async (_event, rawScanOldFolder: unknown): Promise<Result<AppSettings>> => {
       try {
-        if (typeof rawScanOldFolder !== 'boolean' || typeof rawScanPdfs !== 'boolean') {
-          throw new Error('Library scan options must be enabled or disabled.')
+        if (typeof rawScanOldFolder !== 'boolean') {
+          throw new Error('The Old-folder scan option must be enabled or disabled.')
         }
         const settings = await readSettings(dataDirectory())
         settings.scanOldFolder = rawScanOldFolder
-        settings.scanPdfs = rawScanPdfs
         await writeSettings(dataDirectory(), settings)
         return { ok: true, value: settings }
       } catch (error) {
@@ -2150,8 +2149,7 @@ function registerIpcHandlers(): void {
           libraryRoot: settings.libraryRoot,
           dataDirectory: dataDirectory(),
           forceRebuild: rawForceRebuild,
-          scanOldFolder: settings.scanOldFolder,
-          scanPdfs: settings.scanPdfs
+          scanOldFolder: settings.scanOldFolder
         },
         resourceLimits: { maxOldGenerationSizeMb: 1024 }
       })
