@@ -4,7 +4,13 @@ import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
+import {
+  DEFAULT_DOMAIN_REQUEST_DELAY_MS,
+  DOMAIN_REQUEST_DELAYS_MS
+} from '../../../shared/constants'
+import { normalizeSiteHostname } from '../../../shared/siteExtractionPreferences'
 import type {
+  DomainRequestDelayPreference,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
@@ -61,6 +67,7 @@ const loading = ref(true)
 const adding = ref(false)
 const maxDownloads = ref(2)
 const outputDirectory = ref('')
+const domainRequestDelays = ref<DomainRequestDelayPreference[]>([])
 const retryingId = ref('')
 const retryingAllDiscoveries = ref(false)
 const browserOpeningId = ref('')
@@ -99,13 +106,14 @@ const queuedItems = computed(() =>
     .sort(compareQueuedItems)
 )
 const batchQueueableItems = computed(() =>
-  items.value.filter((item) =>
-    !item.chapterSummary.hasUncertainArchiveChapters &&
-    (
-      (item.status === 'ready' && item.chapterSummary.selected > 0) ||
-      (item.status === 'needs-review' && item.chapterSummary.recommended > 0)
+  items.value.filter((item) => {
+    if (item.status === 'ready') return item.chapterSummary.selected > 0
+    return (
+      item.status === 'needs-review' &&
+      item.chapterSummary.recommended > 0 &&
+      !item.chapterSummary.hasUncertainArchiveChapters
     )
-  )
+  })
 )
 const batchAcceptableItems = computed(() =>
   items.value.filter(
@@ -256,6 +264,31 @@ function chaptersRemaining(item: DiscoveryQueueItemSummary): number | null {
   return Math.max(0, item.progress.total - item.progress.current)
 }
 
+function estimatedTimeRemaining(item: DiscoveryQueueItemSummary): string | null {
+  const remaining = chaptersRemaining(item)
+  if (remaining === null) return null
+
+  let hostname: string
+  try {
+    hostname = normalizeSiteHostname(new URL(item.sourceUrl).hostname)
+  } catch {
+    return null
+  }
+
+  const requestDelayMs =
+    domainRequestDelays.value.find((preference) => preference.hostname === hostname)?.delayMs ??
+    DOMAIN_REQUEST_DELAYS_MS[hostname] ??
+    DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  const totalSeconds = Math.ceil((remaining * (requestDelayMs + 1000)) / 1000)
+  if (totalSeconds < 60) return `~${totalSeconds} sec`
+
+  const totalMinutes = Math.ceil(totalSeconds / 60)
+  if (totalMinutes < 60) return `~${totalMinutes} min`
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return minutes > 0 ? `~${hours} hr ${minutes} min` : `~${hours} hr`
+}
+
 async function refreshQueue(): Promise<void> {
   loading.value = true
   try {
@@ -276,6 +309,7 @@ onMounted(() => {
   void window.novelTracker.getSettings().then((settings) => {
     maxDownloads.value = settings.maxSimultaneousDownloads
     outputDirectory.value = settings.outputDirectory
+    domainRequestDelays.value = settings.domainRequestDelays
   }).catch((reason: unknown) => {
     error.value = reason instanceof Error ? reason.message : String(reason)
   })
@@ -1000,8 +1034,8 @@ async function clearCompletedQueueItems(): Promise<void> {
           size="small"
           text
           rounded
-          aria-label="Queue all safe items"
-          title="Queue all safe ready jobs and review suggestions"
+          aria-label="Queue all ready items and safe suggestions"
+          title="Queue ready items and review suggestions with certain archive coverage"
           :loading="batchQueueing"
           :disabled="!outputDirectory || batchQueueableItems.length === 0 || batchQueueing || batchAccepting || Boolean(downloadActionId)"
           @click="queueAllRecommendedEpubs"
@@ -1156,35 +1190,61 @@ async function clearCompletedQueueItems(): Promise<void> {
                 <template v-if="item.separateJob"> · Separate job</template>
               </span>
             </div>
-            <span v-if="item.chapterSummary.total">
-              {{ item.chapterSummary.selected.toLocaleString() }} selected ·
-              {{ item.chapterSummary.recommended.toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
-              <template v-if="item.chapterSummary.latestTitle"> · latest: {{ item.chapterSummary.latestTitle }}</template>
-            </span>
-            <span v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status) && chaptersRemaining(item) !== null" class="queue-remaining-chapters">
-              {{ chaptersRemaining(item)?.toLocaleString() }} chapters left ·
-              {{ item.progress?.current.toLocaleString() }} of {{ item.progress?.total.toLocaleString() }} complete
-            </span>
-            <span v-if="item.recommendationSummary" class="queue-item-recommendation">{{ item.recommendationSummary }}</span>
-            <span
-              v-if="item.repackageOnly && ['queued', 'downloading'].includes(item.status)"
-              class="queue-item-rechecking"
-            >
-              <i class="pi pi-box" aria-hidden="true"></i>
-              Offline repackaging from saved content — no network requests
-            </span>
-            <div v-else-if="item.status === 'discovering' && !item.downloadOptions" class="queue-item-rechecking">
-              <span><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> {{ item.progress?.message ?? 'Discovering chapters…' }}</span>
-              <ProgressBar
-                v-if="item.progress && item.progress.total > 0"
-                :value="Math.round((item.progress.current / item.progress.total) * 100)"
-                :show-value="false"
-                class="queue-item-progress"
-                :aria-label="`${item.title} chapter discovery progress`"
-              />
+            <div class="queue-item-detail-grid">
+              <div class="queue-item-detail-column">
+                <span v-if="item.chapterSummary.total">
+                  {{ item.chapterSummary.selected.toLocaleString() }} selected ·
+                  {{ item.chapterSummary.recommended.toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
+                  <template v-if="item.chapterSummary.latestTitle"> · latest: {{ item.chapterSummary.latestTitle }}</template>
+                </span>
+                <span
+                  v-if="item.recommendationSummary"
+                  class="queue-item-recommendation"
+                  :title="item.recommendationSummary"
+                >
+                  {{ item.recommendationSummary }}
+                </span>
+                <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
+              </div>
+              <div class="queue-item-detail-column">
+                <span v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status) && chaptersRemaining(item) !== null" class="queue-remaining-chapters">
+                  {{ chaptersRemaining(item)?.toLocaleString() }} chapters left ·
+                  {{ item.progress?.current.toLocaleString() }} of {{ item.progress?.total.toLocaleString() }} complete
+                </span>
+                <span
+                  v-if="item.downloadOptions && !item.repackageOnly && ['queued', 'downloading', 'paused'].includes(item.status) && estimatedTimeRemaining(item) !== null"
+                  class="queue-estimated-time"
+                  title="Rough estimate using this domain's request delay plus a 1-second per-chapter buffer. Server waits, retries, and image sizes can change it."
+                >
+                  Estimated time left: {{ estimatedTimeRemaining(item) }}
+                </span>
+                <span
+                  v-if="item.repackageOnly && ['queued', 'downloading'].includes(item.status)"
+                  class="queue-item-rechecking"
+                >
+                  <i class="pi pi-box" aria-hidden="true"></i>
+                  Offline repackaging from saved content — no network requests
+                </span>
+                <div v-else-if="item.status === 'discovering' && !item.downloadOptions" class="queue-item-rechecking">
+                  <span><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> {{ item.progress?.message ?? 'Discovering chapters…' }}</span>
+                  <ProgressBar
+                    v-if="item.progress && item.progress.total > 0"
+                    :value="Math.round((item.progress.current / item.progress.total) * 100)"
+                    :show-value="false"
+                    class="queue-item-progress"
+                    :aria-label="`${item.title} chapter discovery progress`"
+                  />
+                </div>
+                <span v-else-if="item.progress">
+                  <template v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status)">
+                    {{ item.progress.message }}
+                  </template>
+                  <template v-else>
+                    {{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}
+                  </template>
+                </span>
+              </div>
             </div>
-            <span v-else-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
-            <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
             <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
             <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
             <span v-if="item.failedChapterCount" class="queue-item-error">

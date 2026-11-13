@@ -2380,7 +2380,7 @@ function registerIpcHandlers(): void {
         item.overlapCount = rawOverlapCount
         item.overlapAllowed = recommendation.overlapAllowed
         item.recommendationSummary = recommendation.summary
-        item.status = 'ready'
+        item.status = item.chapters.some((chapter) => chapter.selected) ? 'ready' : 'needs-review'
         item.updatedAt = new Date().toISOString()
         await persistDiscoveryQueue()
         releaseQueueItemChapters(item)
