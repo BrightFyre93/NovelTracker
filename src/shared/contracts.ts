@@ -104,7 +104,9 @@ export interface AppSettings {
   scanOldFolder: boolean
   scanOldCompletedFolder: boolean
   maxSimultaneousDownloads: number
+  maxSimultaneousDiscoveries: number
   maxSimultaneousChaptersPerNovel: number
+  domainRequestDelays: DomainRequestDelayPreference[]
   discoveryFreshnessHours: number
   siteExtractionPreferences: SiteExtractionPreference[]
   epubCss: string
@@ -116,6 +118,11 @@ export type SiteExtractionMode = 'automatic' | 'generic-html'
 export interface SiteExtractionPreference {
   hostname: string
   mode: SiteExtractionMode
+}
+
+export interface DomainRequestDelayPreference {
+  hostname: string
+  delayMs: number
 }
 
 export interface BrowserSessionInfo {
@@ -210,6 +217,7 @@ export interface DiscoveryQueueItem {
   novelStatus: string
   sourceUrl: string
   origin: 'tracker' | 'manual'
+  separateJob?: boolean
   trackerRow: GenerateEpubInput['trackerRow'] | null
   status: DiscoveryQueueStatus
   parserName: string
@@ -244,6 +252,7 @@ export interface DiscoveryQueueInput {
   author: string
   sourceUrl: string
   origin: DiscoveryQueueItem['origin']
+  separateJob?: boolean
   trackerRow?: GenerateEpubInput['trackerRow']
 }
 
@@ -417,6 +426,7 @@ export interface NovelTrackerApi {
   getDiscoveryQueueItem(id: string): Promise<Result<DiscoveryQueueItem>>
   addDiscoveryQueueItems(items: DiscoveryQueueInput[]): Promise<Result<DiscoveryQueueItem[]>>
   retryDiscoveryQueueItem(id: string): Promise<Result<void>>
+  retryAllFailedDiscoveries(): Promise<Result<number>>
   forceRetryDiscoveryQueueItem(id: string): Promise<Result<void>>
   retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
   refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
@@ -433,7 +443,9 @@ export interface NovelTrackerApi {
   clearCompletedDiscoveryQueueItems(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
   updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
+  updateDiscoveryConcurrency(maxSimultaneousDiscoveries: number): Promise<Result<AppSettings>>
   updateChapterConcurrency(maxSimultaneousChaptersPerNovel: number): Promise<Result<AppSettings>>
+  updateDomainRequestDelays(preferences: DomainRequestDelayPreference[]): Promise<Result<AppSettings>>
   updateSiteExtractionPreferences(preferences: SiteExtractionPreference[]): Promise<Result<AppSettings>>
   updateLibraryScanOptions(scanOldFolder: boolean, scanOldCompletedFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>

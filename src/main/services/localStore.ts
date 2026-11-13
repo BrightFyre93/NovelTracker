@@ -5,18 +5,23 @@ import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   DEFAULT_EPUB_CSS,
   DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   EPUB_IMAGE_TYPES,
+  DOMAIN_REQUEST_DELAYS_MS,
   MAX_CHAPTER_IMAGE_BYTES,
   MAX_CHAPTER_IMAGES,
   MAX_DISCOVERY_FRESHNESS_HOURS,
   MAX_EPUB_CSS_LENGTH,
   MAX_IMAGE_BYTES,
   MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MAX_SIMULTANEOUS_DISCOVERIES,
   MIN_DISCOVERY_FRESHNESS_HOURS,
-  MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL
+  MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MIN_SIMULTANEOUS_DISCOVERIES
 } from '../../shared/constants'
 import { normalizeSiteExtractionPreferences } from '../../shared/siteExtractionPreferences'
+import { normalizeDomainRequestDelays } from '../../shared/domainRequestPreferences'
 import type {
   AppSettings,
   ChapterImage,
@@ -35,7 +40,12 @@ const EMPTY_SETTINGS: AppSettings = {
   scanOldFolder: false,
   scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  maxSimultaneousDiscoveries: DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  domainRequestDelays: Object.entries(DOMAIN_REQUEST_DELAYS_MS).map(([hostname, delayMs]) => ({
+    hostname,
+    delayMs
+  })),
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
@@ -148,6 +158,15 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
     )
   }
   if (
+    !Number.isInteger(settings.maxSimultaneousDiscoveries) ||
+    settings.maxSimultaneousDiscoveries < MIN_SIMULTANEOUS_DISCOVERIES ||
+    settings.maxSimultaneousDiscoveries > MAX_SIMULTANEOUS_DISCOVERIES
+  ) {
+    throw new Error(
+      `The saved discovery concurrency must be a whole number from ${MIN_SIMULTANEOUS_DISCOVERIES} to ${MAX_SIMULTANEOUS_DISCOVERIES}.`
+    )
+  }
+  if (
     !Number.isInteger(settings.maxSimultaneousChaptersPerNovel) ||
     settings.maxSimultaneousChaptersPerNovel < MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL ||
     settings.maxSimultaneousChaptersPerNovel > MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL
@@ -157,6 +176,7 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
     )
   }
   settings.siteExtractionPreferences = normalizeSiteExtractionPreferences(settings.siteExtractionPreferences)
+  settings.domainRequestDelays = normalizeDomainRequestDelays(settings.domainRequestDelays)
   return settings
 }
 

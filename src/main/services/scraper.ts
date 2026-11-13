@@ -7,6 +7,7 @@ import type {
   ChapterContentBlock,
   ChapterImage,
   ChapterLink,
+  DomainRequestDelayPreference,
   DiscoveryResult,
   JobProgress,
   SiteExtractionMode
@@ -27,6 +28,7 @@ import {
   MAX_CHAPTER_IMAGES,
   MAX_IMAGE_BYTES,
   MAX_ACTIVE_REQUESTS_PER_DOMAIN,
+  MAX_GENERIC_DISCOVERY_PAGES,
   MAX_NOVEL_DESCRIPTION_LENGTH,
   MAX_NOVELFULL_CATALOG_PAGES,
   NOVELFULL_HOSTS,
@@ -37,6 +39,11 @@ const domainTails = new Map<string, Promise<void>>()
 const domainNextRequestAt = new Map<string, number>()
 const domainActiveRequests = new Map<string, number>()
 const domainRequestWaiters = new Map<string, Set<() => void>>()
+let domainRequestDelays = new Map<string, number>()
+
+export function setDomainRequestDelays(preferences: DomainRequestDelayPreference[]): void {
+  domainRequestDelays = new Map(preferences.map(({ hostname, delayMs }) => [hostname, delayMs]))
+}
 
 export class HttpStatusError extends Error {
   constructor(
@@ -87,7 +94,10 @@ function recordDomainRetryAfter(url: string, retryAfterMs: number | null): void 
 
 async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() => void> {
   const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
-  const requestDelayMs = DOMAIN_REQUEST_DELAYS_MS[hostname] ?? DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  const requestDelayMs =
+    domainRequestDelays.get(hostname) ??
+    DOMAIN_REQUEST_DELAYS_MS[hostname] ??
+    DEFAULT_DOMAIN_REQUEST_DELAY_MS
   const previous = domainTails.get(hostname) ?? Promise.resolve()
   let release!: () => void
   const hold = new Promise<void>((resolveHold) => {
@@ -786,7 +796,96 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
   throw new Error('No chapter links were found. Use a chapter-list page or a chapter page with a detectable chapter title.')
 }
 
-type HtmlPageLoader = (url: string, signal?: AbortSignal) => Promise<{ html: string; finalUrl: string }>
+export type HtmlPageLoader = (url: string, signal?: AbortSignal) => Promise<{ html: string; finalUrl: string }>
+
+interface GenericPaginationTarget {
+  url: string
+  pageNumber: number | null
+  isNext: boolean
+}
+
+function paginationPageNumber(value: string): number | null {
+  const url = new URL(value)
+  for (const name of ['page', 'paged', 'p', 'page_num', 'pageNumber']) {
+    const raw = url.searchParams.get(name)
+    if (raw && /^\d+$/.test(raw)) {
+      const pageNumber = Number(raw)
+      if (Number.isSafeInteger(pageNumber) && pageNumber > 0) return pageNumber
+    }
+  }
+  const pathPage = /\/page\/(\d+)\/?$/i.exec(url.pathname)?.[1]
+  if (!pathPage) return null
+  const pageNumber = Number(pathPage)
+  return Number.isSafeInteger(pageNumber) && pageNumber > 0 ? pageNumber : null
+}
+
+function samePaginationRoute(left: URL, right: URL): boolean {
+  if (left.origin !== right.origin) return false
+  const routeRoot = (pathname: string): string =>
+    pathname.replace(/\/page\/\d+\/?$/i, '').replace(/\/+$/, '') || '/'
+  return left.pathname === right.pathname || routeRoot(left.pathname) === routeRoot(right.pathname)
+}
+
+function genericPaginationTargets(html: string, pageUrl: string): GenericPaginationTarget[] {
+  const $ = load(html)
+  const normalizedPageUrl = validateHttpUrl(pageUrl)
+  const currentUrl = new URL(normalizedPageUrl)
+  const currentPage = paginationPageNumber(normalizedPageUrl) ?? 1
+  const paginationContainers =
+    '.pagination, .pager, [class*="pagination"], [class*="pager"], [id*="pagination"], [id*="pager"], nav[aria-label*="page"]'
+  const targets = new Map<string, GenericPaginationTarget>()
+
+  $('a[href]').each((_, element) => {
+    const link = $(element)
+    const text = link.text().replace(/\s+/g, ' ').trim().toLowerCase()
+    const ariaLabel = (link.attr('aria-label') ?? '').trim().toLowerCase()
+    const className = (link.attr('class') ?? '').trim().toLowerCase()
+    const relValues = (link.attr('rel') ?? '').toLowerCase().split(/\s+/)
+    const isInPagination = link.closest(paginationContainers).length > 0
+    const isNextChapter = /(?:chapter|episode|part)/.test(`${text} ${ariaLabel} ${className}`)
+    if (isNextChapter) return
+
+    const isNext =
+      relValues.includes('next') ||
+      /^(?:next|next page|older|load more|more chapters)(?:\s*[›»→])?$/.test(text) ||
+      /(?:^|\s)(?:next|load-more|older)(?:[-_\s]|$)/.test(`${ariaLabel} ${className}`)
+    if (!isInPagination && !isNext) return
+
+    const href = link.attr('href')
+    if (!href) return
+    try {
+      const targetUrl = new URL(href, currentUrl)
+      targetUrl.hash = ''
+      const normalizedUrl = validateHttpUrl(targetUrl.href)
+      const pageNumber = paginationPageNumber(normalizedUrl)
+      if (
+        normalizedUrl === normalizedPageUrl ||
+        !samePaginationRoute(currentUrl, new URL(normalizedUrl)) ||
+        pageNumber === null ||
+        pageNumber <= currentPage
+      ) {
+        return
+      }
+      targets.set(normalizedUrl, { url: normalizedUrl, pageNumber, isNext })
+    } catch {
+      return
+    }
+  })
+
+  return [...targets.values()]
+}
+
+function nextGenericPaginationTarget(
+  targets: GenericPaginationTarget[],
+  currentPage: number,
+  visitedUrls: Set<string>
+): GenericPaginationTarget | undefined {
+  const nextLink = targets.find((target) => target.isNext && !visitedUrls.has(target.url))
+  if (nextLink) return nextLink
+  return targets
+    .filter((target) => target.pageNumber !== null && target.pageNumber > currentPage && !visitedUrls.has(target.url))
+    .sort((left, right) => (left.pageNumber ?? 0) - (right.pageNumber ?? 0))[0]
+}
 
 async function discoverNovelFullChapters(
   value: string,
@@ -856,6 +955,114 @@ async function discoverNovelFullChapters(
   }
 }
 
+async function discoverGenericHtmlChapters(
+  value: string,
+  loadPage: HtmlPageLoader,
+  onProgress?: (progress: JobProgress) => void,
+  signal?: AbortSignal
+): Promise<DiscoveryResult> {
+  const firstResponse = await loadPage(value, signal)
+  const firstResult = discoverFromHtml(firstResponse.html, firstResponse.finalUrl)
+  if (CHAPTER_URL_PATTERN.test(new URL(firstResponse.finalUrl).pathname)) return firstResult
+
+  const chaptersByUrl = new Map<string, ChapterLink>()
+  for (const chapter of firstResult.chapters) chaptersByUrl.set(chapter.url, chapter)
+
+  const firstPageUrl = validateHttpUrl(firstResponse.finalUrl)
+  const visitedUrls = new Set([validateHttpUrl(value), firstPageUrl])
+  let currentUrl = firstPageUrl
+  let currentPage = paginationPageNumber(currentUrl) ?? 1
+  let pagesRead = 1
+  let paginationTargets = genericPaginationTargets(firstResponse.html, currentUrl)
+  let totalPages = Math.max(
+    1,
+    ...paginationTargets.map((target) => target.pageNumber ?? 0)
+  )
+
+  onProgress?.({
+    current: pagesRead,
+    total: totalPages,
+    message:
+      totalPages > 1
+        ? `Reading generic chapter list page ${pagesRead} of ${totalPages}…`
+        : 'Reading generic chapter list page 1…'
+  })
+
+  while (true) {
+    const target = nextGenericPaginationTarget(paginationTargets, currentPage, visitedUrls)
+    if (!target) break
+    if (signal?.aborted) throw new Error('Browser-assisted discovery was cancelled.')
+    if (pagesRead >= MAX_GENERIC_DISCOVERY_PAGES) {
+      throw new Error(`Generic chapter discovery exceeded the ${MAX_GENERIC_DISCOVERY_PAGES}-page limit.`)
+    }
+
+    visitedUrls.add(target.url)
+    const response = await loadPage(target.url, signal)
+    const pageUrl = validateHttpUrl(response.finalUrl)
+    if (visitedUrls.has(pageUrl) && pageUrl !== target.url) {
+      throw new Error('Generic chapter-list pagination redirected to an already visited page.')
+    }
+    visitedUrls.add(pageUrl)
+
+    const pageResult = discoverFromHtml(response.html, pageUrl)
+    for (const chapter of pageResult.chapters) {
+      if (!chaptersByUrl.has(chapter.url)) chaptersByUrl.set(chapter.url, chapter)
+    }
+
+    pagesRead += 1
+    currentUrl = pageUrl
+    currentPage = paginationPageNumber(currentUrl) ?? target.pageNumber ?? currentPage + 1
+    paginationTargets = genericPaginationTargets(response.html, currentUrl)
+    totalPages = Math.max(
+      pagesRead,
+      totalPages,
+      ...paginationTargets.map((nextTarget) => nextTarget.pageNumber ?? 0)
+    )
+    onProgress?.({
+      current: pagesRead,
+      total: totalPages,
+      message:
+        totalPages > 1
+          ? `Reading generic chapter list page ${pagesRead} of ${totalPages}…`
+          : `Reading generic chapter list page ${pagesRead}…`
+    })
+  }
+
+  const chapters = [...chaptersByUrl.values()].map((chapter, index) => ({
+    ...chapter,
+    id: `chapter-${index + 1}`
+  }))
+  return { ...firstResult, sourceUrl: firstPageUrl, parserName: 'Generic HTML', chapters }
+}
+
+export interface SiteExtractor {
+  name: string
+  matches: (url: URL) => boolean
+  discover: (
+    url: string,
+    loadPage: HtmlPageLoader,
+    onProgress?: (progress: JobProgress) => void,
+    signal?: AbortSignal
+  ) => Promise<DiscoveryResult>
+}
+
+const registeredSiteExtractors: SiteExtractor[] = []
+
+export function registerSiteExtractor(extractor: SiteExtractor): void {
+  const normalizedName = extractor.name.trim().toLowerCase()
+  if (!normalizedName) throw new Error('A site extractor must have a name.')
+  if (registeredSiteExtractors.some((registered) => registered.name.trim().toLowerCase() === normalizedName)) {
+    throw new Error(`A site extractor named "${extractor.name}" is already registered.`)
+  }
+  registeredSiteExtractors.push(extractor)
+}
+
+registerSiteExtractor({
+  name: 'NovelFull',
+  matches: (url) => isNovelFullUrl(url.href) && !CHAPTER_URL_PATTERN.test(url.pathname),
+  discover: discoverNovelFullChapters
+})
+
 export async function discoverChapters(
   value: unknown,
   onProgress?: (progress: JobProgress) => void,
@@ -873,15 +1080,11 @@ export async function discoverChaptersUsingPageLoader(
   extractionMode: SiteExtractionMode = 'automatic'
 ): Promise<DiscoveryResult> {
   const url = validateHttpUrl(value)
-  if (
-    extractionMode !== 'generic-html' &&
-    isNovelFullUrl(url) &&
-    !CHAPTER_URL_PATTERN.test(new URL(url).pathname)
-  ) {
-    return discoverNovelFullChapters(url, loadPage, onProgress, signal)
-  }
-  const { html, finalUrl } = await loadPage(url, signal)
-  return discoverFromHtml(html, finalUrl)
+  const extractor =
+    extractionMode === 'generic-html'
+      ? undefined
+      : registeredSiteExtractors.find((registered) => registered.matches(new URL(url)))
+  return (extractor?.discover ?? discoverGenericHtmlChapters)(url, loadPage, onProgress, signal)
 }
 
 function chapterRoot($: ReturnType<typeof load>) {

@@ -56,11 +56,13 @@ const trackerSources = ref<Record<string, string>>({})
 const selectedTrackerIds = ref<string[]>([])
 const trackerCsvPath = ref('')
 const manualUrls = ref('')
+const allowSeparateJobs = ref(false)
 const loading = ref(true)
 const adding = ref(false)
 const maxDownloads = ref(2)
 const outputDirectory = ref('')
 const retryingId = ref('')
+const retryingAllDiscoveries = ref(false)
 const browserOpeningId = ref('')
 const browserRetryingId = ref('')
 const browserReadyId = ref('')
@@ -87,6 +89,9 @@ const filteredTrackerNovels = computed(() => {
   return matches.slice(0, 100)
 })
 const activeDownloadCount = computed(() => items.value.filter((item) => item.status === 'downloading').length)
+const failedDiscoveryCount = computed(() =>
+  items.value.filter((item) => item.status === 'failed' && !item.downloadOptions).length
+)
 const completedQueueCount = computed(() => items.value.filter((item) => item.status === 'completed').length)
 const queuedItems = computed(() =>
   items.value
@@ -95,14 +100,11 @@ const queuedItems = computed(() =>
 )
 const batchQueueableItems = computed(() =>
   items.value.filter((item) =>
-    (item.status === 'needs-review' || item.status === 'ready') &&
+    !item.chapterSummary.hasUncertainArchiveChapters &&
     (
-      item.status === 'ready'
-        ? item.chapterSummary.selected > 0
-        : item.chapterSummary.recommended > 0 ||
-          (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
-    ) &&
-    !item.chapterSummary.hasUncertainArchiveChapters
+      (item.status === 'ready' && item.chapterSummary.selected > 0) ||
+      (item.status === 'needs-review' && item.chapterSummary.recommended > 0)
+    )
   )
 )
 const batchAcceptableItems = computed(() =>
@@ -113,6 +115,15 @@ const batchAcceptableItems = computed(() =>
   )
 )
 const batchAccepting = ref(false)
+const selectableQueueItems = computed(() =>
+  items.value.filter((item) =>
+    item.status === 'ready'
+      ? item.chapterSummary.selected > 0
+      : item.status === 'needs-review' &&
+        hasQueueableChapters(item) &&
+        !item.chapterSummary.hasUncertainArchiveChapters
+  )
+)
 const filteredQueueItems = computed(() =>
   selectedQueueStatuses.value.length === 0
     ? items.value
@@ -139,7 +150,7 @@ const queueFilterSummary = computed(() =>
     : `${selectedQueueStatuses.value.length} selected`
 )
 const selectedQueueableItems = computed(() =>
-  batchQueueableItems.value.filter((item) => selectedQueueItemIds.value.includes(item.id))
+  selectableQueueItems.value.filter((item) => selectedQueueItemIds.value.includes(item.id))
 )
 const allVisibleQueueSectionsCollapsed = computed(() =>
   queueGroups.value.length > 0 &&
@@ -166,7 +177,7 @@ function selectVisibleQueueableItems(): void {
 }
 
 function isQueueItemSelectable(itemId: string): boolean {
-  return batchQueueableItems.value.some((item) => item.id === itemId)
+  return selectableQueueItems.value.some((item) => item.id === itemId)
 }
 
 function isQueueSectionCollapsed(status: DiscoveryQueueStatus): boolean {
@@ -237,10 +248,7 @@ function compareQueueItemsByTitle(left: DiscoveryQueueItemSummary, right: Discov
 
 function hasQueueableChapters(item: DiscoveryQueueItemSummary): boolean {
   if (item.status === 'ready') return item.chapterSummary.selected > 0
-  return (
-    item.chapterSummary.recommended > 0 ||
-    (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
-  )
+  return item.chapterSummary.recommended > 0
 }
 
 function chaptersRemaining(item: DiscoveryQueueItemSummary): number | null {
@@ -354,7 +362,8 @@ async function addToQueue(): Promise<void> {
         title: sourceUrl.hostname,
         author: '',
         sourceUrl: sourceUrl.href,
-        origin: 'manual'
+        origin: 'manual',
+        separateJob: allowSeparateJobs.value
       })
     } catch {
       invalidManualLines.push(line)
@@ -375,6 +384,7 @@ async function addToQueue(): Promise<void> {
       author: novel.author,
       sourceUrl: source.url,
       origin: 'tracker',
+      separateJob: allowSeparateJobs.value,
       trackerRow: {
         stableId: novel.stableId,
         rowNumber: novel.rowNumber,
@@ -401,10 +411,19 @@ async function addToQueue(): Promise<void> {
     }
     await refreshQueue()
     const duplicateCount = inputs.length - result.value.length
+    const separateJobCount = result.value.filter((item) => item.separateJob).length
     const summary = result.value.length
       ? `Added ${result.value.length} item${result.value.length === 1 ? '' : 's'} for live discovery.`
       : 'All selected sources are already in the queue.'
-    notice.value = duplicateCount > 0 ? `${summary} ${duplicateCount} duplicate source${duplicateCount === 1 ? '' : 's'} skipped.` : summary
+    const duplicateSummary =
+      duplicateCount > 0
+        ? `${duplicateCount} duplicate source${duplicateCount === 1 ? '' : 's'} skipped.`
+        : ''
+    const separateSummary =
+      separateJobCount > 0
+        ? `${separateJobCount} added as separate job${separateJobCount === 1 ? '' : 's'}.`
+        : ''
+    notice.value = [summary, duplicateSummary, separateSummary].filter(Boolean).join(' ')
     if (rejectedRows.length > 0) {
       notice.value += ` No valid source selected for: ${rejectedRows.join(', ')}.`
     }
@@ -428,6 +447,27 @@ async function retryItem(item: DiscoveryQueueItemSummary): Promise<void> {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     retryingId.value = ''
+  }
+}
+
+async function retryAllFailedScans(): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  retryingAllDiscoveries.value = true
+  try {
+    const result = await window.novelTracker.retryAllFailedDiscoveries()
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = result.value
+      ? `Queued ${result.value.toLocaleString()} failed scan${result.value === 1 ? '' : 's'} for retry.`
+      : 'There are no failed scans to retry.'
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    retryingAllDiscoveries.value = false
   }
 }
 
@@ -580,8 +620,8 @@ async function queueRecommendedEpub(item: DiscoveryQueueItemSummary): Promise<st
   if (item.status === 'needs-review') {
     const accepted = await window.novelTracker.acceptQueueRecommendations(
       item.id,
-      item.includeOverlap,
-      item.overlapCount
+      false,
+      0
     )
     if (!accepted.ok) return `${item.title}: ${accepted.error}`
   }
@@ -621,7 +661,7 @@ async function queueOneRecommendedEpub(item: DiscoveryQueueItemSummary): Promise
       error.value = failure
       return
     }
-    notice.value = `Queued suggested chapters for ${item.title}.`
+    notice.value = `Queued EPUB for ${item.title}.`
     await refreshQueue()
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -656,7 +696,7 @@ async function queueAllRecommendedEpubs(): Promise<void> {
         failures.push(`${item.title}: ${reason instanceof Error ? reason.message : String(reason)}`)
       }
     }
-    notice.value = `Queued ${queued} suggested EPUB job${queued === 1 ? '' : 's'}.`
+    notice.value = `Queued ${queued} safe EPUB job${queued === 1 ? '' : 's'}.`
     if (failures.length) error.value = failures.join(' ')
     await refreshQueue()
   } catch (reason) {
@@ -715,8 +755,8 @@ async function acceptRecommendations(item: DiscoveryQueueItemSummary): Promise<v
   try {
     const result = await window.novelTracker.acceptQueueRecommendations(
       item.id,
-      item.includeOverlap,
-      item.overlapCount
+      false,
+      0
     )
     if (!result.ok) {
       error.value = result.error
@@ -737,8 +777,8 @@ async function acceptSafeSuggestions(): Promise<void> {
     for (const item of batchAcceptableItems.value) {
       const result = await window.novelTracker.acceptQueueRecommendations(
         item.id,
-        item.includeOverlap,
-        item.overlapCount
+        false,
+        0
       )
       if (!result.ok) {
         error.value = `${applied} item(s) accepted before "${item.title}" failed: ${result.error}`
@@ -868,7 +908,11 @@ async function clearCompletedQueueItems(): Promise<void> {
       placeholder="https://example.com/novel-one&#10;https://example.com/novel-two"
       :disabled="adding"
     />
-    <p class="help-text">Paste one HTTP or HTTPS URL per line. Duplicate source URLs are skipped.</p>
+    <p class="help-text">Paste one HTTP or HTTPS URL per line. Duplicate source URLs are skipped by default.</p>
+    <label class="queue-separate-job">
+      <input v-model="allowSeparateJobs" type="checkbox" :disabled="adding" />
+      <span>Allow duplicate sources as separate jobs</span>
+    </label>
 
     <div v-show="trackerVisible" id="tracker-picker" class="tracker-picker">
       <div class="tracker-picker-heading">
@@ -956,8 +1000,8 @@ async function clearCompletedQueueItems(): Promise<void> {
           size="small"
           text
           rounded
-          aria-label="Queue all safe suggestions"
-          title="Queue all safe suggestions"
+          aria-label="Queue all safe items"
+          title="Queue all safe ready jobs and review suggestions"
           :loading="batchQueueing"
           :disabled="!outputDirectory || batchQueueableItems.length === 0 || batchQueueing || batchAccepting || Boolean(downloadActionId)"
           @click="queueAllRecommendedEpubs"
@@ -1060,6 +1104,18 @@ async function clearCompletedQueueItems(): Promise<void> {
         @click="queueSelectedEpubs"
       />
       <Button
+        v-if="failedDiscoveryCount > 0"
+        :label="`Retry all failed scans (${failedDiscoveryCount.toLocaleString()})`"
+        icon="pi pi-refresh"
+        severity="secondary"
+        outlined
+        size="small"
+        title="Retry every failed chapter discovery; the discovery scheduler still limits simultaneous requests."
+        :loading="retryingAllDiscoveries"
+        :disabled="retryingAllDiscoveries || Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || batchAccepting || Boolean(downloadActionId)"
+        @click="retryAllFailedScans"
+      />
+      <Button
         v-if="selectedQueueItemIds.length"
         label="Clear selection"
         severity="secondary"
@@ -1095,11 +1151,14 @@ async function clearCompletedQueueItems(): Promise<void> {
                 />
               </label>
               <strong>{{ item.title }}</strong>
-              <span>{{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}</span>
+              <span>
+                {{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}
+                <template v-if="item.separateJob"> · Separate job</template>
+              </span>
             </div>
             <span v-if="item.chapterSummary.total">
               {{ item.chapterSummary.selected.toLocaleString() }} selected ·
-              {{ (item.chapterSummary.recommended + (item.includeOverlap ? item.chapterSummary.deliberateOverlap : 0)).toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
+              {{ item.chapterSummary.recommended.toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
               <template v-if="item.chapterSummary.latestTitle"> · latest: {{ item.chapterSummary.latestTitle }}</template>
             </span>
             <span v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status) && chaptersRemaining(item) !== null" class="queue-remaining-chapters">
@@ -1148,20 +1207,8 @@ async function clearCompletedQueueItems(): Promise<void> {
             :disabled="!outputDirectory || Boolean(downloadActionId) || batchQueueing || batchAccepting || !hasQueueableChapters(item)"
             @click="queueOneRecommendedEpub(item)"
           />
-          <label v-if="item.status === 'needs-review' || item.status === 'ready'" class="overlap-control">
-            <input v-model="item.includeOverlap" type="checkbox" :disabled="!item.overlapAllowed" />
-            <span>Include overlap</span>
-            <input
-              v-model.number="item.overlapCount"
-              type="number"
-              min="0"
-              max="1000"
-              aria-label="Overlap chapter count"
-              :disabled="!item.includeOverlap || !item.overlapAllowed"
-            />
-          </label>
           <Button
-            v-if="item.status === 'needs-review' || item.status === 'ready'"
+            v-if="item.status === 'needs-review'"
             label="Suggest"
             icon="pi pi-check"
             size="small"

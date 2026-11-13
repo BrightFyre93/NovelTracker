@@ -1,3 +1,5 @@
+export const MAX_EPUB_FILENAME_BASENAME_LENGTH = 175
+
 function cleanFilenamePart(value: string, maximumLength: number, fallback: string): string {
   const cleaned = value
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ')
@@ -13,7 +15,7 @@ function cleanFilenamePart(value: string, maximumLength: number, fallback: strin
 export function sanitizeEpubFilename(value: string): string {
   const basename = value.trim().replace(/\.epub$/i, '')
   if (!basename) throw new Error('Enter a filename for the EPUB.')
-  const safeBasename = cleanFilenamePart(basename, 175, '')
+  const safeBasename = cleanFilenamePart(basename, MAX_EPUB_FILENAME_BASENAME_LENGTH, '')
   if (!safeBasename) throw new Error('Enter a filename containing letters or numbers.')
   return `${safeBasename}.epub`
 }

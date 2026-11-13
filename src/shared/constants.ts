@@ -5,9 +5,12 @@ export { DEFAULT_EPUB_CSS }
 export const DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS = 2
 export const MIN_SIMULTANEOUS_DOWNLOADS = 1
 export const MAX_SIMULTANEOUS_DOWNLOADS = 5
+export const DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES = 2
+export const MIN_SIMULTANEOUS_DISCOVERIES = 1
+export const MAX_SIMULTANEOUS_DISCOVERIES = 5
 export const DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 2
 export const MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 1
-export const MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 4
+export const MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL = 5
 export const MAX_SITE_EXTRACTION_PREFERENCES = 50
 
 export const DEFAULT_DISCOVERY_FRESHNESS_HOURS = 24
@@ -15,7 +18,7 @@ export const MIN_DISCOVERY_FRESHNESS_HOURS = 1
 export const MAX_DISCOVERY_FRESHNESS_HOURS = 720
 
 export const MAX_NOVEL_DESCRIPTION_LENGTH = 20_000
-export const MAX_SELECTED_CHAPTERS = 10_000
+export const MAX_SELECTED_CHAPTERS = 20_000
 export const MAX_EPUB_CSS_LENGTH = 100_000
 export const MAX_EPUB_INPUT_BYTES = 256 * 1024 * 1024
 export const MAX_EPUB_MERGE_ENTRY_BYTES = 16 * 1024 * 1024
@@ -40,17 +43,20 @@ export type EpubImageMediaType = keyof typeof EPUB_IMAGE_TYPES
 
 export const LIBRARY_FOLDERS = ['Completed', 'Downloaded', 'Sent', 'Old', 'Old Completed'] as const
 
-export const MAX_ACTIVE_DISCOVERIES = 2
 export const HTTP_REQUEST_TIMEOUT_MS = 20_000
 export const BROWSER_NAVIGATION_TIMEOUT_MS = 45_000
 export const HTTP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+export const MIN_DOMAIN_REQUEST_DELAY_MS = 0
+export const MAX_DOMAIN_REQUEST_DELAY_MS = 60_000
+export const MAX_DOMAIN_REQUEST_PREFERENCES = 50
 export const MAX_NOVELFULL_CATALOG_PAGES = 200
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
+export const MAX_GENERIC_DISCOVERY_PAGES = 100
 export const DEFAULT_DOMAIN_REQUEST_DELAY_MS = 250
 export const MAX_ACTIVE_REQUESTS_PER_DOMAIN = 2
 export const DEFAULT_HTTP_429_RETRY_DELAY_MS = 30_000
 export const DOMAIN_REQUEST_DELAYS_MS: Readonly<Record<string, number>> = {
-  'novelfull.com': 1000,
+  'novelfull.com': 250,
   'novelfull.net': 1000
 }
 export const HTTP_IMAGE_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'

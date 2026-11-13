@@ -256,6 +256,19 @@ input {
   outline-offset: 1px;
 }
 
+.queue-separate-job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.queue-separate-job input {
+  margin: 0;
+}
+
 .queue-add-row {
   display: flex;
   align-items: center;
@@ -739,6 +752,7 @@ input {
 
 .queue-list-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   margin: 8px 0 4px;

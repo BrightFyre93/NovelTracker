@@ -13,7 +13,7 @@ import type {
   TrackerNovel
 } from '../../shared/contracts'
 import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
-import { suggestEpubFilename } from '../../shared/epubFilename'
+import { MAX_EPUB_FILENAME_BASENAME_LENGTH, suggestEpubFilename } from '../../shared/epubFilename'
 import ConfigurationView from './components/ConfigurationView.vue'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
@@ -34,6 +34,7 @@ const browserAssistOpen = ref(false)
 const browserDiscoveryRunning = ref(false)
 const browserPageTitle = ref('')
 const browserAssistUrl = ref('')
+const separateJob = ref(false)
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
@@ -68,8 +69,17 @@ const {
 const hasCurrentDiscovery = computed(() => Boolean(sourceUrl.value) && url.value.trim() === sourceUrl.value)
 const filenamePreview = computed(() => {
   const selected = chapters.value.filter((chapter) => chapter.selected)
-  if (selected.length === 0) return suggestEpubFilename(title.value, '', '')
-  return suggestEpubFilename(title.value, selected[0].title, selected[selected.length - 1].title)
+  const suggestion =
+    selected.length === 0
+      ? suggestEpubFilename(title.value, '', '')
+      : suggestEpubFilename(title.value, selected[0].title, selected[selected.length - 1].title)
+  if (!separateJob.value || !store.queueItemId) return suggestion
+  const suffix = ` (separate ${store.queueItemId.slice(0, 8)})`
+  const basename = suggestion.replace(/\.epub$/i, '')
+  const prefix = basename
+    .slice(0, MAX_EPUB_FILENAME_BASENAME_LENGTH - suffix.length)
+    .replace(/[. ]+$/g, '')
+  return `${prefix}${suffix}.epub`
 })
 const filteredTrackerNovels = computed(() => {
   const query = trackerSearch.value.trim().toLocaleLowerCase()
@@ -114,6 +124,7 @@ watch(url, (value) => {
   }
   if (sourceUrl.value && value.trim() !== sourceUrl.value) {
     store.queueItemId = ''
+    separateJob.value = false
     sourceUrl.value = ''
     chapters.value = []
     title.value = ''
@@ -364,6 +375,7 @@ function resetDiscoveryForm(): void {
     queueSelectionTimer = undefined
   }
   store.queueItemId = ''
+  separateJob.value = false
   store.sourceUrl = ''
   store.url = ''
   store.title = ''
@@ -392,6 +404,7 @@ function useTrackerNovel(novel: TrackerNovel): void {
   }
 
   store.queueItemId = ''
+  separateJob.value = false
   store.sourceUrl = ''
   store.chapters = []
   store.parserName = ''
@@ -427,6 +440,7 @@ function openQueueItem(item: DiscoveryQueueItem): void {
   store.parserName = item.parserName
   store.chapters = item.chapters.map((chapter) => ({ ...chapter }))
   store.queueItemId = item.id
+  separateJob.value = item.separateJob ?? false
   store.filename = ''
   store.trackerRow = item.trackerRow ? { ...item.trackerRow } : null
   store.trackerSourceUrl = item.trackerRow ? item.sourceUrl : ''
@@ -825,7 +839,9 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
             :placeholder="filenamePreview"
             :disabled="busy"
           />
-          <p class="help-text">Leave blank to use the suggested name.</p>
+          <p class="help-text">
+            {{ separateJob ? 'A unique name is suggested for this separate source job; existing files are still protected.' : 'Leave blank to use the suggested name.' }}
+          </p>
         </div>
         <div class="output-row">
           <div class="folder-summary">

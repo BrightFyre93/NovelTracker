@@ -4,26 +4,35 @@ import Button from 'primevue/button'
 import Message from 'primevue/message'
 import type {
   AppSettings,
+  DomainRequestDelayPreference,
   SiteExtractionMode,
   SiteExtractionPreference
 } from '../../../shared/contracts'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
+  DEFAULT_DOMAIN_REQUEST_DELAY_MS,
   DEFAULT_EPUB_CSS,
   DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   MAX_DISCOVERY_FRESHNESS_HOURS,
+  MAX_DOMAIN_REQUEST_DELAY_MS,
+  MAX_DOMAIN_REQUEST_PREFERENCES,
   MAX_EPUB_CSS_LENGTH,
   MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MAX_SIMULTANEOUS_DISCOVERIES,
   MAX_SIMULTANEOUS_DOWNLOADS,
   MIN_DISCOVERY_FRESHNESS_HOURS,
+  MIN_DOMAIN_REQUEST_DELAY_MS,
   MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MIN_SIMULTANEOUS_DISCOVERIES,
   MIN_SIMULTANEOUS_DOWNLOADS
 } from '../../../shared/constants'
 import {
   normalizeSiteExtractionPreferences,
   normalizeSiteHostname
 } from '../../../shared/siteExtractionPreferences'
+import { normalizeDomainRequestDelays } from '../../../shared/domainRequestPreferences'
 
 const emit = defineEmits<{
   themeChanged: [theme: AppSettings['appTheme']]
@@ -36,7 +45,9 @@ const settings = ref<AppSettings>({
   scanOldFolder: false,
   scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  maxSimultaneousDiscoveries: DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  domainRequestDelays: [],
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
@@ -44,10 +55,14 @@ const settings = ref<AppSettings>({
 })
 const freshnessHoursDraft = ref(DEFAULT_DISCOVERY_FRESHNESS_HOURS)
 const concurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS)
+const discoveryConcurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES)
 const chapterConcurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL)
+const domainRequestDelaysDraft = ref<DomainRequestDelayPreference[]>([])
 const siteExtractionPreferencesDraft = ref<SiteExtractionPreference[]>([])
 const sitePreferenceHostnameDraft = ref('')
 const sitePreferenceModeDraft = ref<SiteExtractionMode>('generic-html')
+const domainPreferenceHostnameDraft = ref('')
+const domainPreferenceDelayDraft = ref(DEFAULT_DOMAIN_REQUEST_DELAY_MS)
 const themeDraft = ref<AppSettings['appTheme']>('light')
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
 const scanOldFolderDraft = ref(false)
@@ -56,14 +71,24 @@ const concurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_DOWNLOADS - MIN_SIMULTANEOUS_DOWNLOADS + 1 },
   (_, index) => MIN_SIMULTANEOUS_DOWNLOADS + index
 )
+const discoveryConcurrencyOptions = Array.from(
+  { length: MAX_SIMULTANEOUS_DISCOVERIES - MIN_SIMULTANEOUS_DISCOVERIES + 1 },
+  (_, index) => MIN_SIMULTANEOUS_DISCOVERIES + index
+)
 const chapterConcurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL - MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL + 1 },
   (_, index) => MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL + index
 )
 const freshnessDirty = computed(() => freshnessHoursDraft.value !== settings.value.discoveryFreshnessHours)
 const concurrencyDirty = computed(() => concurrencyDraft.value !== settings.value.maxSimultaneousDownloads)
+const discoveryConcurrencyDirty = computed(() =>
+  discoveryConcurrencyDraft.value !== settings.value.maxSimultaneousDiscoveries
+)
 const chapterConcurrencyDirty = computed(() =>
   chapterConcurrencyDraft.value !== settings.value.maxSimultaneousChaptersPerNovel
+)
+const domainRequestDelaysDirty = computed(() =>
+  JSON.stringify(domainRequestDelaysDraft.value) !== JSON.stringify(settings.value.domainRequestDelays)
 )
 const siteExtractionPreferencesDirty = computed(() =>
   JSON.stringify(siteExtractionPreferencesDraft.value) !== JSON.stringify(settings.value.siteExtractionPreferences)
@@ -83,7 +108,9 @@ const error = ref('')
 const success = ref('')
 const savingFreshness = ref(false)
 const savingConcurrency = ref(false)
+const savingDiscoveryConcurrency = ref(false)
 const savingChapterConcurrency = ref(false)
+const savingDomainRequestDelays = ref(false)
 const savingSiteExtractionPreferences = ref(false)
 const savingTheme = ref(false)
 const savingEpubCss = ref(false)
@@ -94,7 +121,9 @@ onMounted(async () => {
     settings.value = await window.novelTracker.getSettings()
     freshnessHoursDraft.value = settings.value.discoveryFreshnessHours
     concurrencyDraft.value = settings.value.maxSimultaneousDownloads
+    discoveryConcurrencyDraft.value = settings.value.maxSimultaneousDiscoveries
     chapterConcurrencyDraft.value = settings.value.maxSimultaneousChaptersPerNovel
+    domainRequestDelaysDraft.value = settings.value.domainRequestDelays.map((preference) => ({ ...preference }))
     siteExtractionPreferencesDraft.value = settings.value.siteExtractionPreferences.map((preference) => ({ ...preference }))
     scanOldFolderDraft.value = settings.value.scanOldFolder
     scanOldCompletedFolderDraft.value = settings.value.scanOldCompletedFolder
@@ -201,6 +230,66 @@ async function saveChapterConcurrency(): Promise<void> {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     savingChapterConcurrency.value = false
+  }
+}
+
+function addDomainRequestDelay(): void {
+  error.value = ''
+  try {
+    const hostname = normalizeSiteHostname(domainPreferenceHostnameDraft.value)
+    domainRequestDelaysDraft.value = normalizeDomainRequestDelays([
+      ...domainRequestDelaysDraft.value.filter((preference) => preference.hostname !== hostname),
+      { hostname, delayMs: domainPreferenceDelayDraft.value }
+    ])
+    domainPreferenceHostnameDraft.value = ''
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  }
+}
+
+function removeDomainRequestDelay(hostname: string): void {
+  domainRequestDelaysDraft.value = domainRequestDelaysDraft.value.filter(
+    (preference) => preference.hostname !== hostname
+  )
+}
+
+async function saveDomainRequestDelays(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingDomainRequestDelays.value = true
+  try {
+    const result = await window.novelTracker.updateDomainRequestDelays(domainRequestDelaysDraft.value)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    domainRequestDelaysDraft.value = result.value.domainRequestDelays.map((preference) => ({ ...preference }))
+    success.value = 'Per-domain request delays saved.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    savingDomainRequestDelays.value = false
+  }
+}
+
+async function saveDiscoveryConcurrency(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingDiscoveryConcurrency.value = true
+  try {
+    const result = await window.novelTracker.updateDiscoveryConcurrency(discoveryConcurrencyDraft.value)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    discoveryConcurrencyDraft.value = result.value.maxSimultaneousDiscoveries
+    success.value = 'Discovery concurrency saved.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    savingDiscoveryConcurrency.value = false
   }
 }
 
@@ -374,6 +463,20 @@ async function resetEpubCss(): Promise<void> {
           />
         </div>
         <div class="configuration-setting">
+          <label class="field-label" for="discovery-concurrency">Maximum simultaneous discoveries</label>
+          <select id="discovery-concurrency" v-model.number="discoveryConcurrencyDraft" class="configuration-select">
+            <option v-for="limit in discoveryConcurrencyOptions" :key="limit" :value="limit">{{ limit }} novel{{ limit === 1 ? '' : 's' }}</option>
+          </select>
+          <small class="help-text">Controls how many chapter lists are discovered at once. Same-site requests still share the site's rate limit.</small>
+          <Button
+            label="Save discovery concurrency"
+            size="small"
+            :loading="savingDiscoveryConcurrency"
+            :disabled="savingDiscoveryConcurrency || !discoveryConcurrencyDirty"
+            @click="saveDiscoveryConcurrency"
+          />
+        </div>
+        <div class="configuration-setting">
           <label class="field-label" for="chapter-concurrency">Maximum active chapter requests per novel</label>
           <select id="chapter-concurrency" v-model.number="chapterConcurrencyDraft" class="configuration-select">
             <option v-for="limit in chapterConcurrencyOptions" :key="limit" :value="limit">{{ limit }} chapter{{ limit === 1 ? '' : 's' }}</option>
@@ -427,6 +530,80 @@ async function resetEpubCss(): Promise<void> {
             @click="saveTheme"
           />
         </div>
+      </div>
+      <div class="site-extraction-settings">
+        <div>
+          <strong>Per-domain request delay</strong>
+          <p class="help-text">
+            Set the minimum spacing between request starts for each hostname. Unlisted domains use the built-in default of
+            {{ DEFAULT_DOMAIN_REQUEST_DELAY_MS }} ms; saved entries override built-in site values. HTTP 429 cooldowns always apply.
+          </p>
+        </div>
+        <div class="site-extraction-preference-form">
+          <input
+            v-model="domainPreferenceHostnameDraft"
+            class="site-extraction-hostname"
+            type="text"
+            placeholder="example.com"
+            aria-label="Domain hostname"
+            :disabled="savingDomainRequestDelays"
+          />
+          <input
+            v-model.number="domainPreferenceDelayDraft"
+            class="configuration-number"
+            type="number"
+            :min="MIN_DOMAIN_REQUEST_DELAY_MS"
+            :max="MAX_DOMAIN_REQUEST_DELAY_MS"
+            step="50"
+            aria-label="Request delay in milliseconds"
+            :disabled="savingDomainRequestDelays"
+          />
+          <Button
+            label="Add / update domain"
+            size="small"
+            :disabled="savingDomainRequestDelays"
+            @click="addDomainRequestDelay"
+          />
+        </div>
+        <small class="help-text">
+          {{ domainRequestDelaysDraft.length }} of {{ MAX_DOMAIN_REQUEST_PREFERENCES }} configured domains. Delay range: {{ MIN_DOMAIN_REQUEST_DELAY_MS }}–{{ MAX_DOMAIN_REQUEST_DELAY_MS }} ms.
+        </small>
+        <div v-if="domainRequestDelaysDraft.length" class="site-extraction-preference-list">
+          <div
+            v-for="preference in domainRequestDelaysDraft"
+            :key="preference.hostname"
+            class="site-extraction-preference-row"
+          >
+            <strong>{{ preference.hostname }}</strong>
+            <input
+              v-model.number="preference.delayMs"
+              class="configuration-number"
+              type="number"
+              :min="MIN_DOMAIN_REQUEST_DELAY_MS"
+              :max="MAX_DOMAIN_REQUEST_DELAY_MS"
+              step="50"
+              :aria-label="`Request delay in milliseconds for ${preference.hostname}`"
+              :disabled="savingDomainRequestDelays"
+            />
+            <Button
+              icon="pi pi-trash"
+              severity="danger"
+              text
+              rounded
+              size="small"
+              :aria-label="`Remove request delay for ${preference.hostname}`"
+              :disabled="savingDomainRequestDelays"
+              @click="removeDomainRequestDelay(preference.hostname)"
+            />
+          </div>
+        </div>
+        <Button
+          label="Save domain delays"
+          size="small"
+          :loading="savingDomainRequestDelays"
+          :disabled="savingDomainRequestDelays || !domainRequestDelaysDirty"
+          @click="saveDomainRequestDelays"
+        />
       </div>
       <div class="site-extraction-settings">
         <div>

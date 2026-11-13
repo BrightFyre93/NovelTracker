@@ -29,8 +29,8 @@ import type {
   Result
 } from '../shared/contracts'
 import {
+  DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   DEFAULT_EPUB_CSS,
-  MAX_ACTIVE_DISCOVERIES,
   MAX_DISCOVERY_FRESHNESS_HOURS,
   MAX_EPUB_CSS_LENGTH,
   MAX_EPUB_MERGE_TOTAL_SOURCE_BYTES,
@@ -38,15 +38,18 @@ import {
   MAX_SELECTED_CHAPTERS,
   MAX_TIMER_DELAY_MS,
   MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MAX_SIMULTANEOUS_DISCOVERIES,
   MAX_SIMULTANEOUS_DOWNLOADS,
   MIN_DISCOVERY_FRESHNESS_HOURS,
   MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MIN_SIMULTANEOUS_DISCOVERIES,
   MIN_SIMULTANEOUS_DOWNLOADS
 } from '../shared/constants'
 import {
   normalizeSiteExtractionPreferences,
   siteExtractionModeForUrl
 } from '../shared/siteExtractionPreferences'
+import { normalizeDomainRequestDelays } from '../shared/domainRequestPreferences'
 import {
   clearBrowserSession,
   closeBrowserSession,
@@ -84,6 +87,7 @@ import {
   discoverChapters,
   discoverChaptersUsingPageLoader,
   HttpStatusError,
+  setDomainRequestDelays,
   validateHttpUrl
 } from './services/scraper'
 import { writeEpub } from './services/epub'
@@ -122,6 +126,7 @@ const browserAssistedDiscoveries = new Set<string>()
 const activeBrowserDiscoveries = new Map<string, AbortController>()
 const activeQueueDiscoveries = new Map<string, AbortController>()
 let activeDiscoveries = 0
+let maxActiveDiscoveries = DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES
 const activeDownloads = new Map<string, { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' }>()
 let downloadPumpRunning = false
 let downloadPumpRequested = false
@@ -447,6 +452,7 @@ function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
     genres: item.genres ?? [],
     source: item.source ?? '',
     novelStatus: item.novelStatus ?? '',
+    separateJob: item.separateJob ?? false,
     status: item.status ?? 'needs-review',
     discoveryChanges: item.discoveryChanges ?? '',
     recommendationSummary: item.recommendationSummary ?? '',
@@ -803,7 +809,7 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
 }
 
 function pumpDiscoveryQueue(): void {
-  while (activeDiscoveries < MAX_ACTIVE_DISCOVERIES && pendingDiscoveries.length > 0) {
+  while (activeDiscoveries < maxActiveDiscoveries && pendingDiscoveries.length > 0) {
     const id = pendingDiscoveries.shift()!
     activeDiscoveries += 1
     const browserAssisted = browserAssistedDiscoveries.delete(id)
@@ -906,9 +912,13 @@ function parseDiscoveryQueueInputs(value: unknown): DiscoveryQueueInput[] {
     const title = typeof input.title === 'string' ? input.title.trim() : ''
     const author = typeof input.author === 'string' ? input.author.trim() : ''
     const origin = input.origin
+    const separateJob = input.separateJob
     if (!title || title.length > 300) throw new Error(`Queue item ${index + 1} needs a title of 1–300 characters.`)
     if (author.length > 300) throw new Error(`Queue item ${index + 1} has an author longer than 300 characters.`)
     if (origin !== 'tracker' && origin !== 'manual') throw new Error(`Queue item ${index + 1} has an invalid origin.`)
+    if (separateJob !== undefined && typeof separateJob !== 'boolean') {
+      throw new Error(`Queue item ${index + 1} has an invalid separate-job setting.`)
+    }
 
     let trackerRow: DiscoveryQueueInput['trackerRow']
     if (input.trackerRow !== undefined) {
@@ -943,6 +953,7 @@ function parseDiscoveryQueueInputs(value: unknown): DiscoveryQueueInput[] {
       author,
       sourceUrl: validateHttpUrl(input.sourceUrl),
       origin,
+      separateJob: separateJob === true,
       trackerRow
     }
   })
@@ -1873,6 +1884,29 @@ function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle('settings:discovery-concurrency', async (_event, rawValue: unknown): Promise<Result<AppSettings>> => {
+    try {
+      if (
+        typeof rawValue !== 'number' ||
+        !Number.isInteger(rawValue) ||
+        rawValue < MIN_SIMULTANEOUS_DISCOVERIES ||
+        rawValue > MAX_SIMULTANEOUS_DISCOVERIES
+      ) {
+        throw new Error(
+          `Maximum simultaneous discoveries must be a whole number from ${MIN_SIMULTANEOUS_DISCOVERIES} to ${MAX_SIMULTANEOUS_DISCOVERIES}.`
+        )
+      }
+      const settings = await readSettings(dataDirectory())
+      settings.maxSimultaneousDiscoveries = rawValue
+      await writeSettings(dataDirectory(), settings)
+      maxActiveDiscoveries = rawValue
+      pumpDiscoveryQueue()
+      return { ok: true, value: settings }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
   ipcMain.handle('settings:chapter-concurrency', async (_event, rawValue: unknown): Promise<Result<AppSettings>> => {
     try {
       if (
@@ -1888,6 +1922,18 @@ function registerIpcHandlers(): void {
       const settings = await readSettings(dataDirectory())
       settings.maxSimultaneousChaptersPerNovel = rawValue
       await writeSettings(dataDirectory(), settings)
+      return { ok: true, value: settings }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('settings:domain-request-delays', async (_event, rawPreferences: unknown): Promise<Result<AppSettings>> => {
+    try {
+      const settings = await readSettings(dataDirectory())
+      settings.domainRequestDelays = normalizeDomainRequestDelays(rawPreferences)
+      await writeSettings(dataDirectory(), settings)
+      setDomainRequestDelays(settings.domainRequestDelays)
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2035,9 +2081,20 @@ function registerIpcHandlers(): void {
     try {
       const inputs = parseDiscoveryQueueInputs(rawItems)
       const existingUrls = new Set(discoveryQueue.map((item) => item.sourceUrl))
+      const submittedUrls = new Set<string>()
       const added: DiscoveryQueueItem[] = []
       for (const input of inputs) {
-        if (existingUrls.has(input.sourceUrl)) continue
+        if (submittedUrls.has(input.sourceUrl)) continue
+        submittedUrls.add(input.sourceUrl)
+        const isDuplicateSource = existingUrls.has(input.sourceUrl)
+        if (isDuplicateSource && !input.separateJob) continue
+        if (isDuplicateSource) {
+          for (const existingItem of discoveryQueue) {
+            if (existingItem.sourceUrl === input.sourceUrl && !existingItem.downloadOptions) {
+              existingItem.separateJob = true
+            }
+          }
+        }
         existingUrls.add(input.sourceUrl)
         const now = new Date().toISOString()
         added.push({
@@ -2052,6 +2109,7 @@ function registerIpcHandlers(): void {
           novelStatus: '',
           sourceUrl: input.sourceUrl,
           origin: input.origin,
+          separateJob: isDuplicateSource && input.separateJob === true,
           trackerRow: input.trackerRow ?? null,
           status: 'discovering',
           parserName: '',
@@ -2125,6 +2183,49 @@ function registerIpcHandlers(): void {
       return { ok: true, value: undefined }
     } catch (error) {
       console.error('Discovery queue retry failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:retry-failed', async (): Promise<Result<number>> => {
+    try {
+      const failedItems = discoveryQueue.filter(
+        (item) => item.status === 'failed' && !item.downloadOptions
+      )
+      if (failedItems.length === 0) return { ok: true, value: 0 }
+
+      const previousStates = failedItems.map((item) => ({
+        item,
+        error: item.error,
+        progress: item.progress,
+        updatedAt: item.updatedAt
+      }))
+      const now = new Date().toISOString()
+      for (const item of failedItems) {
+        item.status = 'discovering'
+        item.progress = null
+        item.error = ''
+        item.updatedAt = now
+      }
+
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        for (const previous of previousStates) {
+          previous.item.status = 'failed'
+          previous.item.error = previous.error
+          previous.item.progress = previous.progress
+          previous.item.updatedAt = previous.updatedAt
+        }
+        throw error
+      }
+
+      notifyDiscoveryQueueChanged()
+      pendingDiscoveries.push(...failedItems.map((item) => item.id))
+      pumpDiscoveryQueue()
+      return { ok: true, value: failedItems.length }
+    } catch (error) {
+      console.error('Failed discovery batch retry failed:', error)
       return { ok: false, error: errorMessage(error) }
     }
   })
@@ -2530,7 +2631,9 @@ function registerIpcHandlers(): void {
               candidate.sourceUrl === sourceUrl &&
               ['queued', 'downloading', 'paused'].includes(candidate.status)
           )
-          if (duplicate) throw new Error('A job for this novel or source is already active in the queue.')
+          if (duplicate && !existingItem.separateJob) {
+            throw new Error('A job for this novel or source is already active in the queue.')
+          }
           const selectedUrls = new Set(input.chapters.map((chapter) => chapter.url))
           const availableUrls = new Set(existingItem.chapters.map((chapter) => chapter.url))
           if ([...selectedUrls].some((url) => !availableUrls.has(url))) {
@@ -3573,6 +3676,8 @@ app.whenReady().then(async () => {
   }
   if (interruptedDiscoveries) await persistDiscoveryQueue()
   const settings = await readSettings(dataDirectory())
+  maxActiveDiscoveries = settings.maxSimultaneousDiscoveries
+  setDomainRequestDelays(settings.domainRequestDelays)
   if (settings.outputDirectory) {
     try {
       const directory = await realpath(settings.outputDirectory)

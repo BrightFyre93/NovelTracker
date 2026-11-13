@@ -6,6 +6,7 @@ import type {
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
+  DomainRequestDelayPreference,
   DownloadHistoryEntry,
   EpubMergeProgress,
   BrowserSessionInfo,
@@ -41,8 +42,12 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('settings:discovery-freshness', hours) as Promise<Result<AppSettings>>,
   updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
     ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
+  updateDiscoveryConcurrency: (maxSimultaneousDiscoveries: number) =>
+    ipcRenderer.invoke('settings:discovery-concurrency', maxSimultaneousDiscoveries) as Promise<Result<AppSettings>>,
   updateChapterConcurrency: (maxSimultaneousChaptersPerNovel: number) =>
     ipcRenderer.invoke('settings:chapter-concurrency', maxSimultaneousChaptersPerNovel) as Promise<Result<AppSettings>>,
+  updateDomainRequestDelays: (preferences: DomainRequestDelayPreference[]) =>
+    ipcRenderer.invoke('settings:domain-request-delays', preferences) as Promise<Result<AppSettings>>,
   updateSiteExtractionPreferences: (preferences: SiteExtractionPreference[]) =>
     ipcRenderer.invoke('settings:site-extraction-preferences', preferences) as Promise<Result<AppSettings>>,
   updateLibraryScanOptions: (scanOldFolder: boolean, scanOldCompletedFolder: boolean) =>
@@ -58,6 +63,8 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('discovery-queue:add', items) as Promise<Result<DiscoveryQueueItem[]>>,
   retryDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:retry', id) as Promise<Result<void>>,
+  retryAllFailedDiscoveries: () =>
+    ipcRenderer.invoke('discovery-queue:retry-failed') as Promise<Result<number>>,
   forceRetryDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:force-retry', id) as Promise<Result<void>>,
   retryDiscoveryQueueItemWithBrowser: (id: string) =>

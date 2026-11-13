@@ -491,7 +491,13 @@ function chapterRangeLabel(start: number, end: number): string {
             outlined
             @click="emit('openConfiguration')"
           />
-          <Button label="Scan / rescan" icon="pi pi-refresh" :disabled="busy || !libraryRoot" @click="scan()" />
+          <Button
+            label="Scan / rescan"
+            icon="pi pi-refresh"
+            title="Scan for added or removed files, reusing cached metadata for unchanged files. This does not modify library files; use Rebuild index to reinspect everything."
+            :disabled="busy || !libraryRoot"
+            @click="scan()"
+          />
           <Button
             label="Rebuild index"
             icon="pi pi-sync"
