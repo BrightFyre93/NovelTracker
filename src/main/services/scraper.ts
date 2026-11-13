@@ -10,22 +10,26 @@ import type {
   DiscoveryResult,
   JobProgress
 } from '../../shared/contracts'
-import { EPUB_IMAGE_TYPES, MAX_CHAPTER_IMAGE_BYTES, MAX_CHAPTER_IMAGES, MAX_IMAGE_BYTES, type EpubImageMediaType } from '../../shared/epubImages'
+import {
+  APP_USER_AGENT,
+  BLOCKED_PAGE_PATTERN,
+  CHAPTER_LABEL_PATTERN,
+  CHAPTER_URL_PATTERN,
+  DEFAULT_DOMAIN_REQUEST_DELAY_MS,
+  DOMAIN_REQUEST_DELAYS_MS,
+  EPUB_IMAGE_TYPES,
+  HTTP_IMAGE_ACCEPT_HEADER,
+  HTTP_MAX_RESPONSE_BYTES,
+  HTTP_REQUEST_TIMEOUT_MS,
+  MAX_CHAPTER_IMAGE_BYTES,
+  MAX_CHAPTER_IMAGES,
+  MAX_IMAGE_BYTES,
+  MAX_NOVEL_DESCRIPTION_LENGTH,
+  MAX_NOVELFULL_CATALOG_PAGES,
+  NOVELFULL_HOSTS,
+  type EpubImageMediaType
+} from '../../shared/constants'
 
-const REQUEST_TIMEOUT_MS = 20_000
-const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-const IMAGE_ACCEPT_HEADER = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-const MAX_NOVELFULL_CATALOG_PAGES = 200
-const USER_AGENT = 'NovelTrackerEPUB/0.1'
-const CHAPTER_LABEL = /\b(chapter|episode|part|prologue|epilogue|volume)\b|^\s*#?\s*\d+(?:\.\d+)?\s*$/i
-const CHAPTER_URL = /(?:chapter|episode|part|prologue|epilogue)(?:[-_./]|%20)/i
-const BLOCKED_PAGE = /\b(captcha|verify you are human|access denied|403 forbidden|checking your browser)\b/i
-const NOVELFULL_HOSTS = new Set(['novelfull.com', 'novelfull.net'])
-const DEFAULT_DOMAIN_REQUEST_DELAY_MS = 250
-const DOMAIN_REQUEST_DELAYS_MS: Readonly<Record<string, number>> = {
-  'novelfull.com': 250,
-  'novelfull.net': 500
-}
 const domainTails = new Map<string, Promise<void>>()
 const domainNextRequestAt = new Map<string, number>()
 
@@ -127,7 +131,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
 async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ html: string; finalUrl: string }> {
   const releaseDomain = await acquireDomainSlot(url, operationSignal)
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), HTTP_REQUEST_TIMEOUT_MS)
   const abortOperation = () => controller.abort()
   operationSignal?.addEventListener('abort', abortOperation, { once: true })
 
@@ -136,7 +140,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     const response = await fetch(url, {
       headers: {
         Accept: 'text/html,application/xhtml+xml',
-        'User-Agent': USER_AGENT
+        'User-Agent': APP_USER_AGENT
       },
       redirect: 'follow',
       signal: controller.signal
@@ -163,7 +167,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     }
 
     const declaredLength = Number(response.headers.get('content-length') ?? 0)
-    if (declaredLength > MAX_RESPONSE_BYTES) {
+    if (declaredLength > HTTP_MAX_RESPONSE_BYTES) {
       throw new Error('The page is too large to process safely.')
     }
 
@@ -179,7 +183,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
       const { done, value } = await reader.read()
       if (done) break
       totalLength += value.byteLength
-      if (totalLength > MAX_RESPONSE_BYTES) {
+      if (totalLength > HTTP_MAX_RESPONSE_BYTES) {
         await reader.cancel()
         throw new Error('The page is too large to process safely.')
       }
@@ -307,13 +311,13 @@ export async function fetchImageResource(
     await validateImageHost(url, pageOrigin)
     const releaseDomain = await acquireDomainSlot(url, operationSignal)
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    const timeout = setTimeout(() => controller.abort(), HTTP_REQUEST_TIMEOUT_MS)
     const abortOperation = () => controller.abort()
     operationSignal?.addEventListener('abort', abortOperation, { once: true })
     try {
       if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
       const response = await fetch(url, {
-        headers: { Accept: IMAGE_ACCEPT_HEADER, 'User-Agent': USER_AGENT },
+        headers: { Accept: HTTP_IMAGE_ACCEPT_HEADER, 'User-Agent': APP_USER_AGENT },
         redirect: 'manual',
         signal: controller.signal
       })
@@ -330,7 +334,9 @@ export async function fetchImageResource(
       const finalUrl = validateHttpUrl(response.url || url)
       await validateImageHost(finalUrl, pageOrigin)
       const declaredLength = Number(response.headers.get('content-length') ?? 0)
-      if (declaredLength > MAX_IMAGE_BYTES) throw new Error('An image exceeds the 4 MB size limit.')
+      if (declaredLength > MAX_IMAGE_BYTES) {
+        throw new Error(`An image exceeds the ${MAX_IMAGE_BYTES / (1024 * 1024)} MB size limit.`)
+      }
       if (!response.body) throw new Error('The image response had no readable content.')
 
       const reader = response.body.getReader()
@@ -342,7 +348,7 @@ export async function fetchImageResource(
         totalLength += value.byteLength
         if (totalLength > MAX_IMAGE_BYTES) {
           await reader.cancel()
-          throw new Error('An image exceeds the 4 MB size limit.')
+          throw new Error(`An image exceeds the ${MAX_IMAGE_BYTES / (1024 * 1024)} MB size limit.`)
         }
         chunks.push(value)
       }
@@ -466,7 +472,7 @@ function genericNovelMetadata($: ReturnType<typeof load>, pageUrl: string): Nove
 
   return {
     author: normalizedText(author),
-    description: normalizedText(description).slice(0, 20_000),
+    description: normalizedText(description).slice(0, MAX_NOVEL_DESCRIPTION_LENGTH),
     coverUrl,
     alternativeNames,
     genres: uniqueText([...genres, labeledField(['Genres?'])]),
@@ -566,7 +572,7 @@ function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPa
       summary.text() ||
       $('meta[property="og:description"]').attr('content') ||
       ''
-    ).slice(0, 20_000) || generic.description,
+    ).slice(0, MAX_NOVEL_DESCRIPTION_LENGTH) || generic.description,
     coverUrl: coverUrl || generic.coverUrl,
     alternativeNames,
     genres: genres.length > 0 ? genres : generic.genres,
@@ -584,7 +590,7 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
   const url = validateHttpUrl(pageUrl)
   const $ = load(html)
   const pageText = $('body').text().replace(/\s+/g, ' ').trim()
-  if (BLOCKED_PAGE.test(`${documentTitle($)} ${pageText.slice(0, 1000)}`)) {
+  if (BLOCKED_PAGE_PATTERN.test(`${documentTitle($)} ${pageText.slice(0, 1000)}`)) {
     throw new Error('The source requires manual verification; discovery was not continued.')
   }
   const title =
@@ -662,7 +668,7 @@ function chapterLinksFromHtml(html: string, pageUrl: string): ChapterLink[] {
     if (
       !href ||
       !label ||
-      !CHAPTER_LABEL.test(label) ||
+      !CHAPTER_LABEL_PATTERN.test(label) ||
       /^(?:previous|next)(?:\s+chapter)?\b|^(?:first|last)\s+chapter\b/i.test(label)
     ) return
 
@@ -692,7 +698,7 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
   const metadata = genericNovelMetadata($, url)
   const title = $('h1').first().text().trim() || documentTitle($)
   const pageText = $('body').text().replace(/\s+/g, ' ').trim()
-  if (BLOCKED_PAGE.test(`${title} ${pageText.slice(0, 1000)}`)) {
+  if (BLOCKED_PAGE_PATTERN.test(`${title} ${pageText.slice(0, 1000)}`)) {
     throw new Error('The source requires manual verification; discovery was not continued.')
   }
   const chapters = chapterLinksFromHtml(html, url)
@@ -712,13 +718,13 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
       $('h1, h2, h3')
         .toArray()
         .map((element) => $(element).text().replace(/\s+/g, ' ').trim())
-        .find((heading) => CHAPTER_LABEL.test(heading))
+        .find((heading) => CHAPTER_LABEL_PATTERN.test(heading))
     : ''
   const heading = novelFullChapterTitle || $('h1, h2').first().text().trim()
   const chapterPage =
-    CHAPTER_LABEL.test(heading) ||
-    CHAPTER_LABEL.test(title) ||
-    CHAPTER_URL.test(new URL(url).pathname)
+    CHAPTER_LABEL_PATTERN.test(heading) ||
+    CHAPTER_LABEL_PATTERN.test(title) ||
+    CHAPTER_URL_PATTERN.test(new URL(url).pathname)
 
   if (pageText.length >= 200 && chapterPage) {
     const directTitle = heading || title || 'Chapter 1'
@@ -818,7 +824,7 @@ export async function discoverChaptersUsingPageLoader(
   signal?: AbortSignal
 ): Promise<DiscoveryResult> {
   const url = validateHttpUrl(value)
-  if (isNovelFullUrl(url) && !CHAPTER_URL.test(new URL(url).pathname)) {
+  if (isNovelFullUrl(url) && !CHAPTER_URL_PATTERN.test(new URL(url).pathname)) {
     return discoverNovelFullChapters(url, loadPage, onProgress, signal)
   }
   const { html, finalUrl } = await loadPage(url, signal)
@@ -882,7 +888,7 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
 
   const text = root.text().replace(/\s+/g, ' ').trim()
   const pageTitle = documentTitle($)
-  if (BLOCKED_PAGE.test(`${pageTitle} ${text.slice(0, 1000)}`)) {
+  if (BLOCKED_PAGE_PATTERN.test(`${pageTitle} ${text.slice(0, 1000)}`)) {
     throw new Error('The source requires manual verification; this page was not saved as chapter content.')
   }
   if (text.length < 40) {
@@ -949,7 +955,7 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
       $('h1, h2, h3')
         .toArray()
         .map((heading) => $(heading).text().replace(/\s+/g, ' ').trim())
-        .find((heading) => CHAPTER_LABEL.test(heading))
+        .find((heading) => CHAPTER_LABEL_PATTERN.test(heading))
     : ''
   return {
     content: {

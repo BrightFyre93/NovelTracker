@@ -1,11 +1,9 @@
 import { mkdir, rm } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { resolve, sep } from 'node:path'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { BrowserSessionInfo } from '../../shared/contracts'
+import { BROWSER_NAVIGATION_TIMEOUT_MS, BROWSER_PROFILE_DIRECTORY_NAME } from '../../shared/constants'
 import { validateHttpUrl } from './scraper'
-
-const NAVIGATION_TIMEOUT_MS = 45_000
-const PROFILE_DIRECTORY_NAME = 'browser-session'
 
 let browserContext: BrowserContext | null = null
 let browserContextPromise: Promise<BrowserContext> | null = null
@@ -14,7 +12,7 @@ let currentProfileDirectory = ''
 
 function profileDirectory(dataDirectory: string): string {
   const root = resolve(dataDirectory)
-  const profile = resolve(root, PROFILE_DIRECTORY_NAME)
+  const profile = resolve(root, BROWSER_PROFILE_DIRECTORY_NAME)
   if (!profile.startsWith(`${root}${sep}`)) {
     throw new Error('The local browser profile path is invalid.')
   }
@@ -55,10 +53,10 @@ async function getBrowserContext(dataDirectory: string): Promise<BrowserContext>
 async function navigate(page: Page, url: string): Promise<void> {
   try {
     await page.goto(url, {
-      timeout: NAVIGATION_TIMEOUT_MS,
+      timeout: BROWSER_NAVIGATION_TIMEOUT_MS,
       waitUntil: 'domcontentloaded'
     })
-    await page.locator('body').waitFor({ state: 'attached', timeout: NAVIGATION_TIMEOUT_MS })
+    await page.locator('body').waitFor({ state: 'attached', timeout: BROWSER_NAVIGATION_TIMEOUT_MS })
     await page.waitForTimeout(750)
   } catch (error) {
     if (error instanceof Error && error.name === 'TimeoutError') {

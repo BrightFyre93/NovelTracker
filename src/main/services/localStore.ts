@@ -1,27 +1,35 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import {
+  DEFAULT_DISCOVERY_FRESHNESS_HOURS,
+  DEFAULT_EPUB_CSS,
+  DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  EPUB_IMAGE_TYPES,
+  MAX_CHAPTER_IMAGE_BYTES,
+  MAX_CHAPTER_IMAGES,
+  MAX_DISCOVERY_FRESHNESS_HOURS,
+  MAX_EPUB_CSS_LENGTH,
+  MAX_IMAGE_BYTES,
+  MIN_DISCOVERY_FRESHNESS_HOURS
+} from '../../shared/constants'
 import type {
   AppSettings,
+  ChapterImage,
   ChapterContent,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
   LibraryFileCorrection,
   LibraryIndex
 } from '../../shared/contracts'
-import { DEFAULT_EPUB_CSS, MAX_EPUB_CSS_LENGTH } from '../../shared/defaultEpubCss'
-import {
-  EPUB_IMAGE_TYPES,
-  MAX_CHAPTER_IMAGE_BYTES,
-  MAX_CHAPTER_IMAGES,
-  MAX_IMAGE_BYTES
-} from '../../shared/epubImages'
-
 const EMPTY_SETTINGS: AppSettings = {
   libraryRoot: '',
   trackerCsvPath: '',
   outputDirectory: '',
-  maxSimultaneousDownloads: 2,
+  scanOldFolder: false,
+  scanPdfs: false,
+  maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   epubCss: DEFAULT_EPUB_CSS,
   appTheme: 'light'
 }
@@ -109,6 +117,18 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
   if (saved.appTheme !== undefined && saved.appTheme !== 'light' && saved.appTheme !== 'dark') {
     throw new Error('The saved app theme must be light or dark.')
   }
+  if (typeof settings.scanOldFolder !== 'boolean' || typeof settings.scanPdfs !== 'boolean') {
+    throw new Error('The saved library scan options must be boolean values.')
+  }
+  if (
+    !Number.isInteger(settings.discoveryFreshnessHours) ||
+    settings.discoveryFreshnessHours < MIN_DISCOVERY_FRESHNESS_HOURS ||
+    settings.discoveryFreshnessHours > MAX_DISCOVERY_FRESHNESS_HOURS
+  ) {
+    throw new Error(
+      `The saved discovery freshness window must be a whole number from ${MIN_DISCOVERY_FRESHNESS_HOURS} to ${MAX_DISCOVERY_FRESHNESS_HOURS} hours.`
+    )
+  }
   return settings
 }
 
@@ -120,8 +140,30 @@ export function readLibraryIndex(dataDirectory: string): Promise<LibraryIndex | 
   return readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.json'), null)
 }
 
-export function writeLibraryIndex(dataDirectory: string, index: LibraryIndex): Promise<void> {
-  return writeJson(join(dataDirectory, 'library-index.json'), index)
+export function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
+  return readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null)
+}
+
+export async function writeLibraryIndex(
+  dataDirectory: string,
+  index: LibraryIndex,
+  previousIndex?: LibraryIndex | null
+): Promise<void> {
+  const indexPath = join(dataDirectory, 'library-index.json')
+  let backupCandidate = previousIndex
+  if (backupCandidate === undefined) {
+    try {
+      backupCandidate = await readJson<LibraryIndex | null>(indexPath, null)
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error
+      console.warn('The existing library index is corrupt; replacing it without creating a backup.')
+      backupCandidate = null
+    }
+  }
+  if (backupCandidate) {
+    await writeJson(join(dataDirectory, 'library-index.backup.json'), backupCandidate)
+  }
+  await writeJson(indexPath, index)
 }
 
 export function readDownloadHistory(dataDirectory: string): Promise<DownloadHistoryEntry[]> {
@@ -148,6 +190,44 @@ function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapter
   return join(dataDirectory, 'download-artifacts', queueItemId, filename)
 }
 
+function coverArtifactPath(dataDirectory: string, queueItemId: string): string {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+  return join(dataDirectory, 'download-artifacts', queueItemId, 'cover.json')
+}
+
+function isValidChapterImage(value: unknown): value is ChapterImage {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('sourceUrl' in value) ||
+    !('mediaType' in value) ||
+    !('dataBase64' in value)
+  ) {
+    return false
+  }
+  if (
+    typeof value.sourceUrl !== 'string' ||
+    typeof value.mediaType !== 'string' ||
+    !Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, value.mediaType) ||
+    typeof value.dataBase64 !== 'string' ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.dataBase64)
+  ) return false
+  let source: URL
+  try {
+    source = new URL(value.sourceUrl)
+  } catch {
+    return false
+  }
+  const imageBytes = Buffer.byteLength(value.dataBase64, 'base64')
+  return (
+    (source.protocol === 'http:' || source.protocol === 'https:') &&
+    !source.username &&
+    !source.password &&
+    imageBytes > 0 &&
+    imageBytes <= MAX_IMAGE_BYTES
+  )
+}
+
 export async function readChapterArtifact(
   dataDirectory: string,
   queueItemId: string,
@@ -172,34 +252,10 @@ export async function readChapterArtifact(
   if (artifact) {
     let totalImageBytes = 0
     for (const image of images) {
-      if (
-        typeof image !== 'object' ||
-        image === null ||
-        typeof image.sourceUrl !== 'string' ||
-        typeof image.mediaType !== 'string' ||
-        !Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, image.mediaType) ||
-        typeof image.dataBase64 !== 'string' ||
-        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image.dataBase64)
-      ) {
+      if (!isValidChapterImage(image)) {
         throw new Error('A saved chapter artifact contains invalid image data and must be fetched again.')
       }
-      let source: URL
-      try {
-        source = new URL(image.sourceUrl)
-      } catch {
-        throw new Error('A saved chapter artifact contains an invalid image URL and must be fetched again.')
-      }
-      if (
-        (source.protocol !== 'http:' && source.protocol !== 'https:') ||
-        source.username ||
-        source.password
-      ) {
-        throw new Error('A saved chapter artifact contains an invalid image URL and must be fetched again.')
-      }
       const imageBytes = Buffer.byteLength(image.dataBase64, 'base64')
-      if (imageBytes === 0 || imageBytes > MAX_IMAGE_BYTES) {
-        throw new Error('A saved chapter artifact image exceeds its size limit and must be fetched again.')
-      }
       totalImageBytes += imageBytes
       if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
         throw new Error('A saved chapter artifact exceeds its image size limit and must be fetched again.')
@@ -227,6 +283,23 @@ export async function readChapterArtifact(
     }
   }
   return artifact
+}
+
+export async function readCoverArtifact(dataDirectory: string, queueItemId: string): Promise<ChapterImage | null> {
+  const cover = await readJson<ChapterImage | null>(coverArtifactPath(dataDirectory, queueItemId), null)
+  if (cover !== null && !isValidChapterImage(cover)) {
+    throw new Error('The saved cover artifact is invalid and must be fetched again.')
+  }
+  return cover
+}
+
+export function writeCoverArtifact(
+  dataDirectory: string,
+  queueItemId: string,
+  cover: ChapterImage
+): Promise<void> {
+  if (!isValidChapterImage(cover)) throw new Error('The cover image cannot be saved because its data is invalid.')
+  return writeJson(coverArtifactPath(dataDirectory, queueItemId), cover)
 }
 
 export function writeChapterArtifact(

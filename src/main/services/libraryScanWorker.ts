@@ -1,16 +1,19 @@
 import { parentPort, workerData } from 'node:worker_threads'
-import type { LibraryIndex, LibraryProgress } from '../../shared/contracts'
+import type { LibraryProgress } from '../../shared/contracts'
 import { readLibraryIndex, writeLibraryIndex } from './localStore'
 import { scanLibrary } from './libraryScanner'
 
 interface LibraryScanWorkerInput {
   libraryRoot: string
   dataDirectory: string
+  forceRebuild?: boolean
+  scanOldFolder: boolean
+  scanPdfs: boolean
 }
 
 type LibraryScanWorkerMessage =
   | { type: 'progress'; progress: LibraryProgress }
-  | { type: 'complete'; index: LibraryIndex }
+  | { type: 'complete' }
   | { type: 'error'; error: string }
 
 function getWorkerPort(): NonNullable<typeof parentPort> {
@@ -26,11 +29,13 @@ port.on('message', (message: { type?: string }) => {
 })
 
 async function run(): Promise<void> {
+  const previousIndex = input.forceRebuild ? null : await readLibraryIndex(input.dataDirectory)
   const index = await scanLibrary(
     input.libraryRoot,
-    await readLibraryIndex(input.dataDirectory),
+    previousIndex,
     controller.signal,
-    (progress) => port.postMessage({ type: 'progress', progress } satisfies LibraryScanWorkerMessage)
+    (progress) => port.postMessage({ type: 'progress', progress } satisfies LibraryScanWorkerMessage),
+    { scanOldFolder: input.scanOldFolder, scanPdfs: input.scanPdfs }
   )
   if (controller.signal.aborted) throw new Error('Library scan cancelled.')
   port.postMessage({
@@ -45,8 +50,8 @@ async function run(): Promise<void> {
       message: 'Saving library index…'
     }
   } satisfies LibraryScanWorkerMessage)
-  await writeLibraryIndex(input.dataDirectory, index)
-  port.postMessage({ type: 'complete', index } satisfies LibraryScanWorkerMessage)
+  await writeLibraryIndex(input.dataDirectory, index, input.forceRebuild ? undefined : previousIndex)
+  port.postMessage({ type: 'complete' } satisfies LibraryScanWorkerMessage)
 }
 
 void run()

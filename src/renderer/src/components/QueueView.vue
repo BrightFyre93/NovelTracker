@@ -202,6 +202,7 @@ async function addToQueue(): Promise<void> {
         stableId: novel.stableId,
         rowNumber: novel.rowNumber,
         title: novel.title,
+        alternativeNames: novel.alternativeNames,
         csvPath: trackerCsvPath.value
       }
     })
@@ -324,6 +325,25 @@ async function runDownloadAction(
     else if (action === 'pause') notice.value = `Paused the EPUB job for ${item.title}.`
     else if (action === 'resume') notice.value = `Resumed the EPUB job for ${item.title}.`
     else notice.value = `Queued ${item.title} for retry.`
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    downloadActionId.value = ''
+  }
+}
+
+async function repackageOffline(item: DiscoveryQueueItem): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  downloadActionId.value = item.id
+  try {
+    const result = await window.novelTracker.repackageEpub(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = `Queued ${item.title} for offline repackaging from saved content.`
     await refreshQueue()
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -479,20 +499,6 @@ async function acceptSafeSuggestions(): Promise<void> {
   }
 }
 
-async function saveDownloadConcurrency(): Promise<void> {
-  error.value = ''
-  try {
-    const result = await window.novelTracker.updateDownloadConcurrency(maxDownloads.value)
-    if (!result.ok) {
-      error.value = result.error
-      return
-    }
-    maxDownloads.value = result.value.maxSimultaneousDownloads
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  }
-}
-
 async function refreshItem(item: DiscoveryQueueItem): Promise<void> {
   error.value = ''
   notice.value = ''
@@ -633,7 +639,7 @@ async function clearQueue(): Promise<void> {
           </div>
         </div>
         <p v-if="!trackerLoading && filteredTrackerNovels.length === 0" class="empty-state">
-          {{ trackerNovels.length ? 'No matching tracker rows.' : 'No tracker rows loaded. Configure a CSV in Library settings.' }}
+          {{ trackerNovels.length ? 'No matching tracker rows.' : 'No tracker rows loaded. Configure a CSV in Configuration.' }}
         </p>
         <p v-if="trackerNovels.length > filteredTrackerNovels.length" class="help-text">
           Showing up to 100 matches. Refine the search to find other rows.
@@ -662,22 +668,10 @@ async function clearQueue(): Promise<void> {
         <h3 id="discovery-queue-heading">Discovery and EPUB jobs</h3>
       </div>
       <div class="queue-header-actions">
-        <details class="queue-settings">
-          <summary class="queue-settings-trigger" aria-label="Queue settings" title="Queue settings">
-            <i class="pi pi-cog" aria-hidden="true"></i>
-            <span>{{ activeDownloadCount }}/{{ maxDownloads }}</span>
-          </summary>
-          <div class="queue-settings-popover">
-            <strong>Download concurrency</strong>
-            <span class="help-text">{{ activeDownloadCount }} / {{ maxDownloads }} novels active</span>
-            <label class="concurrency-setting">
-              <span>Maximum active novels</span>
-              <select v-model.number="maxDownloads" aria-label="Maximum simultaneous novel downloads" @change="saveDownloadConcurrency">
-                <option v-for="limit in [1, 2, 3, 4, 5]" :key="limit" :value="limit">{{ limit }} active novel{{ limit === 1 ? '' : 's' }}</option>
-              </select>
-            </label>
-          </div>
-        </details>
+        <span class="queue-concurrency-summary" :title="`${activeDownloadCount} of ${maxDownloads} novels active`">
+          <i class="pi pi-bolt" aria-hidden="true"></i>
+          {{ activeDownloadCount }}/{{ maxDownloads }}
+        </span>
         <Button
           :label="String(batchQueueableItems.length)"
           icon="pi pi-bolt"
@@ -728,7 +722,7 @@ async function clearQueue(): Promise<void> {
         />
       </div>
     </div>
-    <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Library settings to queue downloads.</p>
+    <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration to queue downloads.</p>
     <p v-if="loading && items.length === 0" class="help-text">Loading saved queue…</p>
     <p v-else-if="items.length === 0" class="empty-state">No novels queued. Add a tracker selection or one or more URLs above.</p>
     <div v-for="item in items" :key="item.id" class="queue-item">
@@ -741,7 +735,18 @@ async function clearQueue(): Promise<void> {
           <template v-if="item.chapters[item.chapters.length - 1]"> · latest: {{ item.chapters[item.chapters.length - 1].title }}</template>
         </span>
         <span v-if="item.recommendationSummary" class="queue-item-recommendation">{{ item.recommendationSummary }}</span>
-        <span v-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
+        <span
+          v-if="item.repackageOnly && ['queued', 'downloading'].includes(item.status)"
+          class="queue-item-rechecking"
+        >
+          <i class="pi pi-box" aria-hidden="true"></i>
+          Offline repackaging from saved content — no network requests
+        </span>
+        <span v-else-if="item.status === 'discovering' && item.downloadOptions" class="queue-item-rechecking">
+          <i class="pi pi-spin pi-spinner" aria-hidden="true"></i>
+          {{ item.progress?.message ?? 'Rechecking the chapter list before download…' }}
+        </span>
+        <span v-else-if="item.progress">{{ item.progress.current }} / {{ item.progress.total }} chapters · {{ item.progress.message }}</span>
         <ProgressBar
           v-if="item.downloadOptions && item.progress && item.progress.total > 0 && ['queued', 'downloading', 'paused', 'partially-completed'].includes(item.status)"
           :value="Math.round((item.progress.current / item.progress.total) * 100)"
@@ -756,7 +761,10 @@ async function clearQueue(): Promise<void> {
           {{ failed.title }}: {{ failed.error }}
         </span>
       </div>
-      <span class="history-status" :class="`status-${item.status}`">{{ item.status.replace('-', ' ') }}</span>
+      <span class="history-status" :class="`status-${item.status}`">
+        <i v-if="item.status === 'discovering' && item.downloadOptions" class="pi pi-spin pi-spinner" aria-hidden="true"></i>
+        {{ item.status === 'discovering' && item.downloadOptions ? 'rechecking chapters' : item.status.replace('-', ' ') }}
+      </span>
       <div class="queue-item-actions">
         <div class="queue-item-buttons">
           <Button
@@ -863,6 +871,17 @@ async function clearQueue(): Promise<void> {
             @click="runDownloadAction(item, 'retry')"
           />
           <Button
+            v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
+            label="Repackage offline"
+            icon="pi pi-box"
+            size="small"
+            severity="secondary"
+            outlined
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="repackageOffline(item)"
+          />
+          <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed'].includes(item.status)"
             label="Open verification browser"
             icon="pi pi-external-link"
@@ -926,7 +945,7 @@ async function clearQueue(): Promise<void> {
             :disabled="Boolean(downloadActionId)"
             @click="runDownloadAction(item, 'cancel')"
           />
-          <span v-if="item.status === 'discovering'" class="help-text">Discovering…</span>
+          <span v-if="item.status === 'discovering' && !item.downloadOptions" class="help-text">Discovering…</span>
           <Button
             label="Remove"
             icon="pi pi-times"

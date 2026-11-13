@@ -1,4 +1,4 @@
-import type { EpubImageMediaType } from './epubImages'
+import type { EpubImageMediaType } from './constants'
 
 export interface ChapterLink {
   id: string
@@ -66,6 +66,7 @@ export interface GenerateEpubInput {
     stableId: string
     rowNumber: number
     title: string
+    alternativeNames?: string
     csvPath: string
   }
 }
@@ -100,7 +101,10 @@ export interface AppSettings {
   libraryRoot: string
   trackerCsvPath: string
   outputDirectory: string
+  scanOldFolder: boolean
+  scanPdfs: boolean
   maxSimultaneousDownloads: number
+  discoveryFreshnessHours: number
   epubCss: string
   appTheme: 'light' | 'dark'
 }
@@ -197,6 +201,7 @@ export interface DiscoveryQueueItem {
   overlapAllowed: boolean
   includeOverlap: boolean
   overlapCount: number
+  repackageOnly: boolean
   downloadOptions: QueueDownloadOptions | null
   queuedAt: string
   completedChapterUrls: string[]
@@ -257,6 +262,10 @@ export interface LibraryIndex {
   files: LibraryFileRecord[]
   corrections: Record<string, LibraryFileCorrection>
   scanErrors: number
+  scanSummary?: {
+    reusedFiles: number
+    inspectedFiles: number
+  }
 }
 
 export interface LibraryProgress {
@@ -266,6 +275,21 @@ export interface LibraryProgress {
   discoveredFiles: number
   indexedFiles: number
   totalFiles: number
+  message: string
+}
+
+export interface LibraryEpubMergeResult {
+  outputPath: string
+  chapterCount: number
+  duplicateChapterCount: number
+  conflictingChapterCount: number
+  firstChapter: number | null
+  lastChapter: number | null
+}
+
+export interface EpubMergeProgress {
+  stage: 'reading' | 'extracting' | 'merging' | 'packaging' | 'validating' | 'saving' | 'complete' | 'cancelled' | 'failed'
+  percentage: number
   message: string
 }
 
@@ -279,6 +303,10 @@ export type Result<T> =
   | { ok: true; value: T }
   | { ok: false; error: string }
 
+export type LibraryEpubMergeResponse =
+  | Result<LibraryEpubMergeResult>
+  | { ok: false; cancelled: true }
+
 export interface NovelTrackerApi {
   discover(url: string): Promise<Result<DiscoveryResult>>
   openVerificationBrowser(url: string): Promise<Result<BrowserSessionInfo>>
@@ -289,6 +317,7 @@ export interface NovelTrackerApi {
   getSettings(): Promise<AppSettings>
   updateEpubCss(css: string): Promise<Result<AppSettings>>
   updateAppTheme(theme: AppSettings['appTheme']): Promise<Result<AppSettings>>
+  updateDiscoveryFreshnessHours(hours: number): Promise<Result<AppSettings>>
   chooseLibraryRoot(): Promise<string | null>
   chooseTrackerCsv(): Promise<string | null>
   getTrackerNovels(): Promise<Result<TrackerNovel[]>>
@@ -309,11 +338,17 @@ export interface NovelTrackerApi {
   clearDiscoveryQueue(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
   updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
+  updateLibraryScanOptions(scanOldFolder: boolean, scanPdfs: boolean): Promise<Result<AppSettings>>
+  repackageEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItem[]) => void): () => void
   getLibraryIndex(): Promise<LibraryIndex | null>
-  scanLibrary(): Promise<Result<LibraryIndex>>
+  getLibraryIndexBackup(): Promise<LibraryIndex | null>
+  restoreLibraryIndexBackup(): Promise<Result<LibraryIndex>>
+  scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndex>>
   cancelLibraryScan(): Promise<void>
   correctLibraryFile(fileId: string, correction: LibraryFileCorrection): Promise<Result<LibraryIndex>>
+  mergeLibraryEpubs(fileIds: string[], filename: string): Promise<LibraryEpubMergeResponse>
+  onLibraryEpubMergeProgress(listener: (progress: EpubMergeProgress) => void): () => void
   openLibraryPath(path: string, reveal: boolean): Promise<Result<void>>
   onLibraryProgress(listener: (progress: LibraryProgress) => void): () => void
 }

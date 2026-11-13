@@ -1,9 +1,10 @@
 import { readFile } from 'node:fs/promises'
 import { PDFParse } from 'pdf-parse'
 import type { LibraryFileRecord } from '../../shared/contracts'
-
-const MAX_COMPILED_PDF_BYTES = 100 * 1024 * 1024
-const INDIVIDUAL_CHAPTER = /^chapter\s*[-_ ]*\s*(\d+(?:\.\d+)?)/i
+import {
+  INDIVIDUAL_CHAPTER_FILENAME_PATTERN,
+  MAX_PDF_INSPECTION_BYTES
+} from '../../shared/constants'
 
 interface PdfChapterHeading {
   chapter: number
@@ -41,7 +42,7 @@ export async function inspectPdf(
   const relativeParts = relativePath.split(/[\\/]/)
   const filename = relativeParts.pop()!
   const novelTitle = relativeParts.length > 1 ? relativeParts[1] : filename
-  const chapterMatch = filename.replace(/\.pdf$/i, '').match(INDIVIDUAL_CHAPTER)
+  const chapterMatch = filename.replace(/\.pdf$/i, '').match(INDIVIDUAL_CHAPTER_FILENAME_PATTERN)
   if (chapterMatch) {
     const number = Number(chapterMatch[1])
     return {
@@ -68,8 +69,8 @@ export async function inspectPdf(
     }
   }
 
-  if (size > MAX_COMPILED_PDF_BYTES) {
-    throw new Error(`PDF exceeds the ${MAX_COMPILED_PDF_BYTES / (1024 * 1024)} MB inspection limit.`)
+  if (size > MAX_PDF_INSPECTION_BYTES) {
+    throw new Error(`PDF exceeds the ${MAX_PDF_INSPECTION_BYTES / (1024 * 1024)} MB inspection limit.`)
   }
 
   const parser = new PDFParse({ data: await readFile(path) })

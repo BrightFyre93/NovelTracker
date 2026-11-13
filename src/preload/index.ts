@@ -5,10 +5,12 @@ import type {
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
+  EpubMergeProgress,
   BrowserSessionInfo,
   GenerateEpubInput,
   QueuedEpubJob,
   LibraryFileCorrection,
+  LibraryEpubMergeResult,
   LibraryIndex,
   LibraryProgress,
   NovelTrackerApi,
@@ -29,8 +31,12 @@ const api: NovelTrackerApi = {
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   updateEpubCss: (css) => ipcRenderer.invoke('settings:epub-css', css) as Promise<Result<AppSettings>>,
   updateAppTheme: (theme) => ipcRenderer.invoke('settings:app-theme', theme) as Promise<Result<AppSettings>>,
+  updateDiscoveryFreshnessHours: (hours) =>
+    ipcRenderer.invoke('settings:discovery-freshness', hours) as Promise<Result<AppSettings>>,
   updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
     ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
+  updateLibraryScanOptions: (scanOldFolder: boolean, scanPdfs: boolean) =>
+    ipcRenderer.invoke('settings:library-scan-options', scanOldFolder, scanPdfs) as Promise<Result<AppSettings>>,
   chooseLibraryRoot: () => ipcRenderer.invoke('dialog:choose-library-root') as Promise<string | null>,
   chooseTrackerCsv: () => ipcRenderer.invoke('dialog:choose-tracker-csv') as Promise<string | null>,
   getTrackerNovels: () => ipcRenderer.invoke('tracker:list') as Promise<Result<TrackerNovel[]>>,
@@ -49,6 +55,7 @@ const api: NovelTrackerApi = {
   enqueueEpub: (input: GenerateEpubInput, queueItemId?: string) =>
     ipcRenderer.invoke('download-queue:enqueue', input, queueItemId) as Promise<Result<QueuedEpubJob>>,
   retryEpub: (id: string) => ipcRenderer.invoke('download-queue:retry', id) as Promise<Result<void>>,
+  repackageEpub: (id: string) => ipcRenderer.invoke('download-queue:repackage', id) as Promise<Result<void>>,
   pauseEpub: (id: string) => ipcRenderer.invoke('download-queue:pause', id) as Promise<Result<void>>,
   resumeEpub: (id: string) => ipcRenderer.invoke('download-queue:resume', id) as Promise<Result<void>>,
   cancelEpub: (id: string) => ipcRenderer.invoke('download-queue:cancel', id) as Promise<Result<void>>,
@@ -66,10 +73,21 @@ const api: NovelTrackerApi = {
     return () => ipcRenderer.removeListener('discovery-queue:update', handler)
   },
   getLibraryIndex: () => ipcRenderer.invoke('library:index') as Promise<LibraryIndex | null>,
-  scanLibrary: () => ipcRenderer.invoke('library:scan') as Promise<Result<LibraryIndex>>,
+  getLibraryIndexBackup: () => ipcRenderer.invoke('library:index-backup') as Promise<LibraryIndex | null>,
+  restoreLibraryIndexBackup: () =>
+    ipcRenderer.invoke('library:restore-index-backup') as Promise<Result<LibraryIndex>>,
+  scanLibrary: (forceRebuild = false) =>
+    ipcRenderer.invoke('library:scan', forceRebuild) as Promise<Result<LibraryIndex>>,
   cancelLibraryScan: () => ipcRenderer.invoke('library:cancel-scan') as Promise<void>,
   correctLibraryFile: (fileId: string, correction: LibraryFileCorrection) =>
     ipcRenderer.invoke('library:correct-file', fileId, correction) as Promise<Result<LibraryIndex>>,
+  mergeLibraryEpubs: (fileIds: string[], filename: string) =>
+    ipcRenderer.invoke('library:merge-epubs', fileIds, filename) as Promise<Result<LibraryEpubMergeResult>>,
+  onLibraryEpubMergeProgress: (listener: (progress: EpubMergeProgress) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: EpubMergeProgress) => listener(progress)
+    ipcRenderer.on('library:merge-progress', handler)
+    return () => ipcRenderer.removeListener('library:merge-progress', handler)
+  },
   openLibraryPath: (path, reveal) => ipcRenderer.invoke('library:open-path', path, reveal),
   onLibraryProgress: (listener: (progress: LibraryProgress) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: LibraryProgress) => listener(progress)

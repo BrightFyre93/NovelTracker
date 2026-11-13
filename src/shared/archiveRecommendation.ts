@@ -4,6 +4,7 @@ import type {
   LibraryFileRecord,
   QueueChapter
 } from './contracts'
+import { VERIFIED_COVERAGE } from './constants'
 
 export interface ArchiveRecommendation {
   chapters: QueueChapter[]
@@ -13,14 +14,18 @@ export interface ArchiveRecommendation {
   summary: string
 }
 
-const VERIFIED_COVERAGE = new Set(['extracted-toc', 'extracted-text', 'user-corrected'])
-
 function normalizedTitle(value: string): string {
   return value
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLocaleLowerCase()
     .replace(/[^a-z0-9]/g, '')
+}
+
+function normalizedTitleAliases(value: string): string[] {
+  const normalized = normalizedTitle(value)
+  const withoutVolume = normalized.replace(/(?:vol(?:ume)?|book|part)(?:\d+|[ivxlcdm]+)$/, '')
+  return [...new Set([normalized, withoutVolume].filter((title) => title.length > 0))]
 }
 
 function chapterNumber(chapter: ChapterLink): number | null {
@@ -48,17 +53,21 @@ function fileMatchesChapter(file: LibraryFileRecord, number: number | null, titl
 }
 
 export function recommendArchiveCoverage(
-  item: Pick<DiscoveryQueueItem, 'title' | 'trackerRow' | 'chapters'>,
+  item: Pick<DiscoveryQueueItem, 'title' | 'alternativeNames' | 'trackerRow' | 'chapters'>,
   files: LibraryFileRecord[],
   includeOverlap = false,
   overlapCount = 10
 ): ArchiveRecommendation {
+  const trackerAlternativeNames = item.trackerRow?.alternativeNames
+    ?.split(/[,;|\r\n]+/)
+    .map((name) => name.trim()) ?? []
   const titleKeys = new Set(
-    [item.title, item.trackerRow?.title ?? '']
-      .map(normalizedTitle)
-      .filter((title) => title.length > 0)
+    [item.title, ...item.alternativeNames, item.trackerRow?.title ?? '', ...trackerAlternativeNames]
+      .flatMap(normalizedTitleAliases)
   )
-  const novelFiles = files.filter((file) => titleKeys.has(normalizedTitle(file.novelTitle)))
+  const novelFiles = files.filter((file) =>
+    normalizedTitleAliases(file.novelTitle).some((title) => titleKeys.has(title))
+  )
   const chapters = item.chapters.map((chapter) => {
     const number = chapterNumber(chapter)
     const matches = novelFiles.filter((file) => fileMatchesChapter(file, number, chapter.title))

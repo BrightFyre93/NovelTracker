@@ -1,33 +1,34 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
-import type { AppSettings, LibraryFileRecord, LibraryIndex, LibraryProgress } from '../../../shared/contracts'
-import { DEFAULT_EPUB_CSS, MAX_EPUB_CSS_LENGTH } from '../../../shared/defaultEpubCss'
+import ProgressBar from 'primevue/progressbar'
+import type { EpubMergeProgress, LibraryFileRecord, LibraryIndex } from '../../../shared/contracts'
 import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
+const emit = defineEmits<{
+  openConfiguration: []
+}>()
+
 const libraryState = useLibraryStore()
-const settings = ref<AppSettings>({
-  libraryRoot: '',
-  trackerCsvPath: '',
-  outputDirectory: '',
-  maxSimultaneousDownloads: 2,
-  epubCss: DEFAULT_EPUB_CSS,
-  appTheme: 'light'
-})
-const epubCssDraft = ref(DEFAULT_EPUB_CSS)
-const savingEpubCss = ref(false)
-const epubCssDirty = computed(() => epubCssDraft.value !== settings.value.epubCss)
-const index = ref<LibraryIndex | null>(null)
+const libraryRoot = ref('')
+const outputDirectory = ref('')
+const index = shallowRef<LibraryIndex | null>(null)
+const backupIndex = shallowRef<LibraryIndex | null>(null)
 const search = ref('')
 const selectedNovel = ref('')
 const selectedFileId = ref('')
 const includePdfs = ref(false)
+const restoringBackup = ref(false)
+const merging = ref(false)
+const mergeProgress = ref<EpubMergeProgress | null>(null)
+const mergeFileIds = ref<string[]>([])
+const mergeFilename = ref('')
 const correctedTitle = ref('')
 const correctedCoverage = ref('')
-const busy = computed(() => libraryState.scanning)
+const busy = computed(() => libraryState.scanning || restoringBackup.value || merging.value)
 const error = ref('')
 const success = ref('')
 const visibleFileLimit = 100
@@ -81,34 +82,84 @@ const selectedFile = computed(() =>
   selectedGroup.value?.files.find((file) => file.id === selectedFileId.value) ?? null
 )
 const selectedCoverageWarnings = computed(() => selectedGroup.value?.coverage.warnings ?? [])
+const selectedMergeFiles = computed(() =>
+  (index.value?.files ?? [])
+    .filter((file) => mergeFileIds.value.includes(file.id))
+    .sort((left, right) => {
+      const leftStart = left.chapterNumbers[0] ?? left.filenameRange?.start ?? Number.MAX_SAFE_INTEGER
+      const rightStart = right.chapterNumbers[0] ?? right.filenameRange?.start ?? Number.MAX_SAFE_INTEGER
+      return leftStart - rightStart || left.filename.localeCompare(right.filename)
+    })
+)
 const formatCounts = computed(() => ({
   epubs: (index.value?.files ?? []).filter((file) => file.format === 'EPUB').length,
   pdfs: (index.value?.files ?? []).filter((file) => file.format === 'PDF').length
 }))
 
 let removeProgressListener: (() => void) | undefined
+let removeMergeProgressListener: (() => void) | undefined
 
 onMounted(async () => {
   removeProgressListener = window.novelTracker.onLibraryProgress((value) => {
     libraryState.progress = value
   })
+  removeMergeProgressListener = window.novelTracker.onLibraryEpubMergeProgress((value) => {
+    mergeProgress.value = value
+  })
+  let configuredRoot = ''
   try {
-    settings.value = await window.novelTracker.getSettings()
-    epubCssDraft.value = settings.value.epubCss
-    const savedIndex = await window.novelTracker.getLibraryIndex()
-    index.value = savedIndex && (!settings.value.libraryRoot || savedIndex.libraryRoot === settings.value.libraryRoot)
-      ? savedIndex
-      : null
-    if (index.value) {
-      settings.value.libraryRoot ||= index.value.libraryRoot
-      selectFirstNovel()
-    }
+    const settings = await window.novelTracker.getSettings()
+    configuredRoot = settings.libraryRoot
+    libraryRoot.value = configuredRoot
+    outputDirectory.value = settings.outputDirectory
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   }
+  try {
+    const savedIndex = await window.novelTracker.getLibraryIndex()
+    index.value = savedIndex && (!configuredRoot || savedIndex.libraryRoot === configuredRoot)
+      ? savedIndex
+      : null
+    if (index.value) {
+      if (!libraryRoot.value) libraryRoot.value = index.value.libraryRoot
+      selectFirstNovel()
+    }
+  } catch (reason) {
+    if (!error.value) error.value = reason instanceof Error ? reason.message : String(reason)
+  }
+  try {
+    backupIndex.value = await window.novelTracker.getLibraryIndexBackup()
+  } catch (reason) {
+    if (!error.value) error.value = reason instanceof Error ? reason.message : String(reason)
+  }
 })
 
-onUnmounted(() => removeProgressListener?.())
+onUnmounted(() => {
+  removeProgressListener?.()
+  removeMergeProgressListener?.()
+})
+
+const mergeProgressSteps = [
+  { label: 'Read, extract, and combine source chapters', end: 75 },
+  { label: 'Build EPUB package', end: 94 },
+  { label: 'Validate EPUB contents', end: 99 },
+  { label: 'Write output file', end: 100 }
+] as const
+
+function mergeProgressStepStatus(index: number): 'done' | 'active' | 'pending' | 'failed' {
+  const progress = mergeProgress.value
+  const step = mergeProgressSteps[index]
+  if (!progress || !step) return 'pending'
+  if (progress.stage === 'complete') return 'done'
+  if (progress.stage === 'cancelled') return 'pending'
+  const start = index === 0 ? 0 : mergeProgressSteps[index - 1]?.end ?? 0
+  if (progress.stage === 'failed' && progress.percentage >= start && progress.percentage < step.end) {
+    return 'failed'
+  }
+  if (progress.percentage >= step.end) return 'done'
+  if (progress.percentage >= start) return 'active'
+  return 'pending'
+}
 
 function selectFirstNovel(): void {
   if (!selectedNovel.value && novelSummaries.value.length > 0) {
@@ -116,74 +167,7 @@ function selectFirstNovel(): void {
   }
 }
 
-async function chooseLibraryRoot(): Promise<void> {
-  error.value = ''
-  try {
-    const directory = await window.novelTracker.chooseLibraryRoot()
-    if (directory) {
-      const previousRoot = settings.value.libraryRoot
-      settings.value = await window.novelTracker.getSettings()
-      if (directory !== previousRoot) {
-        index.value = null
-        selectedNovel.value = ''
-        selectedFileId.value = ''
-      }
-      success.value = 'Library root saved.'
-    }
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  }
-}
-
-async function chooseTrackerCsv(): Promise<void> {
-  error.value = ''
-  try {
-    const path = await window.novelTracker.chooseTrackerCsv()
-    if (path) {
-      settings.value = await window.novelTracker.getSettings()
-      success.value = 'Tracker CSV saved. It will only be read by the app.'
-    }
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  }
-}
-
-async function chooseOutputDirectory(): Promise<void> {
-  error.value = ''
-  try {
-    const directory = await window.novelTracker.chooseOutputDirectory()
-    if (directory) settings.value = await window.novelTracker.getSettings()
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  }
-}
-
-async function saveEpubCss(css = epubCssDraft.value): Promise<void> {
-  error.value = ''
-  success.value = ''
-  savingEpubCss.value = true
-  try {
-    const result = await window.novelTracker.updateEpubCss(css)
-    if (!result.ok) {
-      error.value = result.error
-      return
-    }
-    settings.value = result.value
-    epubCssDraft.value = result.value.epubCss
-    success.value = 'EPUB stylesheet saved. Existing queued jobs keep their saved stylesheet.'
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  } finally {
-    savingEpubCss.value = false
-  }
-}
-
-async function resetEpubCss(): Promise<void> {
-  epubCssDraft.value = DEFAULT_EPUB_CSS
-  await saveEpubCss(DEFAULT_EPUB_CSS)
-}
-
-async function scan(): Promise<void> {
+async function scan(forceRebuild = false): Promise<void> {
   error.value = ''
   success.value = ''
   libraryState.progress = null
@@ -191,18 +175,26 @@ async function scan(): Promise<void> {
   libraryState.cancelling = false
   libraryState.scanning = true
   try {
-    const result = await window.novelTracker.scanLibrary()
+    const result = await window.novelTracker.scanLibrary(forceRebuild)
     if (!result.ok) {
       error.value = result.error
       return
     }
     index.value = result.value
+    backupIndex.value = await window.novelTracker.getLibraryIndexBackup()
     selectedNovel.value = ''
     selectedFileId.value = ''
+    mergeFileIds.value = []
+    mergeFilename.value = ''
     selectFirstNovel()
-    success.value = `Indexed ${result.value.files.length.toLocaleString()} files. ${
-      result.value.scanErrors ? `${result.value.scanErrors.toLocaleString()} files need attention.` : ''
-    }`
+    const cacheSummary = result.value.scanSummary
+    const cacheMessage = cacheSummary
+      ? ` Reused metadata for ${cacheSummary.reusedFiles.toLocaleString()} files; inspected ${cacheSummary.inspectedFiles.toLocaleString()}.`
+      : ''
+    const errorMessage = result.value.scanErrors
+      ? ` ${result.value.scanErrors.toLocaleString()} files need attention.`
+      : ''
+    success.value = `${forceRebuild ? 'Rebuilt' : 'Indexed'} ${result.value.files.length.toLocaleString()} files.${cacheMessage}${errorMessage}`
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
@@ -210,6 +202,36 @@ async function scan(): Promise<void> {
     libraryState.cancelling = false
     libraryState.progress = null
     libraryState.cancelError = ''
+  }
+}
+
+async function restoreBackup(): Promise<void> {
+  if (!backupIndex.value || restoringBackup.value) return
+  if (!window.confirm('Restore the saved library index backup? The current index will be preserved as the new backup.')) {
+    return
+  }
+  error.value = ''
+  success.value = ''
+  restoringBackup.value = true
+  try {
+    const result = await window.novelTracker.restoreLibraryIndexBackup()
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    index.value = result.value
+    libraryRoot.value = result.value.libraryRoot
+    selectedNovel.value = ''
+    selectedFileId.value = ''
+    mergeFileIds.value = []
+    mergeFilename.value = ''
+    selectFirstNovel()
+    backupIndex.value = await window.novelTracker.getLibraryIndexBackup()
+    success.value = 'Library index backup restored.'
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    restoringBackup.value = false
   }
 }
 
@@ -223,6 +245,81 @@ function selectFile(file: LibraryFileRecord): void {
   selectedFileId.value = file.id
   correctedTitle.value = file.novelTitle
   correctedCoverage.value = ''
+}
+
+function toggleMergeFile(file: LibraryFileRecord): void {
+  if (mergeFileIds.value.includes(file.id)) {
+    mergeFileIds.value = mergeFileIds.value.filter((id) => id !== file.id)
+  } else if (mergeFileIds.value.length < 20) {
+    mergeFileIds.value = [...mergeFileIds.value, file.id]
+  } else {
+    error.value = 'Select no more than 20 EPUBs for one merge.'
+    return
+  }
+  const selected = (index.value?.files ?? []).filter((candidate) => mergeFileIds.value.includes(candidate.id))
+  if (selected.length === 0) {
+    mergeFilename.value = ''
+    return
+  }
+  const numbers = selected.flatMap((candidate) =>
+    candidate.chapterNumbers.length > 0
+      ? candidate.chapterNumbers
+      : candidate.filenameRange
+        ? [candidate.filenameRange.start, candidate.filenameRange.end]
+        : []
+  )
+  const first = numbers.length ? numbers.reduce((minimum, number) => Math.min(minimum, number), Infinity) : ''
+  const last = numbers.length ? numbers.reduce((maximum, number) => Math.max(maximum, number), -Infinity) : ''
+  mergeFilename.value = `${selectedGroup.value?.title ?? 'Merged novel'} ${first}-${last}.epub`
+}
+
+async function mergeSelectedEpubs(): Promise<void> {
+  if (mergeFileIds.value.length < 2) return
+  error.value = ''
+  success.value = ''
+  merging.value = true
+  mergeProgress.value = {
+    stage: 'reading',
+    percentage: 0,
+    message: 'Starting EPUB merge…'
+  }
+  try {
+    const result = await window.novelTracker.mergeLibraryEpubs([...mergeFileIds.value], mergeFilename.value)
+    if (!result.ok) {
+      if ('cancelled' in result) {
+        mergeProgress.value = {
+          stage: 'cancelled',
+          percentage: mergeProgress.value?.percentage ?? 0,
+          message: 'Merge cancelled. The existing output file was not changed.'
+        }
+        return
+      }
+      error.value = result.error
+      mergeProgress.value = {
+        stage: 'failed',
+        percentage: mergeProgress.value?.percentage ?? 0,
+        message: 'Merge stopped before completion.'
+      }
+      return
+    }
+    const overlap = result.value.duplicateChapterCount
+      ? ` Removed ${result.value.duplicateChapterCount.toLocaleString()} overlapping chapter(s); the earlier-range copy was kept.`
+      : ''
+    const conflicts = result.value.conflictingChapterCount
+      ? ` ${result.value.conflictingChapterCount.toLocaleString()} overlap(s) had different text; the earlier-range copy was kept.`
+      : ''
+    success.value = `Created ${result.value.chapterCount.toLocaleString()} chapters at ${result.value.outputPath}.${overlap}${conflicts}`
+    mergeFileIds.value = []
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+    mergeProgress.value = {
+      stage: 'failed',
+      percentage: mergeProgress.value?.percentage ?? 0,
+      message: 'Merge stopped before completion.'
+    }
+  } finally {
+    merging.value = false
+  }
 }
 
 function parseCoverage(value: string): number[] | undefined {
@@ -286,64 +383,6 @@ function chapterRangeLabel(start: number, end: number): string {
 
 <template>
   <section class="library-page">
-    <section class="card library-settings" aria-labelledby="library-settings-heading">
-      <div class="section-heading">
-        <div>
-          <p class="step-label">LOCAL SETTINGS</p>
-          <h3 id="library-settings-heading">Library and tracker paths</h3>
-        </div>
-      </div>
-      <div class="library-path-grid">
-        <div class="library-path">
-          <span class="field-label">Historical library root</span>
-          <span class="library-path-value">{{ settings.libraryRoot || 'Not configured' }}</span>
-          <Button label="Choose library" severity="secondary" outlined size="small" :disabled="busy" @click="chooseLibraryRoot" />
-        </div>
-        <div class="library-path">
-          <span class="field-label">Novel tracker CSV · read-only</span>
-          <span class="library-path-value">{{ settings.trackerCsvPath || 'Not configured' }}</span>
-          <Button label="Choose CSV" severity="secondary" outlined size="small" :disabled="busy" @click="chooseTrackerCsv" />
-        </div>
-        <div class="library-path">
-          <span class="field-label">EPUB output folder</span>
-          <span class="library-path-value">{{ settings.outputDirectory || 'Not configured' }}</span>
-          <Button label="Choose output" severity="secondary" outlined size="small" :disabled="busy" @click="chooseOutputDirectory" />
-        </div>
-      </div>
-      <details class="epub-css-settings">
-        <summary>EPUB stylesheet</summary>
-        <p class="help-text">Applies to new EPUB jobs. Existing queued jobs keep their saved stylesheet.</p>
-        <textarea
-          v-model="epubCssDraft"
-          class="epub-css-editor"
-          aria-label="EPUB stylesheet CSS"
-          spellcheck="false"
-          :maxlength="MAX_EPUB_CSS_LENGTH"
-          :disabled="savingEpubCss"
-        />
-        <div class="epub-css-actions">
-          <span>{{ epubCssDraft.length.toLocaleString() }} / {{ MAX_EPUB_CSS_LENGTH.toLocaleString() }} characters</span>
-          <div>
-            <Button
-              label="Reset to default"
-              severity="secondary"
-              outlined
-              size="small"
-              :disabled="savingEpubCss || (epubCssDraft === DEFAULT_EPUB_CSS && settings.epubCss === DEFAULT_EPUB_CSS)"
-              @click="resetEpubCss"
-            />
-            <Button
-              label="Save stylesheet"
-              size="small"
-              :loading="savingEpubCss"
-              :disabled="savingEpubCss || !epubCssDirty"
-              @click="saveEpubCss()"
-            />
-          </div>
-        </div>
-      </details>
-    </section>
-
     <section class="card" aria-labelledby="library-heading">
       <div class="section-heading">
         <div>
@@ -351,11 +390,38 @@ function chapterRangeLabel(start: number, end: number): string {
           <h3 id="library-heading">Library index</h3>
         </div>
         <div class="library-actions">
-          <Button label="Scan / rescan" icon="pi pi-refresh" :disabled="busy || !settings.libraryRoot" @click="scan" />
+          <Button
+            label="Configuration"
+            icon="pi pi-cog"
+            severity="secondary"
+            outlined
+            @click="emit('openConfiguration')"
+          />
+          <Button label="Scan / rescan" icon="pi pi-refresh" :disabled="busy || !libraryRoot" @click="scan()" />
+          <Button
+            label="Rebuild index"
+            icon="pi pi-sync"
+            severity="secondary"
+            outlined
+            title="Reinspect files without reusing the cached index. The current index is backed up first."
+            :disabled="busy || !libraryRoot"
+            @click="scan(true)"
+          />
+          <Button
+            v-if="backupIndex"
+            label="Restore backup"
+            icon="pi pi-history"
+            severity="secondary"
+            outlined
+            :title="`Last index backup: ${new Date(backupIndex.scannedAt).toLocaleString()}`"
+            :disabled="busy"
+            :loading="restoringBackup"
+            @click="restoreBackup"
+          />
         </div>
       </div>
       <p class="help-text library-note">
-        Scans are read-only. EPUBs are inspected for metadata and chapter lists; PDFs are indexed from their content or chapter filenames.
+        Set or change the historical library root in Configuration. Scans are read-only: EPUBs are inspected for metadata and chapter lists; PDFs are indexed from their content or chapter filenames.
       </p>
       <div v-if="index" class="library-summary">
         <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>visible novels</span></div>
@@ -365,7 +431,11 @@ function chapterRangeLabel(start: number, end: number): string {
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
       <Message v-if="!index && !busy" severity="info" :closable="false" class="feedback">
-        Choose your library folder, then scan it. The scan will not move or modify files.
+        {{ backupIndex
+          ? 'No current index is loaded. Restore the saved backup or rebuild the index from the configured library root.'
+          : libraryRoot
+            ? 'Your library root is configured. Scan it to build the index; the scan will not move or modify files.'
+            : 'Go to Configuration and set a historical library root, then scan it here. The scan will not move or modify files.' }}
       </Message>
     </section>
 
@@ -385,7 +455,7 @@ function chapterRangeLabel(start: number, end: number): string {
             :key="novel.key"
             class="novel-choice"
             :class="{ active: selectedNovel === novel.key }"
-            @click="selectedNovel = novel.key; selectedFileId = ''"
+            @click="selectedNovel = novel.key; selectedFileId = ''; mergeFileIds = []; mergeFilename = ''"
           >
             <span class="novel-choice-title">{{ novel.title }}</span>
             <span class="novel-choice-count">
@@ -441,6 +511,70 @@ function chapterRangeLabel(start: number, end: number): string {
           </p>
         </div>
         <p v-else class="empty-state">Choose a novel to inspect its files.</p>
+
+        <section v-if="selectedGroup && selectedGroup.files.some((file) => file.format === 'EPUB')" class="library-merge-panel">
+          <strong>Combine existing EPUBs offline</strong>
+          <p class="help-text">
+            Select at least two EPUBs. They are ordered by chapter range; overlapping chapter numbers are included once, preferring the lower-range file. No network requests are made. PDFs are not supported.
+          </p>
+          <p class="file-evidence">{{ mergeFileIds.length }} of 20 EPUBs selected</p>
+          <ul v-if="selectedMergeFiles.length" class="merge-source-list">
+            <li v-for="file in selectedMergeFiles" :key="file.id">
+              {{ file.filename }} · {{ coverageLabel(file) }}
+            </li>
+          </ul>
+          <div class="merge-filename-row">
+            <InputText v-model="mergeFilename" class="full-input" aria-label="Merged EPUB filename" placeholder="Combined EPUB filename" />
+            <Button
+              label="Create merged EPUB"
+              icon="pi pi-clone"
+              :loading="merging"
+              :disabled="busy || mergeFileIds.length < 2 || !outputDirectory"
+              @click="mergeSelectedEpubs"
+            />
+          </div>
+          <div
+            v-if="mergeProgress"
+            class="merge-progress-panel"
+            role="status"
+            aria-live="polite"
+          >
+            <div class="merge-progress-heading">
+              <strong>{{
+                mergeProgress.stage === 'complete'
+                  ? 'Merge complete'
+                  : mergeProgress.stage === 'cancelled'
+                    ? 'Merge cancelled'
+                    : mergeProgress.stage === 'failed'
+                      ? 'Merge stopped'
+                      : 'Merging EPUBs'
+              }}</strong>
+              <span>{{ Math.round(mergeProgress.percentage) }}%</span>
+            </div>
+            <ProgressBar :value="mergeProgress.percentage" :show-value="false" />
+            <p class="merge-progress-message">{{ mergeProgress.message }}</p>
+            <ol class="merge-progress-steps">
+              <li
+                v-for="(step, stepIndex) in mergeProgressSteps"
+                :key="step.label"
+                :class="`is-${mergeProgressStepStatus(stepIndex)}`"
+              >
+                <i
+                  :class="{
+                    'pi pi-check-circle': mergeProgressStepStatus(stepIndex) === 'done',
+                    'pi pi-spin pi-spinner': mergeProgressStepStatus(stepIndex) === 'active' && merging,
+                    'pi pi-exclamation-circle': mergeProgressStepStatus(stepIndex) === 'failed',
+                    'pi pi-circle': mergeProgressStepStatus(stepIndex) === 'pending' ||
+                      (mergeProgressStepStatus(stepIndex) === 'active' && !merging)
+                  }"
+                  aria-hidden="true"
+                />
+                <span>{{ step.label }}</span>
+              </li>
+            </ol>
+          </div>
+          <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration before merging.</p>
+        </section>
 
         <details
           v-if="selectedGroup && (selectedCoverageWarnings.length || selectedGroup.coverage.filenameEvidenceCount)"
@@ -517,6 +651,16 @@ function chapterRangeLabel(start: number, end: number): string {
             <div class="toolbar-actions">
               <Button label="Open" severity="secondary" text size="small" @click="openFile(selectedFile, false)" />
               <Button label="Show in folder" severity="secondary" text size="small" @click="openFile(selectedFile, true)" />
+              <Button
+                v-if="selectedFile.format === 'EPUB'"
+                :label="mergeFileIds.includes(selectedFile.id) ? 'Remove from merge' : 'Add to merge'"
+                :icon="mergeFileIds.includes(selectedFile.id) ? 'pi pi-minus-circle' : 'pi pi-plus-circle'"
+                severity="secondary"
+                text
+                size="small"
+                :disabled="busy"
+                @click="toggleMergeFile(selectedFile)"
+              />
             </div>
           </div>
           <p class="file-evidence">

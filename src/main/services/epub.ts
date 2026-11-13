@@ -7,18 +7,18 @@ import type {
   ChapterContent,
   ChapterContentBlock,
   ChapterImage,
+  EpubMergeProgress,
   EpubNovelMetadata
 } from '../../shared/contracts'
-import { DEFAULT_EPUB_CSS } from '../../shared/defaultEpubCss'
 import {
   EPUB_IMAGE_TYPES,
+  DEFAULT_EPUB_CSS,
+  EPUB_MIMETYPE,
   MAX_IMAGE_BYTES,
   MAX_TOTAL_EPUB_IMAGE_BYTES,
   type EpubImageMediaType
-} from '../../shared/epubImages'
+} from '../../shared/constants'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../../shared/epubFilename'
-
-const EPUB_MIMETYPE = 'application/epub+zip'
 
 function escapeXml(value: string): string {
   return value
@@ -267,7 +267,8 @@ export async function buildEpubBuffer(
     source: '',
     novelStatus: '',
     sourceUrl: ''
-  }
+  },
+  onProgress?: (progress: EpubMergeProgress) => void
 ): Promise<Buffer> {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
 
@@ -312,16 +313,31 @@ export async function buildEpubBuffer(
     )
   })
 
+  onProgress?.({ stage: 'packaging', percentage: 0, message: 'Compressing EPUB files…' })
+  let lastPackagePercentage = -1
   const buffer = await zip.generateAsync({
     type: 'nodebuffer',
     compression: 'DEFLATE',
     compressionOptions: { level: 6 }
+  }, (metadata) => {
+    const percentage = Math.round(metadata.percent)
+    if (percentage === lastPackagePercentage) return
+    lastPackagePercentage = percentage
+    onProgress?.({
+      stage: 'packaging',
+      percentage,
+      message: `Compressing EPUB files · ${percentage}%`
+    })
   })
-  await validateEpubBuffer(buffer, chapters.length)
+  await validateEpubBuffer(buffer, chapters.length, onProgress)
   return buffer
 }
 
-export async function validateEpubBuffer(buffer: Buffer, chapterCount: number): Promise<void> {
+export async function validateEpubBuffer(
+  buffer: Buffer,
+  chapterCount: number,
+  onProgress?: (progress: EpubMergeProgress) => void
+): Promise<void> {
   const archive = await JSZip.loadAsync(buffer)
   const required = [
     'mimetype',
@@ -357,7 +373,9 @@ export async function validateEpubBuffer(buffer: Buffer, chapterCount: number): 
 
   const imageFiles = names.filter((name) => /^images\/[a-f0-9]{64}\.(?:jpg|png|gif|webp)$/.test(name))
   const xhtmlFiles = ['text/novel-info.xhtml', ...chapterFiles]
-  for (const path of xhtmlFiles) {
+  onProgress?.({ stage: 'validating', percentage: 0, message: 'Validating EPUB resources…' })
+  const xhtmlUpdateInterval = Math.max(1, Math.ceil(xhtmlFiles.length / 100))
+  for (const [index, path] of xhtmlFiles.entries()) {
     const contents = await archive.file(path)!.async('string')
     const imageReferences = [...contents.matchAll(/<img\b[^>]*\bsrc="\.\.\/([^"]+)"/g)]
     for (const [, imagePath] of imageReferences) {
@@ -365,6 +383,13 @@ export async function validateEpubBuffer(buffer: Buffer, chapterCount: number): 
     }
     if (/<img\b[^>]*\bsrc="(?!\.\.\/)[^"]+"/.test(contents)) {
       throw new Error(`EPUB validation failed: ${path} contains a nonlocal image reference.`)
+    }
+    if ((index + 1) % xhtmlUpdateInterval === 0 || index + 1 === xhtmlFiles.length) {
+      onProgress?.({
+        stage: 'validating',
+        percentage: Math.round(((index + 1) / xhtmlFiles.length) * 80),
+        message: `Validating chapter resources · ${index + 1} of ${xhtmlFiles.length} documents`
+      })
     }
   }
 
@@ -374,10 +399,18 @@ export async function validateEpubBuffer(buffer: Buffer, chapterCount: number): 
   }
 
   const xmlFiles = ['META-INF/container.xml', 'package.opf', 'nav.xhtml', ...xhtmlFiles]
-  for (const path of xmlFiles) {
+  const xmlUpdateInterval = Math.max(1, Math.ceil(xmlFiles.length / 20))
+  for (const [index, path] of xmlFiles.entries()) {
     const contents = await archive.file(path)!.async('string')
     const result = XMLValidator.validate(contents)
     if (result !== true) throw new Error(`EPUB validation failed: invalid XML in ${path}.`)
+    if ((index + 1) % xmlUpdateInterval === 0 || index + 1 === xmlFiles.length) {
+      onProgress?.({
+        stage: 'validating',
+        percentage: 80 + Math.round(((index + 1) / xmlFiles.length) * 20),
+        message: `Checking EPUB XML · ${index + 1} of ${xmlFiles.length} documents`
+      })
+    }
   }
 }
 
@@ -430,10 +463,14 @@ export async function writeEpub(
     source: '',
     novelStatus: '',
     sourceUrl: ''
-  }
+  },
+  onProgress?: (progress: EpubMergeProgress) => void
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
-  const buffer = await buildEpubBuffer(title, author, language, chapters, css, metadata)
+  const buffer = await buildEpubBuffer(title, author, language, chapters, css, metadata, onProgress)
   if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
   const filename = createEpubFilename(title, chapters, requestedFilename)
-  return publishEpub(outputDirectory, filename, buffer, signal)
+  onProgress?.({ stage: 'saving', percentage: 0, message: `Writing ${filename}…` })
+  const result = await publishEpub(outputDirectory, filename, buffer, signal)
+  onProgress?.({ stage: 'saving', percentage: 100, message: 'Writing complete.' })
+  return result
 }

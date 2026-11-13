@@ -7,7 +7,9 @@ import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
 import type { DiscoveryQueueItem, DownloadHistoryEntry, TrackerNovel } from '../../shared/contracts'
+import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
 import { suggestEpubFilename } from '../../shared/epubFilename'
+import ConfigurationView from './components/ConfigurationView.vue'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
 import { useDownloadStore } from './stores/download'
@@ -21,9 +23,7 @@ const {
   progress: libraryProgress,
   cancelError: libraryCancelError
 } = storeToRefs(libraryState)
-const activeView = ref<'create' | 'queue' | 'library'>('create')
-const appTheme = ref<'light' | 'dark'>('light')
-const themeSaving = ref(false)
+const activeView = ref<'create' | 'queue' | 'library' | 'configuration'>('create')
 const browserBusy = ref(false)
 const browserAssistOpen = ref(false)
 const browserDiscoveryRunning = ref(false)
@@ -281,16 +281,6 @@ async function cancelLibraryScan(): Promise<void> {
   }
 }
 
-async function chooseOutputDirectory(): Promise<void> {
-  store.error = ''
-  try {
-    const directory = await window.novelTracker.chooseOutputDirectory()
-    if (directory) store.outputDirectory = directory
-  } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
-  }
-}
-
 async function openTrackerPicker(): Promise<void> {
   trackerVisible.value = true
   trackerSearch.value = ''
@@ -337,25 +327,7 @@ async function openCreateView(): Promise<void> {
 }
 
 function applyAppTheme(theme: 'light' | 'dark'): void {
-  appTheme.value = theme
   document.documentElement.dataset.theme = theme
-}
-
-async function toggleAppTheme(): Promise<void> {
-  if (themeSaving.value) return
-  const previousTheme = appTheme.value
-  const nextTheme = previousTheme === 'light' ? 'dark' : 'light'
-  applyAppTheme(nextTheme)
-  themeSaving.value = true
-  try {
-    const result = await window.novelTracker.updateAppTheme(nextTheme)
-    if (!result.ok) throw new Error(result.error)
-  } catch (error) {
-    applyAppTheme(previousTheme)
-    store.error = error instanceof Error ? error.message : String(error)
-  } finally {
-    themeSaving.value = false
-  }
 }
 
 function resetDiscoveryForm(): void {
@@ -460,7 +432,7 @@ watch(chapters, (updatedChapters) => {
     queueSelectionTimer = undefined
     if (store.queueItemId !== id || activeView.value !== 'create') return
     void persistQueueSelection(id, selectedUrls)
-  }, 250)
+  }, QUEUE_SELECTION_SAVE_DEBOUNCE_MS)
 }, { deep: true })
 
 async function createEpub(): Promise<void> {
@@ -536,18 +508,8 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <button :class="{ active: activeView === 'create' }" @click="openCreateView">Prepare EPUB</button>
         <button :class="{ active: activeView === 'queue' }" @click="activeView = 'queue'">Queue</button>
         <button :class="{ active: activeView === 'library' }" @click="activeView = 'library'">Library</button>
+        <button :class="{ active: activeView === 'configuration' }" @click="activeView = 'configuration'">Configuration</button>
       </nav>
-      <button
-        class="theme-toggle"
-        type="button"
-        :aria-label="`Switch to ${appTheme === 'light' ? 'dark' : 'light'} mode`"
-        :title="`Switch to ${appTheme === 'light' ? 'dark' : 'light'} mode`"
-        :disabled="themeSaving"
-        @click="toggleAppTheme"
-      >
-        <i :class="appTheme === 'light' ? 'pi pi-moon' : 'pi pi-sun'" aria-hidden="true"></i>
-        <span>{{ appTheme === 'light' ? 'Dark mode' : 'Light mode' }}</span>
-      </button>
     </header>
 
     <template v-if="activeView === 'create'">
@@ -653,7 +615,7 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
             </div>
           </div>
           <p v-if="!trackerLoading && filteredTrackerNovels.length === 0" class="empty-state">
-            {{ trackerNovels.length ? 'No matching tracker rows.' : 'No tracker rows loaded. Configure a CSV in Library settings.' }}
+            {{ trackerNovels.length ? 'No matching tracker rows.' : 'No tracker rows loaded. Configure a CSV in Configuration.' }}
           </p>
           <p v-if="trackerNovels.length > filteredTrackerNovels.length" class="help-text">
             Showing up to 100 matches. Refine the search to find other rows.
@@ -753,11 +715,18 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
           <div class="folder-summary">
             <span class="folder-icon" aria-hidden="true">↳</span>
             <div>
-              <span class="field-label">Output folder</span>
-              <span class="folder-path">{{ outputDirectory || 'Choose a folder on this device' }}</span>
+              <span class="field-label">Default EPUB output folder</span>
+              <span class="folder-path">{{ outputDirectory || 'Set a folder in Configuration' }}</span>
             </div>
           </div>
-          <Button label="Choose folder" icon="pi pi-folder-open" severity="secondary" outlined :disabled="busy" @click="chooseOutputDirectory" />
+          <Button
+            label="Configuration"
+            icon="pi pi-cog"
+            severity="secondary"
+            outlined
+            :disabled="busy"
+            @click="activeView = 'configuration'"
+          />
         </div>
         <div class="create-row">
           <p class="help-text">If an EPUB with this name already exists, it will be overwritten.</p>
@@ -794,7 +763,8 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
     <Message v-if="success" severity="success" :closable="false" class="feedback">{{ success }}</Message>
     </template>
     <QueueView v-else-if="activeView === 'queue'" @open-item="openQueueItem" />
-    <LibraryView v-else />
+    <LibraryView v-else-if="activeView === 'library'" @open-configuration="activeView = 'configuration'" />
+    <ConfigurationView v-else @theme-changed="applyAppTheme" />
   </main>
   <div
     v-if="libraryScanning"

@@ -7,11 +7,9 @@ import type {
   LibraryProgress,
   LibraryFolderState
 } from '../../shared/contracts'
+import { LIBRARY_FOLDERS, MAX_EPUB_INPUT_BYTES } from '../../shared/constants'
 import { inspectEpub } from './epubInspector'
 import { inspectPdf } from './pdfInspector'
-
-const LIBRARY_FOLDERS: LibraryFolderState[] = ['Completed', 'Downloaded', 'Sent', 'Old']
-const MAX_EPUB_BYTES = 256 * 1024 * 1024
 
 interface ScannableFile {
   path: string
@@ -22,6 +20,11 @@ interface ScannableFile {
   id: string
 }
 
+export interface LibraryScanOptions {
+  scanOldFolder: boolean
+  scanPdfs: boolean
+}
+
 function checkCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw new Error('Library scan cancelled.')
 }
@@ -30,11 +33,46 @@ function fileId(relativePath: string): string {
   return createHash('sha256').update(relativePath.toLowerCase()).digest('hex')
 }
 
+function normalizedRelativePath(relativePath: string): string {
+  return relativePath.replace(/[\\/]+/g, '/').toLocaleLowerCase()
+}
+
+async function matchesLibraryRoot(previousIndex: LibraryIndex | null, root: string): Promise<boolean> {
+  if (
+    !previousIndex ||
+    previousIndex.schemaVersion !== 1 ||
+    !Array.isArray(previousIndex.files) ||
+    typeof previousIndex.libraryRoot !== 'string'
+  ) {
+    return false
+  }
+  try {
+    const previousRoot = await realpath(previousIndex.libraryRoot)
+    return process.platform === 'win32'
+      ? previousRoot.toLocaleLowerCase() === root.toLocaleLowerCase()
+      : previousRoot === root
+  } catch {
+    const previousRoot = resolve(previousIndex.libraryRoot)
+    return process.platform === 'win32'
+      ? previousRoot.toLocaleLowerCase() === root.toLocaleLowerCase()
+      : previousRoot === root
+  }
+}
+
 function cachedFile(
   cached: LibraryFileRecord | undefined,
   file: ScannableFile
 ): LibraryFileRecord | undefined {
-  if (!cached || cached.size !== file.size || cached.modifiedAt !== file.modifiedAt) return undefined
+  if (
+    !cached ||
+    cached.size !== file.size ||
+    cached.modifiedAt !== file.modifiedAt ||
+    !Array.isArray(cached.chapterTitles) ||
+    !Array.isArray(cached.chapterNumbers) ||
+    !Array.isArray(cached.chapterLocations)
+  ) {
+    return undefined
+  }
   return { ...cached, path: file.path, relativePath: file.relativePath, folderState: file.folderState }
 }
 
@@ -46,7 +84,7 @@ function parseFilenameRange(value: string): { start: number; end: number } | nul
 function emptyFile(file: ScannableFile, error: unknown): LibraryFileRecord {
   const parts = file.relativePath.split(/[\\/]/)
   const filename = parts[parts.length - 1]
-  const isPdf = extname(filename).toLowerCase() === '.pdf'
+  const isPdf = extname(filename ?? '').toLowerCase() === '.pdf'
   const title = parts.length > 2 ? parts[1] : filename
   return {
     id: file.id,
@@ -78,7 +116,9 @@ async function enumerateFiles(
   signal: AbortSignal,
   onProgress: (progress: LibraryProgress) => void,
   currentFolderIndex: number,
-  filesFoundBefore: number
+  filesFoundBefore: number,
+  totalFolders: number,
+  options: LibraryScanOptions
 ): Promise<{ files: ScannableFile[]; errors: number }> {
   const files: ScannableFile[] = []
   let errors = 0
@@ -109,7 +149,12 @@ async function enumerateFiles(
           }
           if (!details.isFile()) continue
           const extension = extname(entry.name).toLowerCase()
-          if ((folder === 'Old' && extension !== '.pdf') || (folder !== 'Old' && extension !== '.epub')) continue
+          if (
+            (extension !== '.epub' && extension !== '.pdf') ||
+            (extension === '.pdf' && !options.scanPdfs)
+          ) {
+            continue
+          }
 
           const relativePath = relative(root, path)
           files.push({
@@ -124,7 +169,7 @@ async function enumerateFiles(
             onProgress({
               stage: 'scan',
               current: currentFolderIndex,
-              total: LIBRARY_FOLDERS.length,
+              total: totalFolders,
               discoveredFiles: filesFoundBefore + files.length,
               indexedFiles: 0,
               totalFiles: 0,
@@ -136,7 +181,7 @@ async function enumerateFiles(
           onProgress({
             stage: 'scan',
             current: currentFolderIndex,
-            total: LIBRARY_FOLDERS.length,
+            total: totalFolders,
             discoveredFiles: filesFoundBefore + files.length,
             indexedFiles: 0,
             totalFiles: 0,
@@ -158,39 +203,54 @@ export async function scanLibrary(
   libraryRoot: string,
   previousIndex: LibraryIndex | null,
   signal: AbortSignal,
-  onProgress: (progress: LibraryProgress) => void
+  onProgress: (progress: LibraryProgress) => void,
+  options: LibraryScanOptions
 ): Promise<LibraryIndex> {
   const root = await realpath(libraryRoot)
   const files: ScannableFile[] = []
   let scanErrors = 0
+  const folders = LIBRARY_FOLDERS.filter((folder) => folder !== 'Old' || options.scanOldFolder)
 
-  for (let index = 0; index < LIBRARY_FOLDERS.length; index += 1) {
+  for (let index = 0; index < folders.length; index += 1) {
     checkCancelled(signal)
-    const folder = LIBRARY_FOLDERS[index]
+    const folder = folders[index]
+    if (!folder) continue
     onProgress({
       stage: 'scan',
       current: index,
-      total: LIBRARY_FOLDERS.length,
+      total: folders.length,
       discoveredFiles: files.length,
       indexedFiles: 0,
       totalFiles: 0,
       message: `Scanning ${folder}…`
     })
-    const result = await enumerateFiles(root, folder, signal, onProgress, index + 1, files.length)
+    const result = await enumerateFiles(
+      root,
+      folder,
+      signal,
+      onProgress,
+      index + 1,
+      files.length,
+      folders.length,
+      options
+    )
     files.push(...result.files)
     scanErrors += result.errors
   }
 
-  const previousFiles = new Map(
-    (previousIndex?.libraryRoot === root ? previousIndex.files : []).map((file) => [file.id, file])
+  const canReusePreviousIndex = await matchesLibraryRoot(previousIndex, root)
+  const previousFiles = canReusePreviousIndex ? previousIndex?.files ?? [] : []
+  const previousFilesById = new Map(previousFiles.map((file) => [file.id, file]))
+  const previousFilesByPath = new Map(
+    previousFiles
+      .filter((file) => typeof file.relativePath === 'string')
+      .map((file) => [normalizedRelativePath(file.relativePath), file])
   )
-  const currentIds = new Set(files.map((file) => file.id))
-  const corrections = previousIndex?.libraryRoot === root
-    ? Object.fromEntries(
-        Object.entries(previousIndex.corrections ?? {}).filter(([id]) => currentIds.has(id))
-      )
-    : {}
+  const previousCorrections = canReusePreviousIndex ? previousIndex?.corrections ?? {} : {}
+  const corrections: LibraryIndex['corrections'] = {}
   const indexedFiles: LibraryFileRecord[] = []
+  let reusedFiles = 0
+  let inspectedFiles = 0
 
   onProgress({
     stage: 'inspect',
@@ -205,11 +265,16 @@ export async function scanLibrary(
   for (let index = 0; index < files.length; index += 1) {
     checkCancelled(signal)
     const file = files[index]
-    let record = cachedFile(previousFiles.get(file.id), file)
+    const previousFile = previousFilesById.get(file.id) ??
+      previousFilesByPath.get(normalizedRelativePath(file.relativePath))
+    let record = cachedFile(previousFile, file)
     if (!record) {
+      inspectedFiles += 1
       try {
-        if (file.folderState !== 'Old') {
-          if (file.size > MAX_EPUB_BYTES) throw new Error(`EPUB exceeds the ${MAX_EPUB_BYTES / (1024 * 1024)} MB inspection limit.`)
+        if (extname(file.path).toLowerCase() === '.epub') {
+          if (file.size > MAX_EPUB_INPUT_BYTES) {
+            throw new Error(`EPUB exceeds the ${MAX_EPUB_INPUT_BYTES / (1024 * 1024)} MB inspection limit.`)
+          }
           record = await inspectEpub(
             file.path,
             file.relativePath,
@@ -232,9 +297,13 @@ export async function scanLibrary(
         record = emptyFile(file, error)
         scanErrors += 1
       }
+    } else {
+      reusedFiles += 1
     }
 
-    const correction = corrections[file.id]
+    const correction = previousCorrections[file.id] ??
+      (previousFile ? previousCorrections[previousFile.id] : undefined)
+    if (correction) corrections[file.id] = correction
     if (correction?.novelTitle) record.novelTitle = correction.novelTitle
     if (correction?.chapterNumbers) {
       record.chapterNumbers = [...correction.chapterNumbers].sort((left, right) => left - right)
@@ -262,6 +331,7 @@ export async function scanLibrary(
     scannedAt: new Date().toISOString(),
     files: indexedFiles,
     corrections,
-    scanErrors
+    scanErrors,
+    scanSummary: { reusedFiles, inspectedFiles }
   }
 }
