@@ -28,6 +28,7 @@ const EMPTY_SETTINGS: AppSettings = {
   trackerCsvPath: '',
   outputDirectory: '',
   scanOldFolder: false,
+  scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   epubCss: DEFAULT_EPUB_CSS,
@@ -126,6 +127,9 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
   }
   if (typeof settings.scanOldFolder !== 'boolean') {
     throw new Error('The saved Old-folder scan option must be a boolean value.')
+  }
+  if (typeof settings.scanOldCompletedFolder !== 'boolean') {
+    throw new Error('The saved Old Completed-folder scan option must be a boolean value.')
   }
   if (
     !Number.isInteger(settings.discoveryFreshnessHours) ||

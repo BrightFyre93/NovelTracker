@@ -34,7 +34,7 @@ export const EPUB_IMAGE_TYPES = {
 
 export type EpubImageMediaType = keyof typeof EPUB_IMAGE_TYPES
 
-export const LIBRARY_FOLDERS = ['Completed', 'Downloaded', 'Sent', 'Old'] as const
+export const LIBRARY_FOLDERS = ['Completed', 'Downloaded', 'Sent', 'Old', 'Old Completed'] as const
 
 export const MAX_ACTIVE_DISCOVERIES = 2
 export const HTTP_REQUEST_TIMEOUT_MS = 20_000

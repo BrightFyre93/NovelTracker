@@ -23,6 +23,7 @@ const settings = ref<AppSettings>({
   trackerCsvPath: '',
   outputDirectory: '',
   scanOldFolder: false,
+  scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   epubCss: DEFAULT_EPUB_CSS,
@@ -33,6 +34,7 @@ const concurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS)
 const themeDraft = ref<AppSettings['appTheme']>('light')
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
 const scanOldFolderDraft = ref(false)
+const scanOldCompletedFolderDraft = ref(false)
 const concurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_DOWNLOADS - MIN_SIMULTANEOUS_DOWNLOADS + 1 },
   (_, index) => MIN_SIMULTANEOUS_DOWNLOADS + index
@@ -41,7 +43,10 @@ const freshnessDirty = computed(() => freshnessHoursDraft.value !== settings.val
 const concurrencyDirty = computed(() => concurrencyDraft.value !== settings.value.maxSimultaneousDownloads)
 const themeDirty = computed(() => themeDraft.value !== settings.value.appTheme)
 const epubCssDirty = computed(() => epubCssDraft.value !== settings.value.epubCss)
-const libraryScanOptionsDirty = computed(() => scanOldFolderDraft.value !== settings.value.scanOldFolder)
+const libraryScanOptionsDirty = computed(() =>
+  scanOldFolderDraft.value !== settings.value.scanOldFolder ||
+  scanOldCompletedFolderDraft.value !== settings.value.scanOldCompletedFolder
+)
 const freshnessValid = computed(() =>
   Number.isInteger(freshnessHoursDraft.value) &&
   freshnessHoursDraft.value >= MIN_DISCOVERY_FRESHNESS_HOURS &&
@@ -61,6 +66,7 @@ onMounted(async () => {
     freshnessHoursDraft.value = settings.value.discoveryFreshnessHours
     concurrencyDraft.value = settings.value.maxSimultaneousDownloads
     scanOldFolderDraft.value = settings.value.scanOldFolder
+    scanOldCompletedFolderDraft.value = settings.value.scanOldCompletedFolder
     themeDraft.value = settings.value.appTheme
     epubCssDraft.value = settings.value.epubCss
   } catch (reason) {
@@ -152,13 +158,17 @@ async function saveLibraryScanOptions(): Promise<void> {
   success.value = ''
   savingLibraryScanOptions.value = true
   try {
-    const result = await window.novelTracker.updateLibraryScanOptions(scanOldFolderDraft.value)
+    const result = await window.novelTracker.updateLibraryScanOptions(
+      scanOldFolderDraft.value,
+      scanOldCompletedFolderDraft.value
+    )
     if (!result.ok) {
       error.value = result.error
       return
     }
     settings.value = result.value
     scanOldFolderDraft.value = result.value.scanOldFolder
+    scanOldCompletedFolderDraft.value = result.value.scanOldCompletedFolder
     success.value = 'Library scan options saved. Rescan the library to apply them.'
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -328,6 +338,13 @@ async function resetEpubCss(): Promise<void> {
           <span>
             <strong>Scan the Old folder</strong>
             <small class="help-text">Include archived EPUB and AZW3 files in Old when scanning. AZW3 contents are not inspected. Off by default.</small>
+          </span>
+        </label>
+        <label class="configuration-setting configuration-toggle" for="scan-old-completed-folder">
+          <input id="scan-old-completed-folder" v-model="scanOldCompletedFolderDraft" type="checkbox" />
+          <span>
+            <strong>Scan the Old Completed folder</strong>
+            <small class="help-text">Include EPUB and AZW3 files in the separate Old Completed folder when scanning. AZW3 contents are not inspected. Off by default.</small>
           </span>
         </label>
       </div>

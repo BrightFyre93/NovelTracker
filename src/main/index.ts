@@ -1422,6 +1422,7 @@ async function createWindow(): Promise<void> {
       sandbox: true
     }
   })
+  mainWindow.maximize()
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   mainWindow.webContents.on('unresponsive', () => {
@@ -1583,13 +1584,17 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     'settings:library-scan-options',
-    async (_event, rawScanOldFolder: unknown): Promise<Result<AppSettings>> => {
+    async (_event, rawScanOldFolder: unknown, rawScanOldCompletedFolder: unknown): Promise<Result<AppSettings>> => {
       try {
         if (typeof rawScanOldFolder !== 'boolean') {
           throw new Error('The Old-folder scan option must be enabled or disabled.')
         }
+        if (typeof rawScanOldCompletedFolder !== 'boolean') {
+          throw new Error('The Old Completed-folder scan option must be enabled or disabled.')
+        }
         const settings = await readSettings(dataDirectory())
         settings.scanOldFolder = rawScanOldFolder
+        settings.scanOldCompletedFolder = rawScanOldCompletedFolder
         await writeSettings(dataDirectory(), settings)
         return { ok: true, value: settings }
       } catch (error) {
@@ -2485,7 +2490,8 @@ function registerIpcHandlers(): void {
           libraryRoot: settings.libraryRoot,
           dataDirectory: dataDirectory(),
           forceRebuild: rawForceRebuild,
-          scanOldFolder: settings.scanOldFolder
+          scanOldFolder: settings.scanOldFolder,
+          scanOldCompletedFolder: settings.scanOldCompletedFolder
         },
         resourceLimits: { maxOldGenerationSizeMb: 1024 }
       })

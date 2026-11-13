@@ -8,6 +8,7 @@ interface LibraryScanWorkerInput {
   dataDirectory: string
   forceRebuild?: boolean
   scanOldFolder: boolean
+  scanOldCompletedFolder: boolean
 }
 
 type LibraryScanWorkerMessage =
@@ -34,7 +35,10 @@ async function run(): Promise<void> {
     previousIndex,
     controller.signal,
     (progress) => port.postMessage({ type: 'progress', progress } satisfies LibraryScanWorkerMessage),
-    { scanOldFolder: input.scanOldFolder }
+    {
+      scanOldFolder: input.scanOldFolder,
+      scanOldCompletedFolder: input.scanOldCompletedFolder
+    }
   )
   if (controller.signal.aborted) throw new Error('Library scan cancelled.')
   port.postMessage({

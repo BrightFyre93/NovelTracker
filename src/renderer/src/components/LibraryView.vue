@@ -56,7 +56,8 @@ const novelSummaries = computed(() => {
         Completed: group.files.filter((file) => file.folderState === 'Completed').length,
         Downloaded: group.files.filter((file) => file.folderState === 'Downloaded').length,
         Sent: group.files.filter((file) => file.folderState === 'Sent').length,
-        Old: group.files.filter((file) => file.folderState === 'Old').length
+        Old: group.files.filter((file) => file.folderState === 'Old').length,
+        'Old Completed': group.files.filter((file) => file.folderState === 'Old Completed').length
       }
       const coverage = analyzeLibraryCoverage(group.files.filter((file) => file.format === 'EPUB'))
       return {
@@ -523,6 +524,7 @@ function chapterRangeLabel(start: number, end: number): string {
               <template v-if="novel.stateCounts.Sent"> · Sent {{ novel.stateCounts.Sent }}</template>
               <template v-if="novel.stateCounts.Downloaded"> · Downloaded {{ novel.stateCounts.Downloaded }}</template>
               <template v-if="novel.stateCounts.Old"> · Old {{ novel.stateCounts.Old }}</template>
+              <template v-if="novel.stateCounts['Old Completed']"> · Old Completed {{ novel.stateCounts['Old Completed'] }}</template>
             </span>
             <span
               v-if="novel.coverage.overlapNumberCount || novel.coverage.gapCount || novel.coverage.unverifiedCount || novel.coverage.rangeMismatchCount"

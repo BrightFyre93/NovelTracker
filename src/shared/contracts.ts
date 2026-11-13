@@ -102,6 +102,7 @@ export interface AppSettings {
   trackerCsvPath: string
   outputDirectory: string
   scanOldFolder: boolean
+  scanOldCompletedFolder: boolean
   maxSimultaneousDownloads: number
   discoveryFreshnessHours: number
   epubCss: string
@@ -221,7 +222,7 @@ export interface DiscoveryQueueInput {
   trackerRow?: GenerateEpubInput['trackerRow']
 }
 
-export type LibraryFolderState = 'Completed' | 'Downloaded' | 'Sent' | 'Old'
+export type LibraryFolderState = 'Completed' | 'Downloaded' | 'Sent' | 'Old' | 'Old Completed'
 export type LibraryFileFormat = 'EPUB' | 'AZW3'
 export type CoverageConfidence = 'extracted-toc' | 'filename' | 'user-corrected' | 'unknown'
 
@@ -376,7 +377,7 @@ export interface NovelTrackerApi {
   clearDiscoveryQueue(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
   updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
-  updateLibraryScanOptions(scanOldFolder: boolean): Promise<Result<AppSettings>>
+  updateLibraryScanOptions(scanOldFolder: boolean, scanOldCompletedFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItem[]) => void): () => void
   getLibraryIndex(): Promise<LibraryIndex | null>

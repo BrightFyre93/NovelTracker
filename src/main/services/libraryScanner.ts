@@ -23,6 +23,7 @@ interface ScannableFile {
 
 export interface LibraryScanOptions {
   scanOldFolder: boolean
+  scanOldCompletedFolder: boolean
 }
 
 function checkCancelled(signal: AbortSignal): void {
@@ -217,7 +218,10 @@ export async function scanLibrary(
   const root = await realpath(libraryRoot)
   const files: ScannableFile[] = []
   let scanErrors = 0
-  const folders = LIBRARY_FOLDERS.filter((folder) => folder !== 'Old' || options.scanOldFolder)
+  const folders = LIBRARY_FOLDERS.filter((folder) =>
+    (folder !== 'Old' || options.scanOldFolder) &&
+    (folder !== 'Old Completed' || options.scanOldCompletedFolder)
+  )
 
   for (let index = 0; index < folders.length; index += 1) {
     checkCancelled(signal)
