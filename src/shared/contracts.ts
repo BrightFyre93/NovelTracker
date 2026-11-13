@@ -105,6 +105,10 @@ export interface AppSettings {
   appTheme: 'light' | 'dark'
 }
 
+export interface BrowserSessionInfo {
+  title: string
+}
+
 export interface TrackerSource {
   label: string
   url: string
@@ -277,6 +281,10 @@ export type Result<T> =
 
 export interface NovelTrackerApi {
   discover(url: string): Promise<Result<DiscoveryResult>>
+  openVerificationBrowser(url: string): Promise<Result<BrowserSessionInfo>>
+  discoverWithBrowser(url: string): Promise<Result<DiscoveryResult>>
+  cancelBrowserDiscovery(queueItemId?: string): Promise<void>
+  clearBrowserSession(): Promise<Result<void>>
   chooseOutputDirectory(): Promise<string | null>
   getSettings(): Promise<AppSettings>
   updateEpubCss(css: string): Promise<Result<AppSettings>>
@@ -288,6 +296,7 @@ export interface NovelTrackerApi {
   getDiscoveryQueue(): Promise<DiscoveryQueueItem[]>
   addDiscoveryQueueItems(items: DiscoveryQueueInput[]): Promise<Result<DiscoveryQueueItem[]>>
   retryDiscoveryQueueItem(id: string): Promise<Result<void>>
+  retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
   refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
   acceptQueueRecommendations(id: string, includeOverlap: boolean, overlapCount: number): Promise<Result<void>>
   enqueueEpub(input: GenerateEpubInput, queueItemId?: string): Promise<Result<QueuedEpubJob>>

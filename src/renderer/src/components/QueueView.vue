@@ -24,6 +24,9 @@ const adding = ref(false)
 const maxDownloads = ref(2)
 const outputDirectory = ref('')
 const retryingId = ref('')
+const browserOpeningId = ref('')
+const browserRetryingId = ref('')
+const browserReadyId = ref('')
 const refreshingId = ref('')
 const removingId = ref('')
 const downloadActionId = ref('')
@@ -247,6 +250,54 @@ async function retryItem(item: DiscoveryQueueItem): Promise<void> {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     retryingId.value = ''
+  }
+}
+
+async function openItemInBrowser(item: DiscoveryQueueItem): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  browserOpeningId.value = item.id
+  browserReadyId.value = ''
+  try {
+    const result = await window.novelTracker.openVerificationBrowser(item.sourceUrl)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    browserReadyId.value = item.id
+    notice.value = `Opened ${item.title} in Chromium. Complete any sign-in or verification manually, then retry using the browser.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    browserOpeningId.value = ''
+  }
+}
+
+async function retryItemWithBrowser(item: DiscoveryQueueItem): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  browserRetryingId.value = item.id
+  try {
+    const result = await window.novelTracker.retryDiscoveryQueueItemWithBrowser(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = `Retried discovery for ${item.title} using the browser session.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    browserRetryingId.value = ''
+  }
+}
+
+async function cancelBrowserDiscovery(item: DiscoveryQueueItem): Promise<void> {
+  error.value = ''
+  try {
+    await window.novelTracker.cancelBrowserDiscovery(item.id)
+    notice.value = `Cancelled browser-assisted discovery for ${item.title}.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
   }
 }
 
@@ -769,6 +820,37 @@ async function clearQueue(): Promise<void> {
             :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="retryItem(item)"
           />
+          <template v-if="item.status === 'failed' && !item.downloadOptions">
+            <Button
+              label="Open verification browser"
+              icon="pi pi-external-link"
+              size="small"
+              severity="secondary"
+              text
+              :loading="browserOpeningId === item.id"
+              :disabled="Boolean(browserOpeningId) || Boolean(browserRetryingId) || Boolean(retryingId) || Boolean(downloadActionId)"
+              @click="openItemInBrowser(item)"
+            />
+            <Button
+              label="Retry in browser"
+              icon="pi pi-globe"
+              size="small"
+              severity="secondary"
+              outlined
+              :loading="browserRetryingId === item.id"
+              :disabled="browserReadyId !== item.id || Boolean(browserRetryingId) || Boolean(browserOpeningId) || Boolean(retryingId) || Boolean(downloadActionId)"
+              @click="retryItemWithBrowser(item)"
+            />
+          </template>
+          <Button
+            v-if="item.status === 'discovering' && browserReadyId === item.id"
+            label="Cancel browser discovery"
+            icon="pi pi-times"
+            size="small"
+            severity="danger"
+            text
+            @click="cancelBrowserDiscovery(item)"
+          />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
             label="Retry"
@@ -779,6 +861,17 @@ async function clearQueue(): Promise<void> {
             :loading="downloadActionId === item.id"
             :disabled="Boolean(downloadActionId)"
             @click="runDownloadAction(item, 'retry')"
+          />
+          <Button
+            v-if="item.downloadOptions && ['failed', 'partially-completed'].includes(item.status)"
+            label="Open verification browser"
+            icon="pi pi-external-link"
+            size="small"
+            severity="secondary"
+            text
+            :loading="browserOpeningId === item.id"
+            :disabled="Boolean(browserOpeningId) || Boolean(browserRetryingId) || Boolean(downloadActionId)"
+            @click="openItemInBrowser(item)"
           />
           <Button
             v-if="item.status === 'queued' || item.status === 'downloading'"

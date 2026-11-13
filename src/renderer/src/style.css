@@ -200,6 +200,13 @@ input {
   gap: 12px;
 }
 
+.browser-assist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .url-input,
 .full-input {
   width: 100%;

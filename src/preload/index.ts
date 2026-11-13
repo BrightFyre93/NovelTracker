@@ -5,6 +5,7 @@ import type {
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DownloadHistoryEntry,
+  BrowserSessionInfo,
   GenerateEpubInput,
   QueuedEpubJob,
   LibraryFileCorrection,
@@ -17,6 +18,13 @@ import type {
 
 const api: NovelTrackerApi = {
   discover: (url) => ipcRenderer.invoke('chapter:discover', url) as Promise<Result<DiscoveryResult>>,
+  openVerificationBrowser: (url) =>
+    ipcRenderer.invoke('browser:open-verification', url) as Promise<Result<BrowserSessionInfo>>,
+  discoverWithBrowser: (url) =>
+    ipcRenderer.invoke('browser:discover', url) as Promise<Result<DiscoveryResult>>,
+  cancelBrowserDiscovery: (queueItemId?: string) =>
+    ipcRenderer.invoke('browser:cancel-discovery', queueItemId) as Promise<void>,
+  clearBrowserSession: () => ipcRenderer.invoke('browser:clear-session') as Promise<Result<void>>,
   chooseOutputDirectory: () => ipcRenderer.invoke('dialog:choose-output-directory') as Promise<string | null>,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   updateEpubCss: (css) => ipcRenderer.invoke('settings:epub-css', css) as Promise<Result<AppSettings>>,
@@ -32,6 +40,8 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('discovery-queue:add', items) as Promise<Result<DiscoveryQueueItem[]>>,
   retryDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:retry', id) as Promise<Result<void>>,
+  retryDiscoveryQueueItemWithBrowser: (id: string) =>
+    ipcRenderer.invoke('discovery-queue:retry-browser', id) as Promise<Result<void>>,
   refreshDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:refresh', id) as Promise<Result<void>>,
   acceptQueueRecommendations: (id: string, includeOverlap: boolean, overlapCount: number) =>

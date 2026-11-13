@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type {
   AppSettings,
+  BrowserSessionInfo,
   ChapterContent,
   ChapterLink,
   ChapterImage,
@@ -20,6 +21,12 @@ import type {
   QueueDownloadOptions,
   Result
 } from '../shared/contracts'
+import {
+  clearBrowserSession,
+  closeBrowserSession,
+  openVerificationBrowser,
+  readBrowserPage
+} from './services/browserService'
 import {
   markInterruptedDownloadJobs,
   readChapterArtifact,
@@ -37,8 +44,10 @@ import {
 import { readTrackerCsv } from './services/trackerCsv'
 import {
   fetchChapterContent,
+  fetchChapterContentFromHtml,
   fetchImageResource,
   discoverChapters,
+  discoverChaptersUsingPageLoader,
   HttpStatusError,
   validateHttpUrl
 } from './services/scraper'
@@ -64,6 +73,8 @@ let discoveryQueue: DiscoveryQueueItem[] = []
 let discoveryQueueWrites = Promise.resolve()
 let historyWrites = Promise.resolve()
 const pendingDiscoveries: string[] = []
+const browserAssistedDiscoveries = new Set<string>()
+const activeBrowserDiscoveries = new Map<string, AbortController>()
 let activeDiscoveries = 0
 const MAX_ACTIVE_DISCOVERIES = 2
 const activeDownloads = new Map<string, { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' }>()
@@ -76,6 +87,23 @@ function dataDirectory(): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+async function fetchChapterContentWithBrowserFallback(
+  chapter: ChapterLink,
+  signal: AbortSignal
+): Promise<ChapterContent> {
+  try {
+    return await fetchChapterContent(chapter, signal)
+  } catch (error) {
+    const verificationRequired =
+      (error instanceof HttpStatusError && (error.status === 401 || error.status === 403)) ||
+      /manual verification/i.test(errorMessage(error))
+    if (!verificationRequired) throw error
+
+    const { html, finalUrl } = await readBrowserPage(chapter.url, signal)
+    return fetchChapterContentFromHtml(chapter, html, finalUrl, signal)
+  }
 }
 
 function copyDiscoveryQueue(): DiscoveryQueueItem[] {
@@ -177,16 +205,24 @@ function notifyDiscoveryQueueChanged(): void {
   }
 }
 
-async function discoverQueueItem(id: string): Promise<void> {
+async function discoverQueueItem(id: string, browserAssisted = false): Promise<void> {
   const item = discoveryQueue.find((candidate) => candidate.id === id)
   if (!item || item.status !== 'discovering') return
+  const browserController = browserAssisted ? new AbortController() : null
+  const browserOperationId = `queue:${id}`
+  if (browserController) activeBrowserDiscoveries.set(browserOperationId, browserController)
   const previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
   const previousByUrl = new Map(previousChapters.map((chapter) => [chapter.url, chapter]))
   const hadPreviousSnapshot = Boolean(item.discoveredAt && previousChapters.length > 0)
 
   try {
-    const result = await discoverChapters(item.sourceUrl)
-    if (item.status !== 'discovering') return
+    const result = browserAssisted
+      ? await discoverChaptersUsingPageLoader(item.sourceUrl, readBrowserPage, undefined, browserController?.signal)
+      : await discoverChapters(item.sourceUrl)
+    if (item.status !== 'discovering') {
+      if (browserController) activeBrowserDiscoveries.delete(browserOperationId)
+      return
+    }
     item.title = result.title || item.title
     item.author = result.author || item.author
     item.description = result.description
@@ -250,6 +286,7 @@ async function discoverQueueItem(id: string): Promise<void> {
       console.error(`Discovery queue item ${id} failure state could not be saved:`, saveError)
     }
   }
+  if (browserController) activeBrowserDiscoveries.delete(browserOperationId)
   notifyDiscoveryQueueChanged()
 }
 
@@ -257,7 +294,8 @@ function pumpDiscoveryQueue(): void {
   while (activeDiscoveries < MAX_ACTIVE_DISCOVERIES && pendingDiscoveries.length > 0) {
     const id = pendingDiscoveries.shift()!
     activeDiscoveries += 1
-    void discoverQueueItem(id).finally(() => {
+    const browserAssisted = browserAssistedDiscoveries.delete(id)
+    void discoverQueueItem(id, browserAssisted).finally(() => {
       activeDiscoveries -= 1
       pumpDiscoveryQueue()
     })
@@ -559,7 +597,7 @@ async function runQueuedDownload(
         let lastError: unknown = new Error('Chapter could not be fetched.')
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
-            savedContent = await fetchChapterContent(chapter, controller.signal)
+            savedContent = await fetchChapterContentWithBrowserFallback(chapter, controller.signal)
             break
           } catch (error) {
             if (controller.signal.aborted) break
@@ -889,6 +927,49 @@ function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle('browser:open-verification', async (_event, value: unknown): Promise<Result<BrowserSessionInfo>> => {
+    try {
+      return { ok: true, value: await openVerificationBrowser(value, dataDirectory()) }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('browser:discover', async (event, value: unknown): Promise<Result<Awaited<ReturnType<typeof discoverChapters>>>> => {
+    const controller = new AbortController()
+    const operationId = `renderer:${event.sender.id}`
+    if (activeBrowserDiscoveries.has(operationId)) {
+      return { ok: false, error: 'Browser-assisted discovery is already running.' }
+    }
+    activeBrowserDiscoveries.set(operationId, controller)
+    try {
+      return {
+        ok: true,
+        value: await discoverChaptersUsingPageLoader(value, readBrowserPage, undefined, controller.signal)
+      }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    } finally {
+      activeBrowserDiscoveries.delete(operationId)
+    }
+  })
+
+  ipcMain.handle('browser:cancel-discovery', async (event, rawQueueItemId: unknown): Promise<void> => {
+    const operationId = typeof rawQueueItemId === 'string'
+      ? `queue:${rawQueueItemId}`
+      : `renderer:${event.sender.id}`
+    activeBrowserDiscoveries.get(operationId)?.abort()
+  })
+
+  ipcMain.handle('browser:clear-session', async (): Promise<Result<void>> => {
+    try {
+      await clearBrowserSession(dataDirectory())
+      return { ok: true, value: undefined }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
   ipcMain.handle('dialog:choose-output-directory', async () => {
     if (!mainWindow) throw new Error('The application window is not available.')
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -1099,6 +1180,37 @@ function registerIpcHandlers(): void {
       return { ok: true, value: undefined }
     } catch (error) {
       console.error('Discovery queue retry failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:retry-browser', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item) throw new Error('The selected discovery queue item no longer exists.')
+      if (item.status !== 'failed' || item.downloadOptions) {
+        throw new Error('Only failed discovery items can be retried with the browser.')
+      }
+      const previousError = item.error
+      const previousUpdatedAt = item.updatedAt
+      item.status = 'discovering'
+      item.error = ''
+      item.updatedAt = new Date().toISOString()
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        item.status = 'failed'
+        item.error = previousError
+        item.updatedAt = previousUpdatedAt
+        throw error
+      }
+      browserAssistedDiscoveries.add(item.id)
+      notifyDiscoveryQueueChanged()
+      pendingDiscoveries.push(item.id)
+      pumpDiscoveryQueue()
+      return { ok: true, value: undefined }
+    } catch (error) {
       return { ok: false, error: errorMessage(error) }
     }
   })
@@ -1864,4 +1976,14 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+let closingBrowserSession = false
+app.on('before-quit', (event) => {
+  if (closingBrowserSession) return
+  event.preventDefault()
+  closingBrowserSession = true
+  void closeBrowserSession().catch(() => {
+    console.error('The browser session could not be closed cleanly.')
+  }).finally(() => app.quit())
 })

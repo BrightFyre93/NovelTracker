@@ -24,6 +24,11 @@ const {
 const activeView = ref<'create' | 'queue' | 'library'>('create')
 const appTheme = ref<'light' | 'dark'>('light')
 const themeSaving = ref(false)
+const browserBusy = ref(false)
+const browserAssistOpen = ref(false)
+const browserDiscoveryRunning = ref(false)
+const browserPageTitle = ref('')
+const browserAssistUrl = ref('')
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
@@ -95,6 +100,11 @@ const libraryScanCountLabel = computed(() => {
 })
 
 watch(url, (value) => {
+  if (browserAssistUrl.value && value.trim() !== browserAssistUrl.value) {
+    browserAssistOpen.value = false
+    browserPageTitle.value = ''
+    browserAssistUrl.value = ''
+  }
   if (sourceUrl.value && value.trim() !== sourceUrl.value) {
     store.queueItemId = ''
     sourceUrl.value = ''
@@ -159,6 +169,103 @@ async function discover(): Promise<void> {
     store.error = error instanceof Error ? error.message : String(error)
   } finally {
     store.busy = false
+  }
+}
+
+async function openBrowserForVerification(): Promise<void> {
+  store.error = ''
+  browserBusy.value = true
+  try {
+    const result = await window.novelTracker.openVerificationBrowser(store.url)
+    if (!result.ok) {
+      browserAssistOpen.value = false
+      browserAssistUrl.value = ''
+      store.error = result.error
+      return
+    }
+    browserAssistOpen.value = true
+    browserPageTitle.value = result.value.title
+    browserAssistUrl.value = store.url.trim()
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    browserBusy.value = false
+  }
+}
+
+async function discoverWithBrowser(): Promise<void> {
+  store.error = ''
+  store.success = ''
+  store.busy = true
+  browserBusy.value = true
+  try {
+    if (!browserAssistOpen.value || browserAssistUrl.value !== store.url.trim()) {
+      const session = await window.novelTracker.openVerificationBrowser(store.url)
+      if (!session.ok) {
+        browserAssistOpen.value = false
+        browserAssistUrl.value = ''
+        store.error = session.error
+        return
+      }
+      browserAssistOpen.value = true
+      browserAssistUrl.value = store.url.trim()
+      browserPageTitle.value = session.value.title
+      store.success = 'Visible Chromium is open. Complete any sign-in or verification manually, then click Discover using browser again.'
+      return
+    }
+
+    browserDiscoveryRunning.value = true
+    const result = await window.novelTracker.discoverWithBrowser(store.url)
+    if (!result.ok) {
+      store.error = result.error
+      if (result.error.includes('Open the visible browser')) {
+        browserAssistOpen.value = false
+        browserAssistUrl.value = ''
+      }
+      return
+    }
+    chapterSearch.value = ''
+    store.applyDiscovery({
+      ...result.value,
+      parserName: `${result.value.parserName} (browser-assisted)`
+    })
+    store.success = 'Browser-assisted discovery completed. Browser cookies are used only for browser-assisted requests.'
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    store.busy = false
+    browserBusy.value = false
+    browserDiscoveryRunning.value = false
+  }
+}
+
+async function cancelBrowserDiscovery(): Promise<void> {
+  try {
+    await window.novelTracker.cancelBrowserDiscovery()
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function clearBrowserData(): Promise<void> {
+  if (!window.confirm('Clear saved browser cookies and site data for NovelTracker? This does not clear other app settings.')) return
+  store.error = ''
+  store.success = ''
+  browserBusy.value = true
+  try {
+    const result = await window.novelTracker.clearBrowserSession()
+    if (!result.ok) {
+      store.error = result.error
+      return
+    }
+    browserAssistOpen.value = false
+    browserPageTitle.value = ''
+    browserAssistUrl.value = ''
+    store.success = 'Saved browser session data was cleared.'
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    browserBusy.value = false
   }
 }
 
@@ -463,13 +570,53 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
           id="source-url"
           v-model="url"
           class="url-input"
-          :disabled="busy"
+          :disabled="busy || browserBusy"
           placeholder="https://example.com/novel"
           autocomplete="url"
           @keydown.enter="discover"
         />
         <Button label="Discover chapters" icon="pi pi-search" :loading="busy" :disabled="busy || !url.trim()" @click="discover" />
       </div>
+      <div class="browser-assist-actions">
+        <Button
+          label="Open verification browser"
+          icon="pi pi-external-link"
+          severity="secondary"
+          outlined
+          :loading="browserBusy && !busy"
+          :disabled="busy || browserBusy || !url.trim()"
+          @click="openBrowserForVerification"
+        />
+        <Button
+          :label="browserAssistOpen && browserAssistUrl === url.trim() ? 'Discover using browser' : 'Open browser for discovery'"
+          icon="pi pi-globe"
+          severity="secondary"
+          outlined
+          :loading="browserBusy && busy"
+          :disabled="busy || browserBusy || !url.trim()"
+          @click="discoverWithBrowser"
+        />
+        <Button
+          v-if="browserDiscoveryRunning"
+          label="Cancel browser discovery"
+          icon="pi pi-times"
+          severity="danger"
+          text
+          @click="cancelBrowserDiscovery"
+        />
+        <Button
+          label="Clear browser session"
+          icon="pi pi-trash"
+          severity="secondary"
+          text
+          :disabled="busy || browserBusy"
+          @click="clearBrowserData"
+        />
+      </div>
+      <p class="help-text">
+        Browser-assisted mode opens visible Chromium for manual sign-in, consent, or verification. If it is not already open for this URL, clicking the browser button opens it; complete verification yourself, then click again to discover. Site cookies stay in the browser and are not copied to the HTTP client.
+        <template v-if="browserAssistOpen"> Browser ready<template v-if="browserPageTitle">: {{ browserPageTitle }}</template>.</template>
+      </p>
       <div class="tracker-picker-toggle">
         <Button label="Browse tracker CSV" icon="pi pi-list" severity="secondary" text size="small" :disabled="busy" @click="openTrackerPicker" />
       </div>
@@ -513,7 +660,7 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
           </p>
         </div>
       </div>
-      <p v-if="parserName === 'NovelFull'" class="help-text">
+      <p v-if="parserName.startsWith('NovelFull')" class="help-text">
         {{ parserName }} index pages are collected in reading order. Chapter text is fetched when the queued job runs.
       </p>
     </section>

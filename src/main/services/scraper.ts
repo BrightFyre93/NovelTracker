@@ -734,16 +734,20 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
   throw new Error('No chapter links were found. Use a chapter-list page or a chapter page with a detectable chapter title.')
 }
 
+type HtmlPageLoader = (url: string, signal?: AbortSignal) => Promise<{ html: string; finalUrl: string }>
+
 async function discoverNovelFullChapters(
   value: string,
-  onProgress?: (progress: JobProgress) => void
+  loadPage: HtmlPageLoader,
+  onProgress?: (progress: JobProgress) => void,
+  signal?: AbortSignal
 ): Promise<DiscoveryResult> {
   const firstPageUrl = new URL(value)
   firstPageUrl.searchParams.delete('page')
   const catalogUrl = validateHttpUrl(firstPageUrl.href)
   onProgress?.({ current: 0, total: 0, message: 'Loading NovelFull chapter index…' })
 
-  const firstResponse = await fetchHtml(catalogUrl)
+  const firstResponse = await loadPage(catalogUrl, signal)
   const firstPage = parseNovelFullCatalogPage(firstResponse.html, firstResponse.finalUrl)
   if (firstPage.chapters.length === 0) {
     throw new Error('No chapters were found in NovelFull’s chapter list.')
@@ -761,9 +765,10 @@ async function discoverNovelFullChapters(
   })
 
   for (let pageNumber = 2; pageNumber <= firstPage.pageCount; pageNumber += 1) {
+    if (signal?.aborted) throw new Error('Browser-assisted discovery was cancelled.')
     const pageUrl = new URL(catalogUrl)
     pageUrl.searchParams.set('page', String(pageNumber))
-    const response = await fetchHtml(pageUrl.href)
+    const response = await loadPage(pageUrl.href, signal)
     const page = parseNovelFullCatalogPage(response.html, response.finalUrl)
     if (page.chapters.length === 0) {
       throw new Error(`No chapters were found on NovelFull chapter-list page ${pageNumber}.`)
@@ -803,11 +808,20 @@ export async function discoverChapters(
   value: unknown,
   onProgress?: (progress: JobProgress) => void
 ): Promise<DiscoveryResult> {
+  return discoverChaptersUsingPageLoader(value, fetchHtml, onProgress)
+}
+
+export async function discoverChaptersUsingPageLoader(
+  value: unknown,
+  loadPage: HtmlPageLoader,
+  onProgress?: (progress: JobProgress) => void,
+  signal?: AbortSignal
+): Promise<DiscoveryResult> {
   const url = validateHttpUrl(value)
   if (isNovelFullUrl(url) && !CHAPTER_URL.test(new URL(url).pathname)) {
-    return discoverNovelFullChapters(url, onProgress)
+    return discoverNovelFullChapters(url, loadPage, onProgress, signal)
   }
-  const { html, finalUrl } = await fetchHtml(url)
+  const { html, finalUrl } = await loadPage(url, signal)
   return discoverFromHtml(html, finalUrl)
 }
 
@@ -953,9 +967,13 @@ export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTi
   return { title: content.title, url: content.url, paragraphs: content.paragraphs }
 }
 
-export async function fetchChapterContent(chapter: ChapterLink, signal?: AbortSignal): Promise<ChapterContent> {
-  const url = validateHttpUrl(chapter.url)
-  const { html, finalUrl } = await fetchHtml(url, signal)
+export async function fetchChapterContentFromHtml(
+  chapter: ChapterLink,
+  html: string,
+  pageUrl = chapter.url,
+  signal?: AbortSignal
+): Promise<ChapterContent> {
+  const finalUrl = validateHttpUrl(pageUrl)
   const { content, imageReferences } = extractChapterStructure(html, finalUrl, chapter.title)
   const images: ChapterImage[] = []
   let totalImageBytes = 0
@@ -969,4 +987,10 @@ export async function fetchChapterContent(chapter: ChapterLink, signal?: AbortSi
     images.push(resource)
   }
   return { ...content, images }
+}
+
+export async function fetchChapterContent(chapter: ChapterLink, signal?: AbortSignal): Promise<ChapterContent> {
+  const url = validateHttpUrl(chapter.url)
+  const { html, finalUrl } = await fetchHtml(url, signal)
+  return fetchChapterContentFromHtml(chapter, html, finalUrl, signal)
 }
