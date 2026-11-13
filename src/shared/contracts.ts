@@ -102,6 +102,7 @@ export interface AppSettings {
   outputDirectory: string
   maxSimultaneousDownloads: number
   epubCss: string
+  appTheme: 'light' | 'dark'
 }
 
 export interface TrackerSource {
@@ -279,6 +280,7 @@ export interface NovelTrackerApi {
   chooseOutputDirectory(): Promise<string | null>
   getSettings(): Promise<AppSettings>
   updateEpubCss(css: string): Promise<Result<AppSettings>>
+  updateAppTheme(theme: AppSettings['appTheme']): Promise<Result<AppSettings>>
   chooseLibraryRoot(): Promise<string | null>
   chooseTrackerCsv(): Promise<string | null>
   getTrackerNovels(): Promise<Result<TrackerNovel[]>>

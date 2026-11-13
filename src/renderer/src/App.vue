@@ -22,6 +22,8 @@ const {
   cancelError: libraryCancelError
 } = storeToRefs(libraryState)
 const activeView = ref<'create' | 'queue' | 'library'>('create')
+const appTheme = ref<'light' | 'dark'>('light')
+const themeSaving = ref(false)
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
@@ -128,6 +130,7 @@ onMounted(() => {
   void window.novelTracker.getSettings().then((settings) => {
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
     trackerCsvPath.value = settings.trackerCsvPath
+    applyAppTheme(settings.appTheme)
   }).catch((error: unknown) => {
     store.error = error instanceof Error ? error.message : String(error)
   })
@@ -219,9 +222,32 @@ async function openCreateView(): Promise<void> {
     const settings = await window.novelTracker.getSettings()
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
     trackerCsvPath.value = settings.trackerCsvPath
+    applyAppTheme(settings.appTheme)
   } catch (error) {
     activeView.value = 'create'
     store.error = error instanceof Error ? error.message : String(error)
+  }
+}
+
+function applyAppTheme(theme: 'light' | 'dark'): void {
+  appTheme.value = theme
+  document.documentElement.dataset.theme = theme
+}
+
+async function toggleAppTheme(): Promise<void> {
+  if (themeSaving.value) return
+  const previousTheme = appTheme.value
+  const nextTheme = previousTheme === 'light' ? 'dark' : 'light'
+  applyAppTheme(nextTheme)
+  themeSaving.value = true
+  try {
+    const result = await window.novelTracker.updateAppTheme(nextTheme)
+    if (!result.ok) throw new Error(result.error)
+  } catch (error) {
+    applyAppTheme(previousTheme)
+    store.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    themeSaving.value = false
   }
 }
 
@@ -404,6 +430,17 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <button :class="{ active: activeView === 'queue' }" @click="activeView = 'queue'">Queue</button>
         <button :class="{ active: activeView === 'library' }" @click="activeView = 'library'">Library</button>
       </nav>
+      <button
+        class="theme-toggle"
+        type="button"
+        :aria-label="`Switch to ${appTheme === 'light' ? 'dark' : 'light'} mode`"
+        :title="`Switch to ${appTheme === 'light' ? 'dark' : 'light'} mode`"
+        :disabled="themeSaving"
+        @click="toggleAppTheme"
+      >
+        <i :class="appTheme === 'light' ? 'pi pi-moon' : 'pi pi-sun'" aria-hidden="true"></i>
+        <span>{{ appTheme === 'light' ? 'Dark mode' : 'Light mode' }}</span>
+      </button>
     </header>
 
     <template v-if="activeView === 'create'">

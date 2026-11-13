@@ -923,6 +923,20 @@ function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle('settings:app-theme', async (_event, rawTheme: unknown): Promise<Result<AppSettings>> => {
+    try {
+      if (rawTheme !== 'light' && rawTheme !== 'dark') {
+        throw new Error('The app theme must be light or dark.')
+      }
+      const settings = await readSettings(dataDirectory())
+      settings.appTheme = rawTheme
+      await writeSettings(dataDirectory(), settings)
+      return { ok: true, value: settings }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
   ipcMain.handle('settings:download-concurrency', async (_event, rawValue: unknown): Promise<Result<AppSettings>> => {
     try {
       if (typeof rawValue !== 'number' || !Number.isInteger(rawValue) || rawValue < 1 || rawValue > 5) {

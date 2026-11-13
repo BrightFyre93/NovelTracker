@@ -14,7 +14,8 @@ const settings = ref<AppSettings>({
   trackerCsvPath: '',
   outputDirectory: '',
   maxSimultaneousDownloads: 2,
-  epubCss: DEFAULT_EPUB_CSS
+  epubCss: DEFAULT_EPUB_CSS,
+  appTheme: 'light'
 })
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
 const savingEpubCss = ref(false)

@@ -111,6 +111,37 @@ input {
   background: #eaf2ff;
 }
 
+.theme-toggle {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  padding: 6px 10px;
+  border: 1px solid #dce5f2;
+  border-radius: 8px;
+  color: #586b83;
+  background: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.theme-toggle:hover:not(:disabled) {
+  color: #315f9f;
+  background: #eaf2ff;
+}
+
+.theme-toggle:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.theme-toggle i {
+  font-size: 13px;
+}
+
 .intro {
   padding: 34px 0 22px;
 }
@@ -1144,6 +1175,243 @@ footer {
   padding: 10px;
   color: #78869a;
   font-size: 11px;
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
+  color: #e2e8f0;
+  background: #111827;
+}
+
+html[data-theme='dark'] body {
+  color: #e2e8f0;
+  background:
+    radial-gradient(ellipse at 82% 0%, rgba(76, 115, 180, 0.17), transparent 34rem),
+    #111827;
+}
+
+html[data-theme='dark'] .topbar {
+  border-bottom-color: #303b4b;
+}
+
+html[data-theme='dark'] .eyebrow,
+html[data-theme='dark'] .intro > p:last-child,
+html[data-theme='dark'] .help-text,
+html[data-theme='dark'] .tracker-picker-heading p,
+html[data-theme='dark'] .tracker-title span,
+html[data-theme='dark'] .chapter-toolbar p,
+html[data-theme='dark'] .folder-path,
+html[data-theme='dark'] .scan-count,
+html[data-theme='dark'] .history-summary span,
+html[data-theme='dark'] .history-error,
+html[data-theme='dark'] .queue-item-summary > span,
+html[data-theme='dark'] .epub-css-actions,
+html[data-theme='dark'] .library-path-value,
+html[data-theme='dark'] .library-summary span,
+html[data-theme='dark'] .library-summary small,
+html[data-theme='dark'] .novel-choice-count,
+html[data-theme='dark'] .novel-coverage-summary,
+html[data-theme='dark'] .library-file-meta,
+html[data-theme='dark'] .chapter-toolbar-note,
+html[data-theme='dark'] .file-evidence,
+html[data-theme='dark'] .empty-state {
+  color: #9aa8bb;
+}
+
+html[data-theme='dark'] .phase-badge,
+html[data-theme='dark'] .theme-toggle {
+  border-color: #39465a;
+  color: #c2cede;
+  background: rgba(30, 41, 59, 0.86);
+}
+
+html[data-theme='dark'] .main-navigation button {
+  color: #aab7c8;
+}
+
+html[data-theme='dark'] .main-navigation button:hover,
+html[data-theme='dark'] .main-navigation button.active,
+html[data-theme='dark'] .theme-toggle:hover:not(:disabled),
+html[data-theme='dark'] .queue-settings-trigger:hover,
+html[data-theme='dark'] .queue-settings[open] .queue-settings-trigger {
+  color: #a8c8ff;
+  background: #263a57;
+}
+
+html[data-theme='dark'] .card {
+  border-color: #303b4b;
+  background: rgba(26, 36, 51, 0.96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme='dark'] .tracker-picker,
+html[data-theme='dark'] .epub-css-settings,
+html[data-theme='dark'] .output-row,
+html[data-theme='dark'] .library-path {
+  border-color: #354154;
+  background: #1d293a;
+}
+
+html[data-theme='dark'] .field-label,
+html[data-theme='dark'] .queue-url-input,
+html[data-theme='dark'] .tracker-title strong,
+html[data-theme='dark'] .tracker-source select,
+html[data-theme='dark'] .chapter-title,
+html[data-theme='dark'] .queue-settings-popover strong,
+html[data-theme='dark'] .concurrency-setting,
+html[data-theme='dark'] .epub-css-settings summary,
+html[data-theme='dark'] .file-detail-heading strong {
+  color: #d7e0ed;
+}
+
+html[data-theme='dark'] .queue-url-input,
+html[data-theme='dark'] .tracker-source select,
+html[data-theme='dark'] .concurrency-setting select,
+html[data-theme='dark'] .epub-css-editor,
+html[data-theme='dark'] .p-inputtext {
+  border-color: #3b485b;
+  color: #e2e8f0;
+  background: #111b29;
+}
+
+html[data-theme='dark'] .queue-url-input::placeholder,
+html[data-theme='dark'] .p-inputtext::placeholder {
+  color: #78879b;
+}
+
+html[data-theme='dark'] .queue-url-input:focus,
+html[data-theme='dark'] .tracker-source select:focus,
+html[data-theme='dark'] .epub-css-editor:focus {
+  outline-color: #75a5f2;
+}
+
+html[data-theme='dark'] .tracker-row,
+html[data-theme='dark'] .chapter-list,
+html[data-theme='dark'] .chapter-row,
+html[data-theme='dark'] .history-row,
+html[data-theme='dark'] .queue-item,
+html[data-theme='dark'] .library-file-detail {
+  border-color: #303b4b;
+}
+
+html[data-theme='dark'] .chapter-row:hover,
+html[data-theme='dark'] .novel-choice:hover,
+html[data-theme='dark'] .library-file-row:hover,
+html[data-theme='dark'] .novel-choice.active,
+html[data-theme='dark'] .library-file-row.active {
+  background: #202f44;
+}
+
+html[data-theme='dark'] .chapter-order {
+  color: #8290a4;
+}
+
+html[data-theme='dark'] .chapter-url,
+html[data-theme='dark'] .chapter-archive-status,
+html[data-theme='dark'] .queue-item-summary strong,
+html[data-theme='dark'] .novel-choice,
+html[data-theme='dark'] .library-file-row {
+  color: #c4cfdd;
+}
+
+html[data-theme='dark'] .count-pill,
+html[data-theme='dark'] .folder-icon,
+html[data-theme='dark'] .status-discovering,
+html[data-theme='dark'] .status-needs-review,
+html[data-theme='dark'] .status-ready,
+html[data-theme='dark'] .status-queued,
+html[data-theme='dark'] .status-downloading,
+html[data-theme='dark'] .status-running,
+html[data-theme='dark'] .queue-item-summary > .queue-item-output {
+  color: #a8c8ff;
+  background: #263a57;
+}
+
+html[data-theme='dark'] .history-status {
+  color: #c2cede;
+  background: #303b4b;
+}
+
+html[data-theme='dark'] .status-completed {
+  color: #86d6ad;
+  background: #1c3c32;
+}
+
+html[data-theme='dark'] .status-paused,
+html[data-theme='dark'] .status-partially-completed,
+html[data-theme='dark'] .queue-item-summary > .queue-item-change {
+  color: #f0ca78;
+  background: #473b25;
+}
+
+html[data-theme='dark'] .status-failed,
+html[data-theme='dark'] .status-cancelled,
+html[data-theme='dark'] .status-interrupted,
+html[data-theme='dark'] .queue-item-summary > .queue-item-error {
+  color: #f0a08e;
+  background: #4a2d2c;
+}
+
+html[data-theme='dark'] .queue-settings-popover {
+  border-color: #39465a;
+  background: #1b2636;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme='dark'] .scan-overlay {
+  background: rgba(2, 6, 12, 0.68);
+}
+
+html[data-theme='dark'] .scan-dialog {
+  border-color: #39465a;
+  background: #1b2636;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme='dark'] .scan-dialog h2 {
+  color: #e2e8f0;
+}
+
+html[data-theme='dark'] .scan-message {
+  color: #bdc9d8;
+}
+
+html[data-theme='dark'] .coverage-warning-panel {
+  border-color: #5a4b31;
+  background: #29261e;
+}
+
+html[data-theme='dark'] .coverage-warning-panel > summary {
+  color: #e2c47f;
+}
+
+html[data-theme='dark'] .coverage-warning-note,
+html[data-theme='dark'] .coverage-warning-list > li {
+  color: #c9bc9c;
+}
+
+html[data-theme='dark'] .coverage-warning-list > li {
+  border-top-color: #48402f;
+}
+
+html[data-theme='dark'] .coverage-warning-list strong {
+  color: #e1d6be;
+}
+
+html[data-theme='dark'] .coverage-warning-list p {
+  color: #aa9d82;
+}
+
+html[data-theme='dark'] .warning-file-link {
+  color: #9bc0ff;
+}
+
+html[data-theme='dark'] footer {
+  color: #8290a4;
+}
+
+html[data-theme='dark'] .p-message {
+  color-scheme: dark;
 }
 
 @media (max-width: 850px) {

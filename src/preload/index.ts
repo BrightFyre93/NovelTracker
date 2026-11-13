@@ -20,6 +20,7 @@ const api: NovelTrackerApi = {
   chooseOutputDirectory: () => ipcRenderer.invoke('dialog:choose-output-directory') as Promise<string | null>,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   updateEpubCss: (css) => ipcRenderer.invoke('settings:epub-css', css) as Promise<Result<AppSettings>>,
+  updateAppTheme: (theme) => ipcRenderer.invoke('settings:app-theme', theme) as Promise<Result<AppSettings>>,
   updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
     ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
   chooseLibraryRoot: () => ipcRenderer.invoke('dialog:choose-library-root') as Promise<string | null>,

@@ -8,5 +8,5 @@ import './style.css'
 
 createApp(App)
   .use(createPinia())
-  .use(PrimeVue, { theme: { preset: Aura } })
+  .use(PrimeVue, { theme: { preset: Aura, options: { darkModeSelector: '[data-theme="dark"]' } } })
   .mount('#app')

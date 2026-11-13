@@ -22,7 +22,8 @@ const EMPTY_SETTINGS: AppSettings = {
   trackerCsvPath: '',
   outputDirectory: '',
   maxSimultaneousDownloads: 2,
-  epubCss: DEFAULT_EPUB_CSS
+  epubCss: DEFAULT_EPUB_CSS,
+  appTheme: 'light'
 }
 const fileWriteTails = new Map<string, Promise<void>>()
 let downloadHistoryWriteTail = Promise.resolve()
@@ -104,6 +105,9 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
   if (saved.epubCss === undefined) settings.epubCss = DEFAULT_EPUB_CSS
   else if (typeof settings.epubCss !== 'string' || settings.epubCss.length > MAX_EPUB_CSS_LENGTH) {
     throw new Error('The saved EPUB stylesheet is invalid or exceeds the size limit.')
+  }
+  if (saved.appTheme !== undefined && saved.appTheme !== 'light' && saved.appTheme !== 'dark') {
+    throw new Error('The saved app theme must be light or dark.')
   }
   return settings
 }
