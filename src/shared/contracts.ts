@@ -180,6 +180,15 @@ export interface FailedQueueChapter {
   error: string
 }
 
+export interface QueueChapterSummary {
+  total: number
+  selected: number
+  recommended: number
+  deliberateOverlap: number
+  hasUncertainArchiveChapters: boolean
+  latestTitle: string
+}
+
 export interface DiscoveryQueueItem {
   id: string
   title: string
@@ -196,6 +205,8 @@ export interface DiscoveryQueueItem {
   status: DiscoveryQueueStatus
   parserName: string
   chapters: QueueChapter[]
+  chapterSummary: QueueChapterSummary
+  targetOutputPath: string
   discoveryChanges: string
   recommendationSummary: string
   overlapAllowed: boolean
@@ -212,6 +223,10 @@ export interface DiscoveryQueueItem {
   error: string
   discoveredAt: string
   updatedAt: string
+}
+
+export type DiscoveryQueueItemSummary = Omit<DiscoveryQueueItem, 'chapters' | 'completedChapterUrls'> & {
+  failedChapterCount: number
 }
 
 export interface DiscoveryQueueInput {
@@ -361,7 +376,8 @@ export interface NovelTrackerApi {
   chooseTrackerCsv(): Promise<string | null>
   getTrackerNovels(): Promise<Result<TrackerNovel[]>>
   getDownloadHistory(): Promise<DownloadHistoryEntry[]>
-  getDiscoveryQueue(): Promise<DiscoveryQueueItem[]>
+  getDiscoveryQueue(): Promise<DiscoveryQueueItemSummary[]>
+  getDiscoveryQueueItem(id: string): Promise<Result<DiscoveryQueueItem>>
   addDiscoveryQueueItems(items: DiscoveryQueueInput[]): Promise<Result<DiscoveryQueueItem[]>>
   retryDiscoveryQueueItem(id: string): Promise<Result<void>>
   retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
@@ -375,11 +391,12 @@ export interface NovelTrackerApi {
   moveQueuedEpub(id: string, direction: 'up' | 'down'): Promise<Result<void>>
   removeDiscoveryQueueItem(id: string): Promise<Result<void>>
   clearDiscoveryQueue(): Promise<Result<void>>
+  clearCompletedDiscoveryQueueItems(): Promise<Result<void>>
   updateDiscoveryQueueSelection(id: string, selectedChapterUrls: string[]): Promise<Result<void>>
   updateDownloadConcurrency(maxSimultaneousDownloads: number): Promise<Result<AppSettings>>
   updateLibraryScanOptions(scanOldFolder: boolean, scanOldCompletedFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
-  onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItem[]) => void): () => void
+  onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItemSummary[]) => void): () => void
   getLibraryIndex(): Promise<LibraryIndex | null>
   getLibraryIndexBackup(): Promise<LibraryIndex | null>
   restoreLibraryIndexBackup(): Promise<Result<LibraryIndex>>

@@ -18,6 +18,7 @@ import type {
   ChapterImage,
   ChapterContent,
   DiscoveryQueueItem,
+  QueueChapter,
   DownloadHistoryEntry,
   LibraryOperation,
   LibraryFileCorrection,
@@ -253,6 +254,33 @@ export function readDiscoveryQueue(dataDirectory: string): Promise<DiscoveryQueu
 
 export function writeDiscoveryQueue(dataDirectory: string, items: DiscoveryQueueItem[]): Promise<void> {
   return writeJson(join(dataDirectory, 'discovery-queue.json'), items)
+}
+
+function discoveryQueueChaptersPath(dataDirectory: string, queueItemId: string): string {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+  return join(dataDirectory, 'download-artifacts', queueItemId, 'queue-chapters.json')
+}
+
+export async function readDiscoveryQueueItemChapters(
+  dataDirectory: string,
+  queueItemId: string
+): Promise<QueueChapter[] | null> {
+  const chapters = await readJson<QueueChapter[] | null>(
+    discoveryQueueChaptersPath(dataDirectory, queueItemId),
+    null
+  )
+  if (chapters !== null && !Array.isArray(chapters)) {
+    throw new Error('The saved queue chapter list is invalid.')
+  }
+  return chapters
+}
+
+export function writeDiscoveryQueueItemChapters(
+  dataDirectory: string,
+  queueItemId: string,
+  chapters: QueueChapter[]
+): Promise<void> {
+  return writeJson(discoveryQueueChaptersPath(dataDirectory, queueItemId), chapters)
 }
 
 function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapterUrl: string): string {

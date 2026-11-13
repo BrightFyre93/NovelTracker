@@ -5,6 +5,7 @@ import type {
   EbookConversionResponse,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
+  DiscoveryQueueItemSummary,
   DownloadHistoryEntry,
   EpubMergeProgress,
   BrowserSessionInfo,
@@ -44,7 +45,9 @@ const api: NovelTrackerApi = {
   chooseTrackerCsv: () => ipcRenderer.invoke('dialog:choose-tracker-csv') as Promise<string | null>,
   getTrackerNovels: () => ipcRenderer.invoke('tracker:list') as Promise<Result<TrackerNovel[]>>,
   getDownloadHistory: () => ipcRenderer.invoke('download-history:list') as Promise<DownloadHistoryEntry[]>,
-  getDiscoveryQueue: () => ipcRenderer.invoke('discovery-queue:list') as Promise<DiscoveryQueueItem[]>,
+  getDiscoveryQueue: () => ipcRenderer.invoke('discovery-queue:list') as Promise<DiscoveryQueueItemSummary[]>,
+  getDiscoveryQueueItem: (id: string) =>
+    ipcRenderer.invoke('discovery-queue:item', id) as Promise<Result<DiscoveryQueueItem>>,
   addDiscoveryQueueItems: (items: DiscoveryQueueInput[]) =>
     ipcRenderer.invoke('discovery-queue:add', items) as Promise<Result<DiscoveryQueueItem[]>>,
   retryDiscoveryQueueItem: (id: string) =>
@@ -68,10 +71,12 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('discovery-queue:remove', id) as Promise<Result<void>>,
   clearDiscoveryQueue: () =>
     ipcRenderer.invoke('discovery-queue:clear') as Promise<Result<void>>,
+  clearCompletedDiscoveryQueueItems: () =>
+    ipcRenderer.invoke('discovery-queue:clear-completed') as Promise<Result<void>>,
   updateDiscoveryQueueSelection: (id: string, selectedChapterUrls: string[]) =>
     ipcRenderer.invoke('discovery-queue:update-selection', id, selectedChapterUrls) as Promise<Result<void>>,
-  onDiscoveryQueueUpdate: (listener: (items: DiscoveryQueueItem[]) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, items: DiscoveryQueueItem[]) => listener(items)
+  onDiscoveryQueueUpdate: (listener: (items: DiscoveryQueueItemSummary[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, items: DiscoveryQueueItemSummary[]) => listener(items)
     ipcRenderer.on('discovery-queue:update', handler)
     return () => ipcRenderer.removeListener('discovery-queue:update', handler)
   },

@@ -11,6 +11,7 @@ import type {
   ChapterImage,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
+  DiscoveryQueueItemSummary,
   DownloadHistoryEntry,
   EpubMergeProgress,
   EpubRepairProgress,
@@ -51,6 +52,7 @@ import {
   readCoverArtifact,
   readChapterArtifact,
   readDiscoveryQueue,
+  readDiscoveryQueueItemChapters,
   readDownloadHistory,
   readLibraryIndex,
   readLibraryIndexBackup,
@@ -63,6 +65,7 @@ import {
   writeLibraryOperations,
   writeCoverArtifact,
   writeDiscoveryQueue,
+  writeDiscoveryQueueItemChapters,
   writeChapterArtifact,
   writeSettings
 } from './services/localStore'
@@ -103,6 +106,8 @@ let activeLibraryScan: ActiveLibraryScan | null = null
 let libraryIndexRestoreActive = false
 let discoveryQueue: DiscoveryQueueItem[] = []
 let discoveryQueueWrites = Promise.resolve()
+const dirtyQueueChapterIds = new Map<string, number>()
+let queueChapterRevision = 0
 let historyWrites = Promise.resolve()
 const pendingDiscoveries: string[] = []
 const browserAssistedDiscoveries = new Set<string>()
@@ -237,8 +242,8 @@ async function fetchChapterContentWithBrowserFallback(
   }
 }
 
-function copyDiscoveryQueue(): DiscoveryQueueItem[] {
-  return discoveryQueue.map((item) => ({
+function copyDiscoveryQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
+  return {
     ...item,
     trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
     alternativeNames: [...(item.alternativeNames ?? [])],
@@ -253,13 +258,95 @@ function copyDiscoveryQueue(): DiscoveryQueueItem[] {
     completedChapterUrls: [...item.completedChapterUrls],
     failedChapters: item.failedChapters.map((chapter) => ({ ...chapter })),
     progress: item.progress ? { ...item.progress } : null,
+    chapterSummary: { ...item.chapterSummary },
     chapters: item.chapters.map((chapter) => ({ ...chapter }))
+  }
+}
+
+function copyDiscoveryQueue(): DiscoveryQueueItemSummary[] {
+  return discoveryQueue.map(({ chapters: _chapters, completedChapterUrls: _completedChapterUrls, ...item }) => ({
+    ...item,
+    trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
+    alternativeNames: [...(item.alternativeNames ?? [])],
+    genres: [...(item.genres ?? [])],
+    downloadOptions: item.downloadOptions
+      ? {
+          ...item.downloadOptions,
+          alternativeNames: [...(item.downloadOptions.alternativeNames ?? [])],
+          genres: [...(item.downloadOptions.genres ?? [])]
+        }
+      : null,
+    failedChapters: item.failedChapters.slice(0, 20).map((chapter) => ({ ...chapter })),
+    failedChapterCount: item.failedChapters.length,
+    progress: item.progress ? { ...item.progress } : null,
+    chapterSummary: { ...item.chapterSummary }
   }))
 }
 
+function updateQueueChapterSummary(item: DiscoveryQueueItem): void {
+  item.chapterSummary = {
+    total: item.chapters.length,
+    selected: item.chapters.filter((chapter) => chapter.selected).length,
+    recommended: item.chapters.filter((chapter) => chapter.recommended).length,
+    deliberateOverlap: item.chapters.filter((chapter) => chapter.deliberateOverlap && !chapter.recommended).length,
+    hasUncertainArchiveChapters: item.chapters.some(
+      (chapter) => chapter.archiveStatus === 'uncertain' || chapter.archiveStatus === 'probable'
+    ),
+    latestTitle: item.chapters[item.chapters.length - 1]?.title ?? ''
+  }
+}
+
+function markQueueItemChaptersDirty(item: DiscoveryQueueItem): void {
+  updateQueueChapterSummary(item)
+  dirtyQueueChapterIds.set(item.id, ++queueChapterRevision)
+}
+
+async function ensureQueueItemChapters(item: DiscoveryQueueItem): Promise<void> {
+  if (item.chapters.length > 0 || item.chapterSummary.total === 0) return
+  const chapters = await readDiscoveryQueueItemChapters(dataDirectory(), item.id)
+  if (!chapters || chapters.length !== item.chapterSummary.total) {
+    throw new Error(`Saved chapter details are missing or incomplete for "${item.title}".`)
+  }
+  item.chapters = chapters
+}
+
+function releaseQueueItemChapters(item: DiscoveryQueueItem): void {
+  item.chapters = []
+  item.completedChapterUrls = []
+}
+
 function persistDiscoveryQueue(): Promise<void> {
-  const snapshot = copyDiscoveryQueue()
-  const write = discoveryQueueWrites.then(() => writeDiscoveryQueue(dataDirectory(), snapshot))
+  const changedChapterData = [...dirtyQueueChapterIds.entries()].flatMap(([id, revision]) => {
+    const item = discoveryQueue.find((candidate) => candidate.id === id)
+    return item ? [{ id, revision, chapters: item.chapters.map((chapter) => ({ ...chapter })) }] : []
+  })
+  const snapshot: DiscoveryQueueItem[] = discoveryQueue.map((item) => ({
+    ...item,
+    trackerRow: item.trackerRow ? { ...item.trackerRow } : null,
+    alternativeNames: [...item.alternativeNames],
+    genres: [...item.genres],
+    downloadOptions: item.downloadOptions
+      ? {
+          ...item.downloadOptions,
+          alternativeNames: [...item.downloadOptions.alternativeNames],
+          genres: [...item.downloadOptions.genres]
+        }
+      : null,
+    completedChapterUrls: [],
+    failedChapters: item.failedChapters.map((chapter) => ({ ...chapter })),
+    progress: item.progress ? { ...item.progress } : null,
+    chapterSummary: { ...item.chapterSummary },
+    chapters: []
+  }))
+  const write = discoveryQueueWrites.then(async () => {
+    for (const { id, chapters } of changedChapterData) {
+      await writeDiscoveryQueueItemChapters(dataDirectory(), id, chapters)
+    }
+    await writeDiscoveryQueue(dataDirectory(), snapshot)
+    for (const { id, revision } of changedChapterData) {
+      if (dirtyQueueChapterIds.get(id) === revision) dirtyQueueChapterIds.delete(id)
+    }
+  })
   discoveryQueueWrites = write.then(() => undefined, () => undefined)
   return write
 }
@@ -271,7 +358,16 @@ function persistHistoryEntry(entry: DownloadHistoryEntry): Promise<DownloadHisto
 }
 
 function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
-  return {
+  const chapters = (item.chapters ?? []).map((chapter) => ({
+    ...chapter,
+    archiveStatus: chapter.archiveStatus ?? 'missing',
+    archiveSources: chapter.archiveSources ?? [],
+    chapterNumber: chapter.chapterNumber ?? null,
+    archiveGap: chapter.archiveGap ?? false,
+    recommended: chapter.recommended ?? true,
+    deliberateOverlap: chapter.deliberateOverlap ?? false
+  }))
+  const hydrated: DiscoveryQueueItem = {
     ...item,
     description: item.description ?? '',
     coverUrl: item.coverUrl ?? '',
@@ -302,18 +398,21 @@ function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
     completedChapterUrls: item.completedChapterUrls ?? [],
     failedChapters: item.failedChapters ?? [],
     outputPath: item.outputPath ?? '',
+    targetOutputPath: item.targetOutputPath ?? '',
     downloadHistoryId: item.downloadHistoryId ?? '',
     progress: item.progress ?? null,
-    chapters: (item.chapters ?? []).map((chapter) => ({
-      ...chapter,
-      archiveStatus: chapter.archiveStatus ?? 'missing',
-      archiveSources: chapter.archiveSources ?? [],
-      chapterNumber: chapter.chapterNumber ?? null,
-      archiveGap: chapter.archiveGap ?? false,
-      recommended: chapter.recommended ?? true,
-      deliberateOverlap: chapter.deliberateOverlap ?? false
-    }))
+    chapters,
+    chapterSummary: item.chapterSummary ?? {
+      total: 0,
+      selected: 0,
+      recommended: 0,
+      deliberateOverlap: 0,
+      hasUncertainArchiveChapters: false,
+      latestTitle: ''
+    }
   }
+  if (chapters.length > 0 || !item.chapterSummary) updateQueueChapterSummary(hydrated)
+  return hydrated
 }
 
 function expectedOutputPath(
@@ -489,16 +588,21 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
   const browserController = browserAssisted ? new AbortController() : null
   const browserOperationId = `queue:${id}`
   if (browserController) activeBrowserDiscoveries.set(browserOperationId, browserController)
-  const previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
-  const previousByUrl = new Map(previousChapters.map((chapter) => [chapter.url, chapter]))
-  const hadPreviousSnapshot = Boolean(item.discoveredAt && previousChapters.length > 0)
+  let previousChapters: QueueChapter[] = []
+  let previousByUrl = new Map<string, QueueChapter>()
+  let hadPreviousSnapshot = false
 
   try {
+    await ensureQueueItemChapters(item)
+    previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
+    previousByUrl = new Map(previousChapters.map((chapter) => [chapter.url, chapter]))
+    hadPreviousSnapshot = Boolean(item.discoveredAt && previousChapters.length > 0)
     const result = browserAssisted
       ? await discoverChaptersUsingPageLoader(item.sourceUrl, readBrowserPage, undefined, browserController?.signal)
       : await discoverChapters(item.sourceUrl)
     if (item.status !== 'discovering') {
       if (browserController) activeBrowserDiscoveries.delete(browserOperationId)
+      if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
       return
     }
     item.title = result.title || item.title
@@ -534,6 +638,7 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
       item.overlapCount
     )
     item.chapters = recommendation.chapters
+    markQueueItemChaptersDirty(item)
     item.overlapAllowed = recommendation.overlapAllowed
     item.includeOverlap = item.includeOverlap && recommendation.overlapAllowed
     item.recommendationSummary = recommendation.summary
@@ -565,6 +670,7 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
     }
   }
   if (browserController) activeBrowserDiscoveries.delete(browserOperationId)
+  if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
   notifyDiscoveryQueueChanged()
 }
 
@@ -584,6 +690,7 @@ async function revalidateStaleQueuedJob(
   item: DiscoveryQueueItem,
   historyEntry: DownloadHistoryEntry
 ): Promise<boolean> {
+  await ensureQueueItemChapters(item)
   const selectedUrls = item.chapters.filter((chapter) => chapter.selected).map((chapter) => chapter.url)
   item.status = 'discovering'
   item.error = ''
@@ -617,13 +724,16 @@ async function revalidateStaleQueuedJob(
     historyEntry.status = 'failed'
     historyEntry.error = item.error
     await persistDownloadState(item, historyEntry)
+    releaseQueueItemChapters(item)
     return false
   }
 
+  await ensureQueueItemChapters(item)
   const previouslySelected = new Set(selectedUrls)
   for (const chapter of item.chapters) {
     chapter.selected = previouslySelected.has(chapter.url)
   }
+  markQueueItemChaptersDirty(item)
   const refreshedSelection = item.chapters
     .filter((chapter) => chapter.selected)
     .map((chapter) => chapter.url)
@@ -637,19 +747,21 @@ async function revalidateStaleQueuedJob(
     historyEntry.status = 'failed'
     historyEntry.error = item.error
     await persistDownloadState(item, historyEntry)
+    releaseQueueItemChapters(item)
     return false
   }
 
   item.status = 'queued'
   item.error = ''
   item.progress = {
-    current: item.completedChapterUrls.filter((url) => selectedUrls.includes(url)).length,
+    current: historyEntry.completedChapters,
     total: selectedUrls.length,
     message: 'The chapter list is fresh; starting the queued job…'
   }
   historyEntry.status = 'queued'
   historyEntry.error = ''
   await persistDownloadState(item, historyEntry)
+  releaseQueueItemChapters(item)
   return true
 }
 
@@ -1014,10 +1126,7 @@ async function runQueuedDownload(
   if (!item || !item.downloadOptions) return
   const options = item.downloadOptions
   const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
-  const selectedChapterUrls = new Set(selectedChapters.map((chapter) => chapter.url))
-  const completedChapterUrls = new Set(item.completedChapterUrls)
-  let completedSelectedChapterCount = [...completedChapterUrls]
-    .filter((url) => selectedChapterUrls.has(url)).length
+  let completedSelectedChapterCount = 0
   let chaptersSinceCheckpoint = 0
   let lastCheckpointAt = Date.now()
 
@@ -1051,11 +1160,7 @@ async function runQueuedDownload(
         if (!savedContent || savedContent.url !== chapter.url) {
           throw new Error(`Saved chapter content is missing or invalid for "${chapter.title}".`)
         }
-        if (!completedChapterUrls.has(chapter.url)) {
-          completedChapterUrls.add(chapter.url)
-          item.completedChapterUrls.push(chapter.url)
-          if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount += 1
-        }
+        completedSelectedChapterCount += 1
       } else {
         try {
           savedContent = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
@@ -1066,20 +1171,12 @@ async function runQueuedDownload(
         } catch (error) {
           console.warn(`Saved chapter artifact for ${chapter.url} will be fetched again:`, errorMessage(error))
         }
-        if (savedContent && !completedChapterUrls.has(chapter.url)) {
-          completedChapterUrls.add(chapter.url)
-          item.completedChapterUrls.push(chapter.url)
-          if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount += 1
-        } else if (!savedContent && completedChapterUrls.has(chapter.url)) {
-          completedChapterUrls.delete(chapter.url)
-          item.completedChapterUrls = item.completedChapterUrls.filter((url) => url !== chapter.url)
-          if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount -= 1
-        }
+        if (savedContent) completedSelectedChapterCount += 1
       }
 
       if (!savedContent) {
         item.progress = {
-          current: item.completedChapterUrls.length,
+          current: completedSelectedChapterCount,
           total: selectedChapters.length,
           message: `Fetching chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
         }
@@ -1107,11 +1204,7 @@ async function runQueuedDownload(
         if (controller.signal.aborted) break
         if (savedContent) {
           await writeChapterArtifact(dataDirectory(), itemId, savedContent)
-          if (!completedChapterUrls.has(chapter.url)) {
-            completedChapterUrls.add(chapter.url)
-            item.completedChapterUrls.push(chapter.url)
-            if (selectedChapterUrls.has(chapter.url)) completedSelectedChapterCount += 1
-          }
+          completedSelectedChapterCount += 1
           item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
         } else {
           item.failedChapters = [
@@ -1153,7 +1246,7 @@ async function runQueuedDownload(
       return
     }
     if (item.failedChapters.length > 0) {
-      item.status = item.completedChapterUrls.length > 0 ? 'partially-completed' : 'failed'
+      item.status = completedSelectedChapterCount > 0 ? 'partially-completed' : 'failed'
       item.progress = {
         current: historyEntry.completedChapters,
         total: selectedChapters.length,
@@ -1250,6 +1343,8 @@ async function runQueuedDownload(
     item.outputPath = result.outputPath
     item.error = ''
     item.progress = { current: selectedChapters.length, total: selectedChapters.length, message: 'Completed' }
+    item.completedChapterUrls = []
+    item.failedChapters = []
     historyEntry.status = 'completed'
     historyEntry.outputPath = result.outputPath
     historyEntry.error = ''
@@ -1264,7 +1359,8 @@ async function runQueuedDownload(
       historyEntry.status = requestedAction === 'pause' ? 'paused' : 'cancelled'
       historyEntry.error = ''
     } else {
-      item.status = item.completedChapterUrls.length > 0 ? 'partially-completed' : 'failed'
+      item.status = completedSelectedChapterCount > 0 ? 'partially-completed' : 'failed'
+      historyEntry.completedChapters = completedSelectedChapterCount
       item.error = errorMessage(error)
       historyEntry.status = item.status
       historyEntry.error = item.error
@@ -1334,6 +1430,18 @@ async function pumpDownloadQueue(): Promise<void> {
             notifyDiscoveryQueueChanged()
           }
         }
+        if (item.status === 'queued') item.chapters = []
+        continue
+      }
+      try {
+        await ensureQueueItemChapters(item)
+      } catch (error) {
+        item.status = 'failed'
+        item.error = errorMessage(error)
+        item.updatedAt = new Date().toISOString()
+        historyEntry.status = 'failed'
+        historyEntry.error = item.error
+        await persistDownloadState(item, historyEntry)
         continue
       }
       const controller = new AbortController()
@@ -1367,6 +1475,14 @@ async function pumpDownloadQueue(): Promise<void> {
       }
       void runQueuedDownload(item.id, controller, historyEntry).finally(() => {
         activeDownloads.delete(item.id)
+        const finishedItem = discoveryQueue.find((candidate) => candidate.id === item.id)
+        if (
+          finishedItem &&
+          finishedItem.downloadOptions &&
+          ['completed', 'partially-completed', 'failed', 'cancelled', 'paused'].includes(finishedItem.status)
+        ) {
+          finishedItem.chapters = []
+        }
         void pumpDownloadQueue().catch((error: unknown) => {
           console.error('Download queue scheduler failed:', error)
         })
@@ -1688,6 +1804,23 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('discovery-queue:list', () => copyDiscoveryQueue())
 
+  ipcMain.handle('discovery-queue:item', async (_event, rawId: unknown): Promise<Result<DiscoveryQueueItem>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid discovery queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item) throw new Error('The selected discovery queue item no longer exists.')
+      const chapters = item.chapters.length > 0 || item.chapterSummary.total === 0
+        ? item.chapters
+        : await readDiscoveryQueueItemChapters(dataDirectory(), item.id)
+      if (!chapters || chapters.length !== item.chapterSummary.total) {
+        throw new Error(`Saved chapter details are missing or incomplete for "${item.title}".`)
+      }
+      return { ok: true, value: copyDiscoveryQueueItem({ ...item, chapters }) }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
   ipcMain.handle('discovery-queue:add', async (_event, rawItems: unknown): Promise<Result<DiscoveryQueueItem[]>> => {
     try {
       const inputs = parseDiscoveryQueueInputs(rawItems)
@@ -1713,6 +1846,15 @@ function registerIpcHandlers(): void {
           status: 'discovering',
           parserName: '',
           chapters: [],
+          chapterSummary: {
+            total: 0,
+            selected: 0,
+            recommended: 0,
+            deliberateOverlap: 0,
+            hasUncertainArchiveChapters: false,
+            latestTitle: ''
+          },
+          targetOutputPath: '',
           discoveryChanges: '',
           recommendationSummary: '',
           overlapAllowed: false,
@@ -1855,6 +1997,7 @@ function registerIpcHandlers(): void {
         if (!item || (item.status !== 'needs-review' && item.status !== 'ready')) {
           throw new Error('The selected item is not ready for recommendations.')
         }
+        await ensureQueueItemChapters(item)
         if (rawIncludeOverlap && !item.overlapAllowed) {
           throw new Error('Overlap cannot be applied because archive coverage is uncertain or has unresolved gaps.')
         }
@@ -1872,6 +2015,7 @@ function registerIpcHandlers(): void {
           ...chapter,
           selected: chapter.recommended || chapter.deliberateOverlap
         }))
+        markQueueItemChaptersDirty(item)
         item.includeOverlap = rawIncludeOverlap
         item.overlapCount = rawOverlapCount
         item.overlapAllowed = recommendation.overlapAllowed
@@ -1879,6 +2023,7 @@ function registerIpcHandlers(): void {
         item.status = 'ready'
         item.updatedAt = new Date().toISOString()
         await persistDiscoveryQueue()
+        releaseQueueItemChapters(item)
         notifyDiscoveryQueueChanged()
         return { ok: true, value: undefined }
       } catch (error) {
@@ -1903,11 +2048,10 @@ function registerIpcHandlers(): void {
         discoveryQueue.splice(index, 0, removedItem)
         throw error
       }
-      if (removedItem.downloadOptions) {
-        await removeChapterArtifacts(dataDirectory(), removedItem.id).catch((error: unknown) => {
-          console.warn(`Chapter artifacts for removed queue item ${removedItem.id} could not be removed:`, errorMessage(error))
-        })
-      }
+      dirtyQueueChapterIds.delete(removedItem.id)
+      await removeChapterArtifacts(dataDirectory(), removedItem.id).catch((error: unknown) => {
+        console.warn(`Stored data for removed queue item ${removedItem.id} could not be removed:`, errorMessage(error))
+      })
       notifyDiscoveryQueueChanged()
       return { ok: true, value: undefined }
     } catch (error) {
@@ -1930,16 +2074,41 @@ function registerIpcHandlers(): void {
         throw error
       }
       for (const item of previousQueue) {
-        if (item.downloadOptions) {
-          await removeChapterArtifacts(dataDirectory(), item.id).catch((error: unknown) => {
-            console.warn(`Chapter artifacts for cleared queue item ${item.id} could not be removed:`, errorMessage(error))
-          })
-        }
+        dirtyQueueChapterIds.delete(item.id)
+        await removeChapterArtifacts(dataDirectory(), item.id).catch((error: unknown) => {
+          console.warn(`Stored data for cleared queue item ${item.id} could not be removed:`, errorMessage(error))
+        })
       }
       notifyDiscoveryQueueChanged()
       return { ok: true, value: undefined }
     } catch (error) {
       console.error('Discovery queue clear failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('discovery-queue:clear-completed', async (): Promise<Result<void>> => {
+    try {
+      const completedItems = discoveryQueue.filter((item) => item.status === 'completed')
+      if (completedItems.length === 0) return { ok: true, value: undefined }
+      const previousQueue = discoveryQueue
+      discoveryQueue = discoveryQueue.filter((item) => item.status !== 'completed')
+      try {
+        await persistDiscoveryQueue()
+      } catch (error) {
+        discoveryQueue = previousQueue
+        throw error
+      }
+      for (const item of completedItems) {
+        dirtyQueueChapterIds.delete(item.id)
+        await removeChapterArtifacts(dataDirectory(), item.id).catch((error: unknown) => {
+          console.warn(`Stored data for completed queue item ${item.id} could not be removed:`, errorMessage(error))
+        })
+      }
+      notifyDiscoveryQueueChanged()
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Completed queue items could not be cleared:', error)
       return { ok: false, error: errorMessage(error) }
     }
   })
@@ -1965,14 +2134,17 @@ function registerIpcHandlers(): void {
         if (!item || (item.status !== 'needs-review' && item.status !== 'ready')) {
           throw new Error('The selected discovery queue item is no longer ready for review.')
         }
+        await ensureQueueItemChapters(item)
         const availableUrls = new Set(item.chapters.map((chapter) => chapter.url))
         if ([...selectedUrls].some((url) => !availableUrls.has(url))) {
           throw new Error('The chapter selection no longer matches the saved discovery snapshot.')
         }
         for (const chapter of item.chapters) chapter.selected = selectedUrls.has(chapter.url)
+        markQueueItemChaptersDirty(item)
         item.status = 'ready'
         item.updatedAt = new Date().toISOString()
         await persistDiscoveryQueue()
+        releaseQueueItemChapters(item)
         notifyDiscoveryQueueChanged()
         return { ok: true, value: undefined }
       } catch (error) {
@@ -2004,18 +2176,13 @@ function registerIpcHandlers(): void {
         if (item && item.status !== 'needs-review' && item.status !== 'ready') {
           throw new Error('This novel is not ready to be queued for EPUB creation.')
         }
+        if (item) await ensureQueueItemChapters(item)
 
         const sourceUrl = input.sourceUrl || item?.sourceUrl || input.chapters[0].url
         const outputPath = expectedOutputPath(input.outputDirectory, input.title, input.filename ?? '', input.chapters)
         const outputConflict = discoveryQueue.find((candidate) => {
           if (candidate.id === item?.id || !candidate.downloadOptions || candidate.status === 'completed') return false
-          const selectedChapters = candidate.chapters.filter((chapter) => chapter.selected)
-          return expectedOutputPath(
-            candidate.downloadOptions.outputDirectory,
-            candidate.downloadOptions.title,
-            candidate.downloadOptions.filename,
-            selectedChapters
-          ) === outputPath
+          return candidate.targetOutputPath === outputPath
         })
         if (outputConflict) {
           throw new Error(
@@ -2056,6 +2223,15 @@ function registerIpcHandlers(): void {
               recommended: true,
               deliberateOverlap: false
             })),
+            chapterSummary: {
+              total: 0,
+              selected: 0,
+              recommended: 0,
+              deliberateOverlap: 0,
+              hasUncertainArchiveChapters: false,
+              latestTitle: ''
+            },
+            targetOutputPath: '',
             discoveryChanges: '',
             recommendationSummary: '',
             overlapAllowed: false,
@@ -2079,11 +2255,13 @@ function registerIpcHandlers(): void {
           queueMutated = true
           const recommendation = recommendArchiveCoverage(createdItem, libraryIndex?.files ?? [])
           createdItem.chapters = recommendation.chapters
+          markQueueItemChaptersDirty(createdItem)
           createdItem.overlapAllowed = recommendation.overlapAllowed
           createdItem.recommendationSummary = recommendation.summary
         } else {
           const existingItem = item
-          previousItem = copyDiscoveryQueue().find((candidate) => candidate.id === existingItem.id) ?? null
+          await ensureQueueItemChapters(existingItem)
+          previousItem = copyDiscoveryQueueItem(existingItem)
           if (input.sourceUrl && validateHttpUrl(input.sourceUrl) !== existingItem.sourceUrl) {
             throw new Error('The source URL does not match the selected queue item.')
           }
@@ -2101,6 +2279,7 @@ function registerIpcHandlers(): void {
           }
           queueMutated = true
           for (const chapter of existingItem.chapters) chapter.selected = selectedUrls.has(chapter.url)
+          markQueueItemChaptersDirty(existingItem)
           existingItem.title = input.title
           existingItem.author = input.author
           existingItem.description = input.description ?? existingItem.description
@@ -2146,6 +2325,7 @@ function registerIpcHandlers(): void {
           outputDirectory: input.outputDirectory,
           epubCss: settings.epubCss
         }
+        queueItem.targetOutputPath = outputPath
         queueItem.queuedAt = now
         queueItem.completedChapterUrls = []
         queueItem.failedChapters = []
@@ -2158,6 +2338,7 @@ function registerIpcHandlers(): void {
         await persistHistoryEntry(historyEntry)
         try {
           await persistDiscoveryQueue()
+          releaseQueueItemChapters(queueItem)
         } catch (error) {
           historyEntry.status = 'failed'
           historyEntry.error = `The queue item could not be saved: ${errorMessage(error)}`
@@ -2173,9 +2354,16 @@ function registerIpcHandlers(): void {
         if (queueMutated) {
           if (createdItemId) {
             discoveryQueue = discoveryQueue.filter((candidate) => candidate.id !== createdItemId)
+            dirtyQueueChapterIds.delete(createdItemId)
+            await removeChapterArtifacts(dataDirectory(), createdItemId).catch((cleanupError: unknown) => {
+              console.warn(`Rolled-back queue item ${createdItemId} artifacts could not be removed:`, errorMessage(cleanupError))
+            })
           } else if (previousItem) {
             const index = discoveryQueue.findIndex((candidate) => candidate.id === previousItem?.id)
-            if (index >= 0) discoveryQueue[index] = previousItem
+            if (index >= 0) {
+              discoveryQueue[index] = previousItem
+              markQueueItemChaptersDirty(previousItem)
+            }
           }
           await persistDiscoveryQueue().catch((saveError: unknown) => {
             console.error('Failed queue submission rollback could not be saved:', saveError)
@@ -2214,18 +2402,20 @@ function registerIpcHandlers(): void {
       ) {
         throw new Error('The EPUB job changed before it could be retried.')
       }
+      await ensureQueueItemChapters(item)
       item.status = 'queued'
       item.repackageOnly = false
       item.queuedAt = new Date().toISOString()
       item.error = ''
       item.progress = {
-        current: item.completedChapterUrls.length,
-        total: item.chapters.filter((chapter) => chapter.selected).length,
+        current: historyEntry.completedChapters,
+        total: item.chapterSummary.selected,
         message: 'Queued for retry'
       }
       historyEntry.status = 'queued'
       historyEntry.error = ''
       await persistDownloadState(item, historyEntry)
+      releaseQueueItemChapters(item)
       void pumpDownloadQueue().catch((error: unknown) => {
         console.error('Download queue scheduler failed:', error)
       })
@@ -2246,6 +2436,7 @@ function registerIpcHandlers(): void {
       if (item.status !== 'failed' && item.status !== 'partially-completed' && item.status !== 'cancelled') {
         throw new Error('Only failed, partially completed, or cancelled jobs can be repackaged.')
       }
+      await ensureQueueItemChapters(item)
       const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
       if (selectedChapters.length === 0) throw new Error('Select at least one saved chapter before repackaging.')
       for (const chapter of selectedChapters) {
@@ -2273,7 +2464,7 @@ function registerIpcHandlers(): void {
       item.queuedAt = new Date().toISOString()
       item.error = ''
       item.failedChapters = []
-      item.completedChapterUrls = selectedChapters.map((chapter) => chapter.url)
+      item.completedChapterUrls = []
       item.progress = {
         current: selectedChapters.length,
         total: selectedChapters.length,
@@ -2284,6 +2475,7 @@ function registerIpcHandlers(): void {
       historyEntry.selectedChapterCount = selectedChapters.length
       historyEntry.error = ''
       await persistDownloadState(item, historyEntry)
+      releaseQueueItemChapters(item)
       void pumpDownloadQueue().catch((error: unknown) => {
         console.error('Download queue scheduler failed:', error)
       })
@@ -2391,8 +2583,8 @@ function registerIpcHandlers(): void {
       item.queuedAt = new Date().toISOString()
       item.error = ''
       item.progress = {
-        current: item.completedChapterUrls.length,
-        total: item.chapters.filter((chapter) => chapter.selected).length,
+        current: historyEntry.completedChapters,
+        total: item.chapterSummary.selected,
         message: 'Queued to resume'
       }
       historyEntry.status = 'queued'
@@ -2905,6 +3097,35 @@ app.whenReady().then(async () => {
   if (interruptedLibraryOperations) await flushLibraryOperations()
   await markInterruptedDownloadJobs(dataDirectory())
   discoveryQueue = (await readDiscoveryQueue(dataDirectory())).map(hydrateQueueItem)
+  let queueStorageMigrationNeeded = false
+  for (const item of discoveryQueue) {
+    if (item.chapters.length > 0) {
+      if (item.status === 'completed') releaseQueueItemChapters(item)
+      else markQueueItemChaptersDirty(item)
+      queueStorageMigrationNeeded = true
+    }
+    if (
+      item.downloadOptions &&
+      item.status !== 'completed' &&
+      !item.targetOutputPath &&
+      item.chapters.length > 0
+    ) {
+      const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+      item.targetOutputPath = expectedOutputPath(
+        item.downloadOptions.outputDirectory,
+        item.downloadOptions.title,
+        item.downloadOptions.filename,
+        selectedChapters
+      )
+      queueStorageMigrationNeeded = true
+    }
+    if (item.completedChapterUrls.length > 0) {
+      item.completedChapterUrls = []
+      queueStorageMigrationNeeded = true
+    }
+  }
+  if (queueStorageMigrationNeeded) await persistDiscoveryQueue()
+  for (const item of discoveryQueue) releaseQueueItemChapters(item)
   const history = await readDownloadHistory(dataDirectory())
   let interruptedDownloads = false
   for (const item of discoveryQueue) {
@@ -2951,15 +3172,12 @@ app.whenReady().then(async () => {
       item.error = ''
       item.queuedAt = new Date().toISOString()
       item.progress = {
-        current: item.completedChapterUrls.length,
-        total: item.chapters.filter((chapter) => chapter.selected).length,
+        current: historyEntry.completedChapters,
+        total: item.chapterSummary.selected,
         message: 'Resuming after app restart'
       }
       historyEntry.status = 'queued'
       historyEntry.error = ''
-      historyEntry.completedChapters = item.completedChapterUrls.filter((url) =>
-        item.chapters.some((chapter) => chapter.selected && chapter.url === url)
-      ).length
       historyEntry.updatedAt = new Date().toISOString()
       interruptedDownloads = true
     }

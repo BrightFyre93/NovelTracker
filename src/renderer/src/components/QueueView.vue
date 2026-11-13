@@ -7,6 +7,7 @@ import ProgressBar from 'primevue/progressbar'
 import type {
   DiscoveryQueueInput,
   DiscoveryQueueItem,
+  DiscoveryQueueItemSummary,
   DiscoveryQueueStatus,
   GenerateEpubInput,
   TrackerNovel
@@ -26,7 +27,7 @@ interface QueueStatusOption {
 interface QueueStatusGroup {
   status: DiscoveryQueueStatus | null
   label: string
-  items: DiscoveryQueueItem[]
+  items: DiscoveryQueueItemSummary[]
 }
 
 const queueStatusOptions: QueueStatusOption[] = [
@@ -43,7 +44,7 @@ const queueStatusOptions: QueueStatusOption[] = [
 ]
 const queueViewPreferencesKey = 'novel-tracker.queue-view-preferences'
 
-const items = ref<DiscoveryQueueItem[]>([])
+const items = ref<DiscoveryQueueItemSummary[]>([])
 const selectedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
 const groupQueueByStatus = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
@@ -67,6 +68,7 @@ const removingId = ref('')
 const downloadActionId = ref('')
 const batchQueueing = ref(false)
 const clearing = ref(false)
+const clearingCompleted = ref(false)
 const error = ref('')
 const notice = ref('')
 let removeQueueListener: (() => void) | undefined
@@ -84,6 +86,7 @@ const filteredTrackerNovels = computed(() => {
   return matches.slice(0, 100)
 })
 const activeDownloadCount = computed(() => items.value.filter((item) => item.status === 'downloading').length)
+const completedQueueCount = computed(() => items.value.filter((item) => item.status === 'completed').length)
 const queuedItems = computed(() =>
   items.value
     .filter((item) => item.status === 'queued' && item.downloadOptions)
@@ -94,18 +97,18 @@ const batchQueueableItems = computed(() =>
     (item.status === 'needs-review' || item.status === 'ready') &&
     (
       item.status === 'ready'
-        ? item.chapters.some((chapter) => chapter.selected)
-        : item.chapters.some((chapter) => chapter.recommended) ||
+        ? item.chapterSummary.selected > 0
+        : item.chapterSummary.recommended > 0 ||
           (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
     ) &&
-    !item.chapters.some((chapter) => chapter.archiveStatus === 'uncertain' || chapter.archiveStatus === 'probable')
+    !item.chapterSummary.hasUncertainArchiveChapters
   )
 )
 const batchAcceptableItems = computed(() =>
   items.value.filter(
     (item) =>
       item.status === 'needs-review' &&
-      !item.chapters.some((chapter) => chapter.archiveStatus === 'uncertain' || chapter.archiveStatus === 'probable')
+      !item.chapterSummary.hasUncertainArchiveChapters
   )
 )
 const batchAccepting = ref(false)
@@ -174,20 +177,20 @@ watch([selectedQueueStatuses, groupQueueByStatus], () => {
   }
 }, { deep: true, flush: 'sync' })
 
-function compareQueuedItems(left: DiscoveryQueueItem, right: DiscoveryQueueItem): number {
+function compareQueuedItems(left: DiscoveryQueueItemSummary, right: DiscoveryQueueItemSummary): number {
   return left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id)
 }
 
-function compareQueueItemsByTitle(left: DiscoveryQueueItem, right: DiscoveryQueueItem): number {
+function compareQueueItemsByTitle(left: DiscoveryQueueItemSummary, right: DiscoveryQueueItemSummary): number {
   return left.title.localeCompare(right.title, 'en', { numeric: true, sensitivity: 'base' }) ||
     left.title.localeCompare(right.title) ||
     left.id.localeCompare(right.id)
 }
 
-function hasQueueableChapters(item: DiscoveryQueueItem): boolean {
-  if (item.status === 'ready') return item.chapters.some((chapter) => chapter.selected)
+function hasQueueableChapters(item: DiscoveryQueueItemSummary): boolean {
+  if (item.status === 'ready') return item.chapterSummary.selected > 0
   return (
-    item.chapters.some((chapter) => chapter.recommended) ||
+    item.chapterSummary.recommended > 0 ||
     (item.includeOverlap && item.overlapAllowed && item.overlapCount > 0)
   )
 }
@@ -362,7 +365,7 @@ async function addToQueue(): Promise<void> {
   }
 }
 
-async function retryItem(item: DiscoveryQueueItem): Promise<void> {
+async function retryItem(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   retryingId.value = item.id
   try {
@@ -375,7 +378,7 @@ async function retryItem(item: DiscoveryQueueItem): Promise<void> {
   }
 }
 
-async function openItemInBrowser(item: DiscoveryQueueItem): Promise<void> {
+async function openItemInBrowser(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
   browserOpeningId.value = item.id
@@ -395,7 +398,7 @@ async function openItemInBrowser(item: DiscoveryQueueItem): Promise<void> {
   }
 }
 
-async function retryItemWithBrowser(item: DiscoveryQueueItem): Promise<void> {
+async function retryItemWithBrowser(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
   browserRetryingId.value = item.id
@@ -413,7 +416,7 @@ async function retryItemWithBrowser(item: DiscoveryQueueItem): Promise<void> {
   }
 }
 
-async function cancelBrowserDiscovery(item: DiscoveryQueueItem): Promise<void> {
+async function cancelBrowserDiscovery(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   try {
     await window.novelTracker.cancelBrowserDiscovery(item.id)
@@ -424,7 +427,7 @@ async function cancelBrowserDiscovery(item: DiscoveryQueueItem): Promise<void> {
 }
 
 async function runDownloadAction(
-  item: DiscoveryQueueItem,
+  item: DiscoveryQueueItemSummary,
   action: 'retry' | 'pause' | 'resume' | 'cancel'
 ): Promise<void> {
   error.value = ''
@@ -456,7 +459,7 @@ async function runDownloadAction(
   if (shouldRefresh) void refreshQueue()
 }
 
-async function repackageOffline(item: DiscoveryQueueItem): Promise<void> {
+async function repackageOffline(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
   downloadActionId.value = item.id
@@ -481,7 +484,7 @@ function selectedChapters(item: DiscoveryQueueItem) {
     .map(({ id, title, url }) => ({ id, title, url }))
 }
 
-async function queueRecommendedEpub(item: DiscoveryQueueItem): Promise<string | null> {
+async function queueRecommendedEpub(item: DiscoveryQueueItemSummary): Promise<string | null> {
   if (item.status === 'needs-review') {
     const accepted = await window.novelTracker.acceptQueueRecommendations(
       item.id,
@@ -491,9 +494,9 @@ async function queueRecommendedEpub(item: DiscoveryQueueItem): Promise<string | 
     if (!accepted.ok) return `${item.title}: ${accepted.error}`
   }
 
-  const savedQueue = await window.novelTracker.getDiscoveryQueue()
-  const currentItem = savedQueue.find((candidate) => candidate.id === item.id)
-  if (!currentItem) return `${item.title}: the discovery queue item no longer exists.`
+  const detail = await window.novelTracker.getDiscoveryQueueItem(item.id)
+  if (!detail.ok) return `${item.title}: ${detail.error}`
+  const currentItem = detail.value
   const chapters = selectedChapters(currentItem)
   if (chapters.length === 0) return `${item.title}: select at least one chapter before queueing.`
 
@@ -516,7 +519,7 @@ async function queueRecommendedEpub(item: DiscoveryQueueItem): Promise<string | 
   return result.ok ? null : `${item.title}: ${result.error}`
 }
 
-async function queueOneRecommendedEpub(item: DiscoveryQueueItem): Promise<void> {
+async function queueOneRecommendedEpub(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
   downloadActionId.value = item.id
@@ -533,6 +536,16 @@ async function queueOneRecommendedEpub(item: DiscoveryQueueItem): Promise<void> 
   } finally {
     downloadActionId.value = ''
   }
+}
+
+async function openQueueItem(item: DiscoveryQueueItemSummary): Promise<void> {
+  error.value = ''
+  const result = await window.novelTracker.getDiscoveryQueueItem(item.id)
+  if (!result.ok) {
+    error.value = result.error
+    return
+  }
+  emit('openItem', result.value)
 }
 
 async function queueAllRecommendedEpubs(): Promise<void> {
@@ -561,7 +574,7 @@ async function queueAllRecommendedEpubs(): Promise<void> {
   }
 }
 
-async function moveQueuedJob(item: DiscoveryQueueItem, direction: 'up' | 'down'): Promise<void> {
+async function moveQueuedJob(item: DiscoveryQueueItemSummary, direction: 'up' | 'down'): Promise<void> {
   error.value = ''
   downloadActionId.value = item.id
   try {
@@ -575,7 +588,7 @@ async function moveQueuedJob(item: DiscoveryQueueItem, direction: 'up' | 'down')
   }
 }
 
-async function acceptRecommendations(item: DiscoveryQueueItem): Promise<void> {
+async function acceptRecommendations(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
   try {
@@ -622,7 +635,7 @@ async function acceptSafeSuggestions(): Promise<void> {
   }
 }
 
-async function refreshItem(item: DiscoveryQueueItem): Promise<void> {
+async function refreshItem(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
   notice.value = ''
   refreshingId.value = item.id
@@ -636,7 +649,7 @@ async function refreshItem(item: DiscoveryQueueItem): Promise<void> {
   }
 }
 
-async function removeItem(item: DiscoveryQueueItem): Promise<void> {
+async function removeItem(item: DiscoveryQueueItemSummary): Promise<void> {
   if (!window.confirm(`Remove "${item.title}" from the discovery queue?`)) return
   error.value = ''
   notice.value = ''
@@ -675,6 +688,27 @@ async function clearQueue(): Promise<void> {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     clearing.value = false
+  }
+}
+
+async function clearCompletedQueueItems(): Promise<void> {
+  const completedCount = completedQueueCount.value
+  if (completedCount === 0) return
+  if (!window.confirm(`Remove ${completedCount} completed queue entries? EPUB files and job history will remain.`)) return
+  error.value = ''
+  notice.value = ''
+  clearingCompleted.value = true
+  try {
+    const result = await window.novelTracker.clearCompletedDiscoveryQueueItems()
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = `Removed ${completedCount} completed queue entries. EPUB files and job history were kept.`
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    clearingCompleted.value = false
   }
 }
 </script>
@@ -832,6 +866,16 @@ async function clearQueue(): Promise<void> {
           @click="refreshQueue"
         />
         <Button
+          label="Clear completed"
+          icon="pi pi-check-circle"
+          severity="secondary"
+          text
+          size="small"
+          :loading="clearingCompleted"
+          :disabled="completedQueueCount === 0 || clearing || clearingCompleted || batchQueueing"
+          @click="clearCompletedQueueItems"
+        />
+        <Button
           icon="pi pi-trash"
           severity="danger"
           text
@@ -840,7 +884,7 @@ async function clearQueue(): Promise<void> {
           aria-label="Clear queue"
           title="Clear queue"
           :loading="clearing"
-          :disabled="items.length === 0 || clearing || batchQueueing || items.some((item) => ['discovering', 'queued', 'downloading', 'paused'].includes(item.status))"
+          :disabled="items.length === 0 || clearing || clearingCompleted || batchQueueing || items.some((item) => ['discovering', 'queued', 'downloading', 'paused'].includes(item.status))"
           @click="clearQueue"
         />
       </div>
@@ -888,10 +932,10 @@ async function clearQueue(): Promise<void> {
       <div class="queue-item-summary">
         <strong>{{ item.title }}</strong>
         <span>{{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}</span>
-        <span v-if="item.chapters.length">
-          {{ item.chapters.filter((chapter) => chapter.selected).length.toLocaleString() }} selected ·
-          {{ item.chapters.filter((chapter) => chapter.recommended || (item.includeOverlap && chapter.deliberateOverlap)).length.toLocaleString() }} suggested of {{ item.chapters.length.toLocaleString() }}
-          <template v-if="item.chapters[item.chapters.length - 1]"> · latest: {{ item.chapters[item.chapters.length - 1].title }}</template>
+        <span v-if="item.chapterSummary.total">
+          {{ item.chapterSummary.selected.toLocaleString() }} selected ·
+          {{ (item.chapterSummary.recommended + (item.includeOverlap ? item.chapterSummary.deliberateOverlap : 0)).toLocaleString() }} suggested of {{ item.chapterSummary.total.toLocaleString() }}
+          <template v-if="item.chapterSummary.latestTitle"> · latest: {{ item.chapterSummary.latestTitle }}</template>
         </span>
         <span v-if="item.recommendationSummary" class="queue-item-recommendation">{{ item.recommendationSummary }}</span>
         <span
@@ -912,6 +956,9 @@ async function clearQueue(): Promise<void> {
         <span v-if="item.error" class="queue-item-error">{{ item.error }}</span>
         <span v-for="failed in item.failedChapters" :key="failed.url" class="queue-item-error">
           {{ failed.title }}: {{ failed.error }}
+        </span>
+        <span v-if="item.failedChapterCount > item.failedChapters.length" class="queue-item-error">
+          {{ item.failedChapterCount - item.failedChapters.length }} additional chapter failures
         </span>
       </div>
       <span class="history-status" :class="`status-${item.status}`">
@@ -958,7 +1005,7 @@ async function clearQueue(): Promise<void> {
             severity="secondary"
             outlined
             :disabled="Boolean(downloadActionId) || batchQueueing"
-            @click="emit('openItem', item)"
+            @click="openQueueItem(item)"
           />
           <Button
             v-if="item.status === 'needs-review' || item.status === 'ready'"
