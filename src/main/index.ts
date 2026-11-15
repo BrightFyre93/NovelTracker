@@ -93,7 +93,11 @@ import {
 import { writeEpub } from './services/epub'
 import { recommendArchiveCoverage } from '../shared/archiveRecommendation'
 import { summarizeLibraryIndex } from '../shared/libraryIndexSummary'
-import { sanitizeEpubFilename, suggestEpubFilename } from '../shared/epubFilename'
+import {
+  MAX_EPUB_FILENAME_BASENAME_LENGTH,
+  sanitizeEpubFilename,
+  suggestEpubFilename
+} from '../shared/epubFilename'
 import type { EpubMergeInput, EpubMergeResult } from './services/epubMerger'
 import { convertAzw3ToEpub, convertEpubToAzw3 } from './services/azw3Converter'
 import { initializeLocalLogger } from './services/localLogger'
@@ -117,6 +121,7 @@ type LibraryScanWorkerMessage =
 let activeLibraryScan: ActiveLibraryScan | null = null
 let libraryIndexRestoreActive = false
 let discoveryQueue: DiscoveryQueueItem[] = []
+const reservedOutputPaths = new Set<string>()
 let discoveryQueueWrites = Promise.resolve()
 const dirtyQueueChapterIds = new Map<string, number>()
 let queueChapterRevision = 0
@@ -460,6 +465,7 @@ function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
     includeOverlap: item.includeOverlap ?? false,
     overlapCount: item.overlapCount ?? 10,
     repackageOnly: item.repackageOnly ?? false,
+    saveAvailableChaptersOnly: item.saveAvailableChaptersOnly ?? false,
     downloadOptions: item.downloadOptions
       ? {
           ...item.downloadOptions,
@@ -505,6 +511,87 @@ function expectedOutputPath(
     chapters[chapters.length - 1]?.title ?? ''
   )
   return resolve(outputDirectory, sanitizeEpubFilename(requestedFilename)).toLowerCase()
+}
+
+function findOutputConflict(outputPath: string, itemId: string): DiscoveryQueueItem | undefined {
+  return discoveryQueue.find((candidate) =>
+    candidate.id !== itemId &&
+    candidate.downloadOptions &&
+    candidate.status !== 'completed' &&
+    candidate.targetOutputPath === outputPath
+  )
+}
+
+function assertOutputPathAvailable(outputPath: string, itemId: string): void {
+  const conflict = findOutputConflict(outputPath, itemId)
+  if (conflict) {
+    throw new Error(
+      `Another saved EPUB job uses this output filename. Remove or complete "${conflict.title}" before reusing it.`
+    )
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+async function reserveIncompleteEpubFilename(
+  item: DiscoveryQueueItem,
+  chapters: ChapterLink[]
+): Promise<{ filename: string; outputPath: string; release: () => void }> {
+  const options = item.downloadOptions
+  if (!options) throw new Error('This item has no saved EPUB job to package.')
+  const requestedFilename = options.filename.trim() || suggestEpubFilename(
+    options.title,
+    chapters[0]?.title ?? '',
+    chapters[chapters.length - 1]?.title ?? ''
+  )
+  const base = sanitizeEpubFilename(requestedFilename).replace(/\.epub$/i, '')
+
+  for (let suffix = 1; suffix < 10000; suffix += 1) {
+    const marker = suffix === 1 ? ' (incomplete)' : ` (incomplete ${suffix})`
+    const stem = base
+      .slice(0, MAX_EPUB_FILENAME_BASENAME_LENGTH - marker.length)
+      .replace(/[. ]+$/g, '')
+    const filename = sanitizeEpubFilename(`${stem}${marker}.epub`)
+    const outputPath = resolve(options.outputDirectory, filename)
+    const normalizedPath = outputPath.toLowerCase()
+    if (
+      reservedOutputPaths.has(normalizedPath) ||
+      discoveryQueue.some((candidate) =>
+        candidate.id !== item.id &&
+        candidate.targetOutputPath === normalizedPath &&
+        candidate.status !== 'completed'
+      )
+    ) {
+      continue
+    }
+
+    try {
+      await lstat(outputPath)
+      continue
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error
+    }
+
+    if (
+      reservedOutputPaths.has(normalizedPath) ||
+      discoveryQueue.some((candidate) =>
+        candidate.id !== item.id &&
+        candidate.targetOutputPath === normalizedPath &&
+        candidate.status !== 'completed'
+      )
+    ) {
+      continue
+    }
+    reservedOutputPaths.add(normalizedPath)
+    return {
+      filename,
+      outputPath: normalizedPath,
+      release: () => reservedOutputPaths.delete(normalizedPath)
+    }
+  }
+  throw new Error('A unique filename for the incomplete EPUB could not be reserved.')
 }
 
 function isWithinDirectory(directory: string, candidate: string): boolean {
@@ -1265,12 +1352,24 @@ async function runQueuedDownload(
   const item = discoveryQueue.find((candidate) => candidate.id === itemId)
   if (!item || !item.downloadOptions) return
   const options = item.downloadOptions
+  const saveAvailableChaptersOnly = item.saveAvailableChaptersOnly === true
   const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+  const missingSelectedChapterUrls = new Set<string>()
   let completedSelectedChapterCount = 0
   let activeChapterRequests = 0
   let lastCheckpointAt = Date.now()
   let chaptersSinceCheckpoint = 0
   let progressCheckpointTail = Promise.resolve()
+  let releaseOutputReservation = (): void => {}
+
+  const recordUnavailableChapter = (chapter: ChapterLink, reason: string): void => {
+    missingSelectedChapterUrls.add(chapter.url)
+    item.failedChapters = [
+      ...item.failedChapters.filter((failed) => failed.url !== chapter.url),
+      { url: chapter.url, title: chapter.title, error: reason }
+    ]
+    item.error = `${missingSelectedChapterUrls.size} selected chapter(s) are unavailable; saving the available chapters.`
+  }
 
   const persistChapterProgress = (): Promise<void> => {
     const operation = progressCheckpointTail.then(async () => {
@@ -1300,10 +1399,27 @@ async function runQueuedDownload(
           message: `Validating saved chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
         }
         await persistDownloadState(item, historyEntry, false)
-        savedContent = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
-        if (!savedContent || savedContent.url !== chapter.url) {
-          throw new Error(`Saved chapter content is missing or invalid for "${chapter.title}".`)
+        try {
+          savedContent = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
+        } catch (error) {
+          if (!saveAvailableChaptersOnly) throw error
+          console.warn(`Saved chapter artifact for ${chapter.url} will be omitted:`, errorMessage(error))
         }
+        if (!savedContent || savedContent.url !== chapter.url) {
+          const reason = `Saved chapter content is missing or invalid for "${chapter.title}".`
+          if (!saveAvailableChaptersOnly) throw new Error(reason)
+          recordUnavailableChapter(chapter, reason)
+          historyEntry.completedChapters = completedSelectedChapterCount
+          item.progress = {
+            current: completedSelectedChapterCount,
+            total: selectedChapters.length,
+            message: `Skipped unavailable saved chapter: ${chapter.title}`
+          }
+          await persistChapterProgress()
+          return
+        }
+        missingSelectedChapterUrls.delete(chapter.url)
+        item.failedChapters = item.failedChapters.filter((failed) => failed.url !== chapter.url)
         completedSelectedChapterCount += 1
       } else {
         try {
@@ -1421,7 +1537,7 @@ async function runQueuedDownload(
       await persistDownloadState(item, historyEntry)
       return
     }
-    if (item.failedChapters.length > 0) {
+    if (item.failedChapters.length > 0 && !saveAvailableChaptersOnly) {
       item.status = completedSelectedChapterCount > 0 ? 'partially-completed' : 'failed'
       item.progress = {
         current: historyEntry.completedChapters,
@@ -1436,17 +1552,40 @@ async function runQueuedDownload(
 
     const chapters: ChapterContent[] = []
     for (const chapter of selectedChapters) {
-      const content = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
-      if (!content || content.url !== chapter.url) {
-        throw new Error(`Saved chapter content is missing or invalid for "${chapter.title}".`)
+      let content: ChapterContent | null = null
+      let artifactError: unknown
+      try {
+        content = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
+      } catch (error) {
+        artifactError = error
       }
+      if (!content || content.url !== chapter.url) {
+        const reason = `Saved chapter content is missing or invalid for "${chapter.title}".`
+        if (!saveAvailableChaptersOnly) {
+          if (artifactError) throw artifactError
+          throw new Error(reason)
+        }
+        recordUnavailableChapter(chapter, reason)
+        continue
+      }
+      missingSelectedChapterUrls.delete(chapter.url)
       chapters.push(content)
+    }
+    if (chapters.length === 0) {
+      throw new Error('No valid saved chapter content is available to create an EPUB.')
     }
     let cover: ChapterImage | undefined
     if (options.coverUrl) {
       if (item.repackageOnly) {
-        cover = (await readCoverArtifact(dataDirectory(), itemId)) ?? undefined
-        if (!cover) throw new Error('Saved cover content is missing; retry this EPUB online before repackaging.')
+        try {
+          cover = (await readCoverArtifact(dataDirectory(), itemId)) ?? undefined
+        } catch (error) {
+          if (!saveAvailableChaptersOnly) throw error
+          console.warn(`Saved cover artifact for queue item ${itemId} will be omitted:`, errorMessage(error))
+        }
+        if (!cover && !saveAvailableChaptersOnly) {
+          throw new Error('Saved cover content is missing; retry this EPUB online before repackaging.')
+        }
       } else {
         try {
           cover = (await readCoverArtifact(dataDirectory(), itemId)) ?? undefined
@@ -1490,18 +1629,38 @@ async function runQueuedDownload(
       }
     }
     item.progress = {
-      current: selectedChapters.length,
+      current: chapters.length,
       total: selectedChapters.length,
       message: 'Validating and packaging EPUB…'
     }
     await persistDownloadState(item, historyEntry)
+    const omittedChapterCount = selectedChapters.length - chapters.length
+    const incompleteOutput = saveAvailableChaptersOnly && omittedChapterCount > 0
+    let outputFilename = options.filename
+    if (incompleteOutput) {
+      const reservation = await reserveIncompleteEpubFilename(item, selectedChapters)
+      outputFilename = reservation.filename
+      item.targetOutputPath = reservation.outputPath
+      releaseOutputReservation = reservation.release
+      await persistDownloadState(item, historyEntry)
+    } else {
+      const outputPath = expectedOutputPath(
+        options.outputDirectory,
+        options.title,
+        options.filename,
+        selectedChapters
+      )
+      assertOutputPathAvailable(outputPath, itemId)
+      item.targetOutputPath = outputPath
+      await persistDownloadState(item, historyEntry)
+    }
     const result = await writeEpub(
       options.outputDirectory,
       options.title,
       options.author,
       options.language,
       chapters,
-      options.filename,
+      outputFilename,
       controller.signal,
       options.epubCss,
       {
@@ -1514,20 +1673,35 @@ async function runQueuedDownload(
         cover
       }
     )
-    item.status = 'completed'
+    item.status = incompleteOutput ? 'partially-completed' : 'completed'
     item.repackageOnly = false
+    item.saveAvailableChaptersOnly = false
     item.outputPath = result.outputPath
-    item.error = ''
-    item.progress = { current: selectedChapters.length, total: selectedChapters.length, message: 'Completed' }
+    item.targetOutputPath = result.outputPath.toLowerCase()
+    item.error = incompleteOutput
+      ? `${omittedChapterCount} selected chapter(s) were omitted. Retry to fetch them and create a complete EPUB.`
+      : ''
+    item.progress = {
+      current: chapters.length,
+      total: selectedChapters.length,
+      message: incompleteOutput
+        ? `Saved ${chapters.length} of ${selectedChapters.length} selected chapters (incomplete)`
+        : 'Completed'
+    }
     item.completedChapterUrls = []
-    item.failedChapters = []
-    historyEntry.status = 'completed'
+    item.failedChapters = incompleteOutput
+      ? item.failedChapters.filter((failed) => missingSelectedChapterUrls.has(failed.url))
+      : []
+    historyEntry.completedChapters = chapters.length
+    historyEntry.status = item.status
     historyEntry.outputPath = result.outputPath
-    historyEntry.error = ''
+    historyEntry.error = item.error
     await persistDownloadState(item, historyEntry)
-    await removeChapterArtifacts(dataDirectory(), itemId).catch((error: unknown) => {
-      console.warn(`Completed chapter artifacts for queue item ${itemId} could not be removed:`, errorMessage(error))
-    })
+    if (!incompleteOutput) {
+      await removeChapterArtifacts(dataDirectory(), itemId).catch((error: unknown) => {
+        console.warn(`Completed chapter artifacts for queue item ${itemId} could not be removed:`, errorMessage(error))
+      })
+    }
   } catch (error) {
     const requestedAction = activeDownloads.get(itemId)?.requestedAction ?? 'none'
     if (requestedAction === 'pause' || requestedAction === 'cancel') {
@@ -1552,6 +1726,8 @@ async function runQueuedDownload(
     } catch (saveError) {
       console.error(`Queued EPUB job ${itemId} state could not be saved:`, saveError)
     }
+  } finally {
+    releaseOutputReservation()
   }
 }
 
@@ -2130,6 +2306,7 @@ function registerIpcHandlers(): void {
           overlapCount: 10,
           downloadOptions: null,
           repackageOnly: false,
+          saveAvailableChaptersOnly: false,
           queuedAt: '',
           completedChapterUrls: [],
           failedChapters: [],
@@ -2540,15 +2717,7 @@ function registerIpcHandlers(): void {
 
         const sourceUrl = input.sourceUrl || item?.sourceUrl || input.chapters[0].url
         const outputPath = expectedOutputPath(input.outputDirectory, input.title, input.filename ?? '', input.chapters)
-        const outputConflict = discoveryQueue.find((candidate) => {
-          if (candidate.id === item?.id || !candidate.downloadOptions || candidate.status === 'completed') return false
-          return candidate.targetOutputPath === outputPath
-        })
-        if (outputConflict) {
-          throw new Error(
-            `Another saved EPUB job uses this output filename. Remove or complete "${outputConflict.title}" before reusing it.`
-          )
-        }
+        assertOutputPathAvailable(outputPath, item?.id ?? '')
         if (!item) {
           const libraryIndex = await readLibraryIndex(dataDirectory())
           const duplicate = discoveryQueue.find(
@@ -2693,6 +2862,8 @@ function registerIpcHandlers(): void {
         queueItem.failedChapters = []
         queueItem.outputPath = ''
         queueItem.downloadHistoryId = historyEntry.id
+        queueItem.repackageOnly = false
+        queueItem.saveAvailableChaptersOnly = false
         queueItem.progress = { current: 0, total: input.chapters.length, message: 'Queued for download' }
         queueItem.error = ''
         queueItem.updatedAt = now
@@ -2765,8 +2936,19 @@ function registerIpcHandlers(): void {
         throw new Error('The EPUB job changed before it could be retried.')
       }
       await ensureQueueItemChapters(item)
+      const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+      if (selectedChapters.length === 0) throw new Error('Select at least one chapter before retrying this EPUB.')
+      const outputPath = expectedOutputPath(
+        item.downloadOptions.outputDirectory,
+        item.downloadOptions.title,
+        item.downloadOptions.filename,
+        selectedChapters
+      )
+      assertOutputPathAvailable(outputPath, item.id)
+      item.targetOutputPath = outputPath
       item.status = 'queued'
       item.repackageOnly = false
+      item.saveAvailableChaptersOnly = false
       item.queuedAt = new Date().toISOString()
       item.error = ''
       item.progress = {
@@ -2817,12 +2999,23 @@ function registerIpcHandlers(): void {
       }
 
       await ensureQueueItemChapters(item)
+      const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+      if (selectedChapters.length === 0) throw new Error('Select at least one chapter before retrying this EPUB.')
+      const outputPath = expectedOutputPath(
+        item.downloadOptions.outputDirectory,
+        item.downloadOptions.title,
+        item.downloadOptions.filename,
+        selectedChapters
+      )
+      assertOutputPathAvailable(outputPath, item.id)
+      item.targetOutputPath = outputPath
       const history = await readDownloadHistory(dataDirectory())
       const historyEntry = await ensureQueueItemHistoryEntry(item, history)
       if (!historyEntry) throw new Error('The saved EPUB job details could not be restored.')
 
       item.status = 'queued'
       item.repackageOnly = false
+      item.saveAvailableChaptersOnly = false
       item.queuedAt ||= new Date().toISOString()
       item.error = ''
       item.progress = {
@@ -2858,6 +3051,13 @@ function registerIpcHandlers(): void {
       await ensureQueueItemChapters(item)
       const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
       if (selectedChapters.length === 0) throw new Error('Select at least one saved chapter before repackaging.')
+      const outputPath = expectedOutputPath(
+        item.downloadOptions.outputDirectory,
+        item.downloadOptions.title,
+        item.downloadOptions.filename,
+        selectedChapters
+      )
+      assertOutputPathAvailable(outputPath, item.id)
       for (const chapter of selectedChapters) {
         const content = await readChapterArtifact(dataDirectory(), item.id, chapter.url)
         if (!content || content.url !== chapter.url) {
@@ -2879,6 +3079,8 @@ function registerIpcHandlers(): void {
       }
 
       item.repackageOnly = true
+      item.saveAvailableChaptersOnly = false
+      item.targetOutputPath = outputPath
       item.status = 'queued'
       item.queuedAt = new Date().toISOString()
       item.error = ''
@@ -2901,6 +3103,65 @@ function registerIpcHandlers(): void {
       return { ok: true, value: undefined }
     } catch (error) {
       console.error('Offline EPUB repackaging failed:', error)
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
+  ipcMain.handle('download-queue:save-available', async (_event, rawId: unknown): Promise<Result<void>> => {
+    try {
+      if (typeof rawId !== 'string') throw new Error('Invalid download queue item.')
+      const item = discoveryQueue.find((candidate) => candidate.id === rawId)
+      if (!item || !item.downloadOptions || !item.downloadHistoryId) {
+        throw new Error('This item has no saved EPUB job to partially save.')
+      }
+      if (item.status !== 'failed' && item.status !== 'partially-completed' && item.status !== 'cancelled') {
+        throw new Error('Only failed, partially completed, or cancelled jobs can save available chapters.')
+      }
+      await ensureQueueItemChapters(item)
+      const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
+      if (selectedChapters.length === 0) throw new Error('Select at least one saved chapter before saving available chapters.')
+      const outputPath = expectedOutputPath(
+        item.downloadOptions.outputDirectory,
+        item.downloadOptions.title,
+        item.downloadOptions.filename,
+        selectedChapters
+      )
+      assertOutputPathAvailable(outputPath, item.id)
+
+      const history = await readDownloadHistory(dataDirectory())
+      const historyEntry = history.find((entry) => entry.id === item.downloadHistoryId)
+      if (!historyEntry) throw new Error('The saved job history entry is missing.')
+      if (
+        !discoveryQueue.includes(item) ||
+        (item.status !== 'failed' && item.status !== 'partially-completed' && item.status !== 'cancelled')
+      ) {
+        throw new Error('The EPUB job changed before available chapters could be saved.')
+      }
+
+      item.repackageOnly = true
+      item.saveAvailableChaptersOnly = true
+      item.targetOutputPath = outputPath
+      item.status = 'queued'
+      item.queuedAt = new Date().toISOString()
+      item.error = ''
+      item.completedChapterUrls = []
+      item.progress = {
+        current: Math.min(historyEntry.completedChapters, selectedChapters.length),
+        total: selectedChapters.length,
+        message: 'Queued to save available chapters'
+      }
+      historyEntry.status = 'queued'
+      historyEntry.selectedChapterCount = selectedChapters.length
+      historyEntry.completedChapters = Math.min(historyEntry.completedChapters, selectedChapters.length)
+      historyEntry.error = ''
+      await persistDownloadState(item, historyEntry)
+      releaseQueueItemChapters(item)
+      void pumpDownloadQueue().catch((error: unknown) => {
+        console.error('Download queue scheduler failed:', error)
+      })
+      return { ok: true, value: undefined }
+    } catch (error) {
+      console.error('Saving available EPUB chapters failed:', error)
       return { ok: false, error: errorMessage(error) }
     }
   })

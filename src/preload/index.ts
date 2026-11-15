@@ -78,6 +78,8 @@ const api: NovelTrackerApi = {
   retryEpub: (id: string) => ipcRenderer.invoke('download-queue:retry', id) as Promise<Result<void>>,
   recoverEpubQueueItem: (id: string) => ipcRenderer.invoke('download-queue:recover', id) as Promise<Result<void>>,
   repackageEpub: (id: string) => ipcRenderer.invoke('download-queue:repackage', id) as Promise<Result<void>>,
+  saveAvailableChaptersEpub: (id: string) =>
+    ipcRenderer.invoke('download-queue:save-available', id) as Promise<Result<void>>,
   pauseEpub: (id: string) => ipcRenderer.invoke('download-queue:pause', id) as Promise<Result<void>>,
   resumeEpub: (id: string) => ipcRenderer.invoke('download-queue:resume', id) as Promise<Result<void>>,
   cancelEpub: (id: string) => ipcRenderer.invoke('download-queue:cancel', id) as Promise<Result<void>>,

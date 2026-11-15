@@ -231,6 +231,7 @@ export interface DiscoveryQueueItem {
   includeOverlap: boolean
   overlapCount: number
   repackageOnly: boolean
+  saveAvailableChaptersOnly?: boolean
   downloadOptions: QueueDownloadOptions | null
   queuedAt: string
   completedChapterUrls: string[]
@@ -449,6 +450,7 @@ export interface NovelTrackerApi {
   updateSiteExtractionPreferences(preferences: SiteExtractionPreference[]): Promise<Result<AppSettings>>
   updateLibraryScanOptions(scanOldFolder: boolean, scanOldCompletedFolder: boolean): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
+  saveAvailableChaptersEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(listener: (items: DiscoveryQueueItemSummary[]) => void): () => void
   getLibraryIndexSummary(): Promise<LibraryIndexSummary | null>
   getLibraryNovelFiles(novelKey: string): Promise<Result<LibraryFileRecord[]>>

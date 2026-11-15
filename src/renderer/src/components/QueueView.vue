@@ -529,13 +529,17 @@ async function openItemInBrowser(item: DiscoveryQueueItemSummary): Promise<void>
   browserOpeningId.value = item.id
   browserReadyId.value = ''
   try {
-    const result = await window.novelTracker.openVerificationBrowser(item.sourceUrl)
+    const failedChapter = item.downloadOptions ? item.failedChapters[0] : undefined
+    const verificationUrl = failedChapter?.url ?? item.sourceUrl
+    const result = await window.novelTracker.openVerificationBrowser(verificationUrl)
     if (!result.ok) {
       error.value = result.error
       return
     }
     browserReadyId.value = item.id
-    notice.value = `Opened ${item.title} in Chromium. Complete any sign-in or verification manually, then retry using the browser.`
+    notice.value = failedChapter
+      ? `Opened failed chapter "${failedChapter.title}" in Chromium. Complete any verification there, then retry the EPUB job.`
+      : `Opened ${item.title} in Chromium. Complete any sign-in or verification manually, then retry using the browser.`
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
@@ -636,6 +640,25 @@ async function repackageOffline(item: DiscoveryQueueItemSummary): Promise<void> 
       return
     }
     notice.value = `Queued ${item.title} for offline repackaging from saved content.`
+    await refreshQueue()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    downloadActionId.value = ''
+  }
+}
+
+async function saveAvailableChapters(item: DiscoveryQueueItemSummary): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  downloadActionId.value = item.id
+  try {
+    const result = await window.novelTracker.saveAvailableChaptersEpub(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    notice.value = `Queued ${item.title} to package its available saved chapters.`
     await refreshQueue()
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -1223,7 +1246,9 @@ async function clearCompletedQueueItems(): Promise<void> {
                   class="queue-item-rechecking"
                 >
                   <i class="pi pi-box" aria-hidden="true"></i>
-                  Offline repackaging from saved content — no network requests
+                  {{ item.saveAvailableChaptersOnly
+                    ? 'Saving available chapters offline — missing chapters remain available for retry'
+                    : 'Offline repackaging from saved content — no network requests' }}
                 </span>
                 <div v-else-if="item.status === 'discovering' && !item.downloadOptions" class="queue-item-rechecking">
                   <span><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> {{ item.progress?.message ?? 'Discovering chapters…' }}</span>
@@ -1236,7 +1261,12 @@ async function clearCompletedQueueItems(): Promise<void> {
                   />
                 </div>
                 <span v-else-if="item.progress">
-                  <template v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status)">
+                  <template
+                    v-if="item.downloadOptions && (
+                      ['queued', 'downloading', 'paused'].includes(item.status) ||
+                      (item.status === 'partially-completed' && Boolean(item.outputPath))
+                    )"
+                  >
                     {{ item.progress.message }}
                   </template>
                   <template v-else>
@@ -1373,6 +1403,17 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
+            label="Save available chapters"
+            icon="pi pi-save"
+            size="small"
+            severity="secondary"
+            outlined
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="saveAvailableChapters(item)"
+          />
+          <Button
+            v-if="item.downloadOptions && item.failedChapterCount === 0 && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
             label="Repackage offline"
             icon="pi pi-box"
             size="small"

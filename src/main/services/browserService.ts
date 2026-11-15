@@ -91,6 +91,23 @@ export async function readBrowserPage(
   }
   if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
 
+  const visibleVerificationPage =
+    verificationPage && !verificationPage.isClosed() ? verificationPage : null
+  const visiblePageUrl = visibleVerificationPage?.url() ?? ''
+  if (
+    visibleVerificationPage &&
+    visiblePageUrl.startsWith('http') &&
+    validateHttpUrl(visiblePageUrl) === url
+  ) {
+    await visibleVerificationPage.locator('body').waitFor({ state: 'attached', timeout: BROWSER_NAVIGATION_TIMEOUT_MS })
+    await visibleVerificationPage.waitForTimeout(750)
+    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    return {
+      html: await visibleVerificationPage.content(),
+      finalUrl: validateHttpUrl(visibleVerificationPage.url())
+    }
+  }
+
   const page = await context.newPage()
   const abort = (): void => {
     void page.close()
