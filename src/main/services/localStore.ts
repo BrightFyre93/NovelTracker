@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { readFile, rm, stat } from 'node:fs/promises'
+import { basename, join, resolve } from 'node:path'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   DEFAULT_EPUB_CSS,
@@ -15,13 +15,16 @@ import {
   MAX_EPUB_CSS_LENGTH,
   MAX_IMAGE_BYTES,
   MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MAX_SIMULTANEOUS_DOWNLOADS,
   MAX_SIMULTANEOUS_DISCOVERIES,
   MIN_DISCOVERY_FRESHNESS_HOURS,
   MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+  MIN_SIMULTANEOUS_DOWNLOADS,
   MIN_SIMULTANEOUS_DISCOVERIES
 } from '../../shared/constants'
 import { normalizeSiteExtractionPreferences } from '../../shared/siteExtractionPreferences'
 import { normalizeDomainRequestDelays } from '../../shared/domainRequestPreferences'
+import { atomicWriteFile, renameWithRetry } from './atomicFile'
 import type {
   AppSettings,
   ChapterImage,
@@ -53,37 +56,7 @@ const EMPTY_SETTINGS: AppSettings = {
 }
 const fileWriteTails = new Map<string, Promise<void>>()
 let downloadHistoryWriteTail = Promise.resolve()
-
-function isTransientRenameError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    ['EPERM', 'EACCES', 'EBUSY'].includes(String(error.code))
-  )
-}
-
-async function renameWithRetry(source: string, destination: string): Promise<void> {
-  const delays = [75, 150, 300, 600, 1200, 2000]
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(source, destination)
-      return
-    } catch (error) {
-      const delay = delays[attempt]
-      if (!isTransientRenameError(error)) throw error
-      if (delay === undefined) {
-        const code = typeof error === 'object' && error !== null && 'code' in error
-          ? String(error.code)
-          : 'filesystem error'
-        throw new Error(
-          `Windows could not replace "${destination}" after several attempts (${code}). Close any application locking the file, then retry.`
-        )
-      }
-      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay))
-    }
-  }
-}
+const storageRecoveryWarnings = new Set<string>()
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
   try {
@@ -92,6 +65,82 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return fallback
     throw error
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isJsonArray(value: unknown): value is unknown[] {
+  return Array.isArray(value)
+}
+
+function isDownloadHistoryArray(value: unknown): value is DownloadHistoryEntry[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) =>
+      isRecord(entry) &&
+      typeof entry.id === 'string' &&
+      typeof entry.title === 'string' &&
+      typeof entry.status === 'string'
+    )
+  )
+}
+
+function isDiscoveryQueueArray(value: unknown): value is DiscoveryQueueItem[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item) =>
+      isRecord(item) &&
+      typeof item.id === 'string' &&
+      typeof item.title === 'string' &&
+      (item.chapterSummary === undefined || isRecord(item.chapterSummary)) &&
+      (item.chapters === undefined || (Array.isArray(item.chapters) && item.chapters.every(isRecord)))
+    )
+  )
+}
+
+function recordStorageRecoveryWarning(message: string): void {
+  storageRecoveryWarnings.add(message)
+}
+
+export function takeStorageRecoveryWarnings(): string[] {
+  const warnings = [...storageRecoveryWarnings]
+  storageRecoveryWarnings.clear()
+  return warnings
+}
+
+async function quarantineInvalidJsonFile(path: string): Promise<string> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const quarantinedPath = `${path}.corrupt-${timestamp}-${randomUUID()}`
+  await renameWithRetry(path, quarantinedPath)
+  return quarantinedPath
+}
+
+async function readJsonWithQuarantine<T>(
+  path: string,
+  fallback: T,
+  isValid: (value: unknown) => value is T
+): Promise<T> {
+  let value: unknown
+  try {
+    value = JSON.parse(await readFile(path, 'utf8'))
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return fallback
+    if (!(error instanceof SyntaxError)) throw error
+    const quarantinedPath = await quarantineInvalidJsonFile(path)
+    recordStorageRecoveryWarning(
+      `${basename(path)} was unreadable and moved to ${basename(quarantinedPath)}. Defaults will be used.`
+    )
+    return fallback
+  }
+
+  if (isValid(value)) return value
+  const quarantinedPath = await quarantineInvalidJsonFile(path)
+  recordStorageRecoveryWarning(
+    `${basename(path)} had an invalid format and moved to ${basename(quarantinedPath)}. Defaults will be used.`
+  )
+  return fallback
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -105,16 +154,8 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   fileWriteTails.set(targetPath, tail)
   await previous
 
-  const temporaryPath = `${targetPath}.${randomUUID()}.tmp`
   try {
-    await mkdir(dirname(targetPath), { recursive: true })
-    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { flag: 'wx' })
-    await renameWithRetry(temporaryPath, targetPath)
-  } catch (error) {
-    await rm(temporaryPath, { force: true }).catch((cleanupError: unknown) => {
-      console.warn(`Temporary file ${temporaryPath} could not be removed:`, cleanupError)
-    })
-    throw error
+    await atomicWriteFile(targetPath, `${JSON.stringify(value)}\n`)
   } finally {
     release()
     if (fileWriteTails.get(targetPath) === tail) {
@@ -126,58 +167,114 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 export async function readSettings(dataDirectory: string): Promise<AppSettings> {
-  const saved = await readJson<Partial<AppSettings> & { scanPdfs?: unknown }>(
-    join(dataDirectory, 'settings.json'),
-    {}
-  )
-  if (Object.prototype.hasOwnProperty.call(saved, 'scanPdfs')) {
-    delete saved.scanPdfs
-    await writeJson(join(dataDirectory, 'settings.json'), saved)
+  const saved = await readJsonWithQuarantine(join(dataDirectory, 'settings.json'), {}, isRecord)
+  const defaults: AppSettings = {
+    ...EMPTY_SETTINGS,
+    domainRequestDelays: EMPTY_SETTINGS.domainRequestDelays.map((preference) => ({ ...preference })),
+    siteExtractionPreferences: EMPTY_SETTINGS.siteExtractionPreferences.map((preference) => ({ ...preference }))
   }
-  const settings = { ...EMPTY_SETTINGS, ...saved }
-  if (saved.epubCss === undefined) settings.epubCss = DEFAULT_EPUB_CSS
-  else if (typeof settings.epubCss !== 'string' || settings.epubCss.length > MAX_EPUB_CSS_LENGTH) {
-    throw new Error('The saved EPUB stylesheet is invalid or exceeds the size limit.')
+  const warnings: string[] = []
+  const setting = <T>(
+    key: keyof AppSettings,
+    label: string,
+    fallback: T,
+    isValid: (value: unknown) => value is T
+  ): T => {
+    if (!Object.prototype.hasOwnProperty.call(saved, key)) return fallback
+    const value = saved[key]
+    if (isValid(value)) return value
+    warnings.push(`The saved ${label} was invalid and has been reset to its default.`)
+    return fallback
   }
-  if (saved.appTheme !== undefined && saved.appTheme !== 'light' && saved.appTheme !== 'dark') {
-    throw new Error('The saved app theme must be light or dark.')
+  const normalizedSetting = <T>(
+    key: keyof AppSettings,
+    label: string,
+    fallback: T,
+    normalize: (value: unknown) => T
+  ): T => {
+    if (!Object.prototype.hasOwnProperty.call(saved, key)) return fallback
+    try {
+      return normalize(saved[key])
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      warnings.push(`The saved ${label} was invalid and has been reset to its default.`)
+      return fallback
+    }
   }
-  if (typeof settings.scanOldFolder !== 'boolean') {
-    throw new Error('The saved Old-folder scan option must be a boolean value.')
-  }
-  if (typeof settings.scanOldCompletedFolder !== 'boolean') {
-    throw new Error('The saved Old Completed-folder scan option must be a boolean value.')
-  }
-  if (
-    !Number.isInteger(settings.discoveryFreshnessHours) ||
-    settings.discoveryFreshnessHours < MIN_DISCOVERY_FRESHNESS_HOURS ||
-    settings.discoveryFreshnessHours > MAX_DISCOVERY_FRESHNESS_HOURS
-  ) {
-    throw new Error(
-      `The saved discovery freshness window must be a whole number from ${MIN_DISCOVERY_FRESHNESS_HOURS} to ${MAX_DISCOVERY_FRESHNESS_HOURS} hours.`
+  const integerBetween = (minimum: number, maximum: number) => (value: unknown): value is number =>
+    typeof value === 'number' && Number.isInteger(value) && value >= minimum && value <= maximum
+
+  const settings: AppSettings = {
+    libraryRoot: setting('libraryRoot', 'library folder', defaults.libraryRoot, (value): value is string => typeof value === 'string'),
+    trackerCsvPath: setting('trackerCsvPath', 'tracker CSV path', defaults.trackerCsvPath, (value): value is string => typeof value === 'string'),
+    outputDirectory: setting('outputDirectory', 'EPUB output folder', defaults.outputDirectory, (value): value is string => typeof value === 'string'),
+    scanOldFolder: setting('scanOldFolder', 'Old-folder scan option', defaults.scanOldFolder, (value): value is boolean => typeof value === 'boolean'),
+    scanOldCompletedFolder: setting(
+      'scanOldCompletedFolder',
+      'Old Completed-folder scan option',
+      defaults.scanOldCompletedFolder,
+      (value): value is boolean => typeof value === 'boolean'
+    ),
+    maxSimultaneousDownloads: setting(
+      'maxSimultaneousDownloads',
+      'download concurrency',
+      defaults.maxSimultaneousDownloads,
+      integerBetween(MIN_SIMULTANEOUS_DOWNLOADS, MAX_SIMULTANEOUS_DOWNLOADS)
+    ),
+    maxSimultaneousDiscoveries: setting(
+      'maxSimultaneousDiscoveries',
+      'discovery concurrency',
+      defaults.maxSimultaneousDiscoveries,
+      integerBetween(MIN_SIMULTANEOUS_DISCOVERIES, MAX_SIMULTANEOUS_DISCOVERIES)
+    ),
+    maxSimultaneousChaptersPerNovel: setting(
+      'maxSimultaneousChaptersPerNovel',
+      'per-novel chapter concurrency',
+      defaults.maxSimultaneousChaptersPerNovel,
+      integerBetween(MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL, MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL)
+    ),
+    domainRequestDelays: normalizedSetting(
+      'domainRequestDelays',
+      'domain request delays',
+      defaults.domainRequestDelays,
+      normalizeDomainRequestDelays
+    ),
+    discoveryFreshnessHours: setting(
+      'discoveryFreshnessHours',
+      'discovery freshness window',
+      defaults.discoveryFreshnessHours,
+      integerBetween(MIN_DISCOVERY_FRESHNESS_HOURS, MAX_DISCOVERY_FRESHNESS_HOURS)
+    ),
+    siteExtractionPreferences: normalizedSetting(
+      'siteExtractionPreferences',
+      'site extraction preferences',
+      defaults.siteExtractionPreferences,
+      normalizeSiteExtractionPreferences
+    ),
+    epubCss: setting(
+      'epubCss',
+      'EPUB stylesheet',
+      DEFAULT_EPUB_CSS,
+      (value): value is string => typeof value === 'string' && value.length <= MAX_EPUB_CSS_LENGTH
+    ),
+    appTheme: setting(
+      'appTheme',
+      'app theme',
+      defaults.appTheme,
+      (value): value is AppSettings['appTheme'] => value === 'light' || value === 'dark'
     )
   }
-  if (
-    !Number.isInteger(settings.maxSimultaneousDiscoveries) ||
-    settings.maxSimultaneousDiscoveries < MIN_SIMULTANEOUS_DISCOVERIES ||
-    settings.maxSimultaneousDiscoveries > MAX_SIMULTANEOUS_DISCOVERIES
-  ) {
-    throw new Error(
-      `The saved discovery concurrency must be a whole number from ${MIN_SIMULTANEOUS_DISCOVERIES} to ${MAX_SIMULTANEOUS_DISCOVERIES}.`
-    )
-  }
-  if (
-    !Number.isInteger(settings.maxSimultaneousChaptersPerNovel) ||
-    settings.maxSimultaneousChaptersPerNovel < MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL ||
-    settings.maxSimultaneousChaptersPerNovel > MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL
-  ) {
-    throw new Error(
-      `The saved per-novel chapter concurrency must be a whole number from ${MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL} to ${MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL}.`
-    )
-  }
-  settings.siteExtractionPreferences = normalizeSiteExtractionPreferences(settings.siteExtractionPreferences)
-  settings.domainRequestDelays = normalizeDomainRequestDelays(settings.domainRequestDelays)
+  for (const warning of warnings) recordStorageRecoveryWarning(warning)
   return settings
+}
+
+export async function migrateSettings(dataDirectory: string): Promise<void> {
+  const settingsPath = join(dataDirectory, 'settings.json')
+  const saved = await readJsonWithQuarantine(settingsPath, {}, isRecord)
+  if (!Object.prototype.hasOwnProperty.call(saved, 'scanPdfs')) return
+  const migrated = { ...saved }
+  delete migrated.scanPdfs
+  await writeJson(settingsPath, migrated)
 }
 
 export function writeSettings(dataDirectory: string, settings: AppSettings): Promise<void> {
@@ -250,8 +347,8 @@ export async function writeLibraryIndex(
   await writeJson(indexPath, index)
 }
 
-export function readDownloadHistory(dataDirectory: string): Promise<DownloadHistoryEntry[]> {
-  return readJson(join(dataDirectory, 'download-history.json'), [])
+export async function readDownloadHistory(dataDirectory: string): Promise<DownloadHistoryEntry[]> {
+  return readJsonWithQuarantine(join(dataDirectory, 'download-history.json'), [], isDownloadHistoryArray)
 }
 
 function isLibraryOperation(value: unknown): value is LibraryOperation {
@@ -259,7 +356,7 @@ function isLibraryOperation(value: unknown): value is LibraryOperation {
   const operation = value as Partial<LibraryOperation>
   return (
     typeof operation.id === 'string' &&
-    ['merge-epubs', 'epub-to-azw3', 'azw3-to-epub', 'repair-epub'].includes(operation.kind ?? '') &&
+    ['merge-epubs', 'repair-epub'].includes(operation.kind ?? '') &&
     ['running', 'completed', 'failed', 'interrupted'].includes(operation.status ?? '') &&
     Array.isArray(operation.inputFiles) &&
     operation.inputFiles.every((path) => typeof path === 'string') &&
@@ -274,11 +371,16 @@ function isLibraryOperation(value: unknown): value is LibraryOperation {
   )
 }
 
+function isLegacyConversionOperation(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || !('kind' in value)) return false
+  return value.kind === 'epub-to-azw3' || value.kind === 'azw3-to-epub'
+}
+
 export async function readLibraryOperations(dataDirectory: string): Promise<LibraryOperation[]> {
-  const saved = await readJson<unknown>(join(dataDirectory, 'library-operations.json'), [])
-  if (!Array.isArray(saved)) throw new Error('The saved library operation history is invalid.')
-  const operations = saved.filter(isLibraryOperation)
-  if (operations.length !== saved.length) {
+  const saved = await readJsonWithQuarantine(join(dataDirectory, 'library-operations.json'), [], isJsonArray)
+  const nonLegacySaved = saved.filter((operation) => !isLegacyConversionOperation(operation))
+  const operations = nonLegacySaved.filter(isLibraryOperation)
+  if (operations.length !== nonLegacySaved.length) {
     console.warn('Invalid entries in library operation history were ignored.')
   }
   return operations.slice(0, 30)
@@ -294,8 +396,8 @@ function serializeDownloadHistoryWrite<T>(operation: () => Promise<T>): Promise<
   return result
 }
 
-export function readDiscoveryQueue(dataDirectory: string): Promise<DiscoveryQueueItem[]> {
-  return readJson(join(dataDirectory, 'discovery-queue.json'), [])
+export async function readDiscoveryQueue(dataDirectory: string): Promise<DiscoveryQueueItem[]> {
+  return readJsonWithQuarantine(join(dataDirectory, 'discovery-queue.json'), [], isDiscoveryQueueArray)
 }
 
 export function writeDiscoveryQueue(dataDirectory: string, items: DiscoveryQueueItem[]): Promise<void> {

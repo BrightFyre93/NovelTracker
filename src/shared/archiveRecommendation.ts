@@ -10,7 +10,6 @@ export interface ArchiveRecommendation {
   chapters: QueueChapter[]
   latestCoveredChapter: number | null
   gapCount: number
-  overlapAllowed: boolean
   summary: string
 }
 
@@ -54,9 +53,7 @@ function fileMatchesChapter(file: LibraryFileRecord, number: number | null, titl
 
 export function recommendArchiveCoverage(
   item: Pick<DiscoveryQueueItem, 'title' | 'alternativeNames' | 'trackerRow' | 'chapters'>,
-  files: LibraryFileRecord[],
-  includeOverlap = false,
-  overlapCount = 10
+  files: LibraryFileRecord[]
 ): ArchiveRecommendation {
   const trackerAlternativeNames = item.trackerRow?.alternativeNames
     ?.split(/[,;|\r\n]+/)
@@ -101,8 +98,7 @@ export function recommendArchiveCoverage(
       archiveStatus,
       archiveSources: (verified.length > 0 ? verified : probable).map((file) => file.relativePath),
       archiveGap: false,
-      recommended: archiveStatus !== 'confirmed',
-      deliberateOverlap: false
+      recommended: archiveStatus !== 'confirmed'
     }
   })
 
@@ -119,18 +115,7 @@ export function recommendArchiveCoverage(
   for (let index = 0; index < latestConfirmedIndex; index += 1) {
     chapters[index].archiveGap = chapters[index].archiveStatus !== 'confirmed'
   }
-  const overlapAllowed =
-    latestConfirmedIndex >= 0 &&
-    chapters.slice(0, latestConfirmedIndex + 1).every((chapter) => chapter.archiveStatus === 'confirmed')
-
-  if (includeOverlap && overlapAllowed && overlapCount > 0) {
-    const count = Math.min(Math.floor(overlapCount), latestConfirmedIndex + 1)
-    for (let index = latestConfirmedIndex - count + 1; index <= latestConfirmedIndex; index += 1) {
-      chapters[index].deliberateOverlap = true
-    }
-  }
-
-  const suggestedCount = chapters.filter((chapter) => chapter.recommended || chapter.deliberateOverlap).length
+  const suggestedCount = chapters.filter((chapter) => chapter.recommended).length
   const uncertainCount = chapters.filter((chapter) =>
     chapter.archiveStatus === 'probable' || chapter.archiveStatus === 'uncertain'
   ).length
@@ -140,10 +125,10 @@ export function recommendArchiveCoverage(
   } else if (latestConfirmedIndex < 0) {
     summary = `No discovered chapters have confirmed coverage. ${uncertainCount} match(es) are uncertain or filename-only; review before excluding any.`
   } else if (gapCount > 0) {
-    summary = `Confirmed coverage reaches ${latestCoveredChapter ?? 'an irregular chapter'}, but ${gapCount} earlier discovered chapter(s) are not confirmed. Overlap is disabled until those gaps are reviewed.`
+    summary = `Confirmed coverage reaches ${latestCoveredChapter ?? 'an irregular chapter'}, but ${gapCount} earlier discovered chapter(s) are not confirmed. Resolve these gaps before relying on archive-based recommendations.`
   } else {
     summary = `Confirmed coverage reaches ${latestCoveredChapter ?? 'the latest matched chapter'} in source order; ${suggestedCount} chapter(s) suggested.`
   }
 
-  return { chapters, latestCoveredChapter, gapCount, overlapAllowed, summary }
+  return { chapters, latestCoveredChapter, gapCount, summary }
 }

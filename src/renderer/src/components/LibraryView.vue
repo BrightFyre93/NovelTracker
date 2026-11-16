@@ -28,16 +28,14 @@ const selectedNovel = ref('')
 const selectedFileId = ref('')
 const restoringBackup = ref(false)
 const merging = ref(false)
-const converting = ref(false)
 const repairing = ref(false)
 const mergeProgress = ref<EpubMergeProgress | null>(null)
 const mergeFileIds = ref<string[]>([])
 const mergeFilename = ref('')
-const latestMergedPath = ref('')
 const correctedTitle = ref('')
 const correctedCoverage = ref('')
 const busy = computed(() =>
-  libraryState.scanning || restoringBackup.value || merging.value || converting.value || repairing.value
+  libraryState.scanning || restoringBackup.value || merging.value || repairing.value
 )
 const error = ref('')
 const success = ref('')
@@ -89,7 +87,6 @@ watch(novelSummaries, (summaries) => {
     selectedFiles.value = []
     mergeFileIds.value = []
     mergeFilename.value = ''
-    latestMergedPath.value = ''
     loadingNovelFiles.value = false
   }
 })
@@ -174,7 +171,6 @@ async function selectNovel(key: string): Promise<void> {
   selectedFiles.value = []
   mergeFileIds.value = []
   mergeFilename.value = ''
-  latestMergedPath.value = ''
   loadingNovelFiles.value = true
   try {
     const result = await window.novelTracker.getLibraryNovelFiles(key)
@@ -301,7 +297,6 @@ async function mergeSelectedEpubs(): Promise<void> {
   if (mergeFileIds.value.length < 2) return
   error.value = ''
   success.value = ''
-  latestMergedPath.value = ''
   merging.value = true
   mergeProgress.value = {
     stage: 'reading',
@@ -327,14 +322,13 @@ async function mergeSelectedEpubs(): Promise<void> {
       }
       return
     }
-    const overlap = result.value.duplicateChapterCount
-      ? ` Removed ${result.value.duplicateChapterCount.toLocaleString()} overlapping chapter(s); the earlier-range copy was kept.`
+    const duplicates = result.value.duplicateChapterCount
+      ? ` Removed ${result.value.duplicateChapterCount.toLocaleString()} duplicate chapter(s); the earlier-range copy was kept.`
       : ''
     const conflicts = result.value.conflictingChapterCount
-      ? ` ${result.value.conflictingChapterCount.toLocaleString()} overlap(s) had different text; the earlier-range copy was kept.`
+      ? ` ${result.value.conflictingChapterCount.toLocaleString()} duplicate(s) had different text; the earlier-range copy was kept.`
       : ''
-    success.value = `Created ${result.value.chapterCount.toLocaleString()} chapters at ${result.value.outputPath}.${overlap}${conflicts}`
-    latestMergedPath.value = result.value.outputPath
+    success.value = `Created ${result.value.chapterCount.toLocaleString()} chapters at ${result.value.outputPath}.${duplicates}${conflicts}`
     mergeFileIds.value = []
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -345,42 +339,6 @@ async function mergeSelectedEpubs(): Promise<void> {
     }
   } finally {
     merging.value = false
-  }
-}
-
-async function convertEpubToAzw3(inputPath: string): Promise<void> {
-  error.value = ''
-  success.value = ''
-  converting.value = true
-  try {
-    const result = await window.novelTracker.convertEpubToAzw3(inputPath)
-    if (!result.ok) {
-      if (!('cancelled' in result)) error.value = result.error
-      return
-    }
-    success.value = `Created ${result.value.outputPath} (${(result.value.outputBytes / 1024 / 1024).toFixed(1)} MB). AZW3 conversion does not guarantee Send-to-Kindle acceptance.`
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  } finally {
-    converting.value = false
-  }
-}
-
-async function convertAzw3ToEpub(fileId: string): Promise<void> {
-  error.value = ''
-  success.value = ''
-  converting.value = true
-  try {
-    const result = await window.novelTracker.convertAzw3ToEpub(fileId)
-    if (!result.ok) {
-      if (!('cancelled' in result)) error.value = result.error
-      return
-    }
-    success.value = `Created ${result.value.outputPath} (${(result.value.outputBytes / 1024 / 1024).toFixed(1)} MB). Review the EPUB in Kindle Previewer before sending.`
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  } finally {
-    converting.value = false
   }
 }
 
@@ -565,20 +523,20 @@ function chapterRangeLabel(start: number, end: number): string {
               <template v-if="novel.stateCounts['Old Completed']"> · Old Completed {{ novel.stateCounts['Old Completed'] }}</template>
             </span>
             <span
-              v-if="novel.coverage.overlapNumberCount || novel.coverage.gapCount || novel.coverage.unverifiedCount || novel.coverage.rangeMismatchCount"
+              v-if="novel.coverage.duplicateNumberCount || novel.coverage.gapCount || novel.coverage.unverifiedCount || novel.coverage.rangeMismatchCount"
               class="novel-coverage-summary"
             >
               <template v-if="novel.coverage.gapCount">{{ novel.coverage.gapCount }} possible gaps</template>
-              <template v-if="novel.coverage.overlapNumberCount">
+              <template v-if="novel.coverage.duplicateNumberCount">
                 <template v-if="novel.coverage.gapCount"> · </template>
-                {{ novel.coverage.overlapNumberCount }} duplicate chapter numbers
+                {{ novel.coverage.duplicateNumberCount }} duplicate chapter numbers
               </template>
               <template v-if="novel.coverage.unverifiedCount">
-                <template v-if="novel.coverage.gapCount || novel.coverage.overlapNumberCount"> · </template>
+                <template v-if="novel.coverage.gapCount || novel.coverage.duplicateNumberCount"> · </template>
                 {{ novel.coverage.unverifiedCount }} files need review
               </template>
               <template v-if="novel.coverage.rangeMismatchCount">
-                <template v-if="novel.coverage.gapCount || novel.coverage.overlapNumberCount || novel.coverage.unverifiedCount"> · </template>
+                <template v-if="novel.coverage.gapCount || novel.coverage.duplicateNumberCount || novel.coverage.unverifiedCount"> · </template>
                 {{ novel.coverage.rangeMismatchCount }} range mismatch{{ novel.coverage.rangeMismatchCount === 1 ? '' : 'es' }}
               </template>
             </span>
@@ -615,7 +573,7 @@ function chapterRangeLabel(start: number, end: number): string {
         <section v-if="selectedGroup" class="library-merge-panel">
           <strong>Combine existing EPUBs offline</strong>
           <p class="help-text">
-            Select at least two EPUBs. They are ordered by chapter range; overlapping chapter numbers are included once, preferring the lower-range file. No network requests are made.
+            Select at least two EPUBs. They are ordered by chapter range; duplicate chapter numbers are included once, preferring the lower-range file. No network requests are made.
           </p>
           <p class="file-evidence">{{ mergeFileIds.length }} of 20 EPUBs selected</p>
           <ul v-if="selectedMergeFiles.length" class="merge-source-list">
@@ -674,15 +632,6 @@ function chapterRangeLabel(start: number, end: number): string {
             </ol>
           </div>
           <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration before merging.</p>
-          <div v-if="latestMergedPath" class="merge-filename-row">
-            <Button
-              label="Convert merged EPUB to AZW3"
-              icon="pi pi-file-export"
-              :loading="converting"
-              :disabled="busy"
-              @click="convertEpubToAzw3(latestMergedPath)"
-            />
-          </div>
         </section>
 
         <details
@@ -716,7 +665,7 @@ function chapterRangeLabel(start: number, end: number): string {
                   {{ file.chapterNumbers.find((chapter) => chapter >= warning.end + 1) }} · {{ file.relativePath }}
                 </button>
               </template>
-              <template v-else-if="warning.kind === 'overlap'">
+              <template v-else-if="warning.kind === 'duplicate'">
                 <strong>
                   Chapter{{ warning.start === warning.end ? '' : 's' }}
                   {{ chapterRangeLabel(warning.start, warning.end) }} appear in multiple files
@@ -740,7 +689,7 @@ function chapterRangeLabel(start: number, end: number): string {
                   Extracted chapter numbers {{ warning.chapters[0] }}<template v-if="warning.chapters.length > 1">–{{ warning.chapters[warning.chapters.length - 1] }}</template>
                   fall outside the filename range {{ warning.file.filenameRange?.start }}–{{ warning.file.filenameRange?.end }}
                 </strong>
-                <p>These out-of-range numbers are excluded from gap and overlap calculations. Check whether this file includes unrelated TOC entries or has a misleading filename.</p>
+                <p>These out-of-range numbers are excluded from gap and duplicate-number calculations. Check whether this file includes unrelated TOC entries or has a misleading filename.</p>
                 <button class="warning-file-link" @click="selectFile(warning.file)">{{ warning.file.relativePath }}</button>
               </template>
             </li>
@@ -757,28 +706,6 @@ function chapterRangeLabel(start: number, end: number): string {
             <div class="toolbar-actions">
               <Button label="Open" severity="secondary" text size="small" @click="openFile(selectedFile, false)" />
               <Button label="Show in folder" severity="secondary" text size="small" @click="openFile(selectedFile, true)" />
-              <Button
-                v-if="selectedFile.format === 'EPUB'"
-                label="Convert to AZW3"
-                icon="pi pi-file-export"
-                severity="secondary"
-                text
-                size="small"
-                :loading="converting"
-                :disabled="busy"
-                @click="convertEpubToAzw3(selectedFile.path)"
-              />
-              <Button
-                v-if="selectedFile.format === 'AZW3'"
-                label="Convert to EPUB"
-                icon="pi pi-file-export"
-                severity="secondary"
-                text
-                size="small"
-                :loading="converting"
-                :disabled="busy"
-                @click="convertAzw3ToEpub(selectedFile.id)"
-              />
               <Button
                 v-if="selectedFile.format === 'EPUB'"
                 label="Check / repair"

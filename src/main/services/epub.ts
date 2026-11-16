@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import JSZip from 'jszip'
 import sharp from 'sharp'
@@ -21,9 +21,24 @@ import {
 } from '../../shared/constants'
 import { sanitizeEpubFilename, suggestEpubFilename } from '../../shared/epubFilename'
 import { resizeSmallKindleCover } from './kindleCover'
+import { atomicWriteFile } from './atomicFile'
 
 function escapeXml(value: string): string {
-  return value
+  let validXmlText = ''
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1)
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        validXmlText += value[index] + value[index + 1]
+        index += 1
+      }
+      continue
+    }
+    if (code >= 0xDC00 && code <= 0xDFFF) continue
+    validXmlText += value[index]
+  }
+  return validXmlText
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -470,18 +485,13 @@ async function publishEpub(
   contents: Buffer,
   signal?: AbortSignal
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
-  const temporaryPath = join(directory, `.novel-tracker-${randomUUID()}.tmp`)
-  try {
-    await writeFile(temporaryPath, contents, { flag: 'wx' })
+  const outputPath = join(directory, filename)
+  if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+  const overwroteExistingFile = await targetFileExists(outputPath)
+  await atomicWriteFile(outputPath, contents, () => {
     if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
-    const outputPath = join(directory, filename)
-    const overwroteExistingFile = await targetFileExists(outputPath)
-    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
-    await rename(temporaryPath, outputPath)
-    return { outputPath, overwroteExistingFile }
-  } finally {
-    await rm(temporaryPath, { force: true })
-  }
+  })
+  return { outputPath, overwroteExistingFile }
 }
 
 export async function writeEpub(

@@ -10,7 +10,7 @@ export type LibraryCoverageWarning =
       after: LibraryFileRecord[]
     }
   | {
-      kind: 'overlap'
+      kind: 'duplicate'
       key: string
       start: number
       end: number
@@ -32,7 +32,7 @@ export type LibraryCoverageWarning =
 export interface LibraryCoverageAnalysis {
   warnings: LibraryCoverageWarning[]
   gapCount: number
-  overlapNumberCount: number
+  duplicateNumberCount: number
   unverifiedCount: number
   rangeMismatchCount: number
 }
@@ -90,14 +90,14 @@ export function analyzeLibraryCoverage(files: LibraryFileRecord[]): LibraryCover
     }
   }
 
-  const overlapNumbers = chapterNumbers.filter((chapter) => (chapterSources.get(chapter)?.size ?? 0) > 1)
-  const overlapWarnings: Extract<LibraryCoverageWarning, { kind: 'overlap' }>[] = []
-  for (const chapter of overlapNumbers) {
+  const duplicateNumbers = chapterNumbers.filter((chapter) => (chapterSources.get(chapter)?.size ?? 0) > 1)
+  const duplicateWarnings: Extract<LibraryCoverageWarning, { kind: 'duplicate' }>[] = []
+  for (const chapter of duplicateNumbers) {
     const sources = [...(chapterSources.get(chapter)?.values() ?? [])].sort((left, right) =>
       left.relativePath.localeCompare(right.relativePath)
     )
     const sourceIds = sources.map((file) => file.id).join('|')
-    const previous = overlapWarnings[overlapWarnings.length - 1]
+    const previous = duplicateWarnings[duplicateWarnings.length - 1]
     if (
       previous &&
       previous.end + 1 === chapter &&
@@ -105,16 +105,16 @@ export function analyzeLibraryCoverage(files: LibraryFileRecord[]): LibraryCover
     ) {
       previous.end = chapter
     } else {
-      overlapWarnings.push({
-        kind: 'overlap',
-        key: `overlap-${chapter}-${sourceIds}`,
+      duplicateWarnings.push({
+        kind: 'duplicate',
+        key: `duplicate-${chapter}-${sourceIds}`,
         start: chapter,
         end: chapter,
         files: sources
       })
     }
   }
-  warnings.push(...overlapWarnings)
+  warnings.push(...duplicateWarnings)
 
   const unverifiedFiles = files.filter(
     (file) =>
@@ -143,7 +143,7 @@ export function analyzeLibraryCoverage(files: LibraryFileRecord[]): LibraryCover
   return {
     warnings,
     gapCount,
-    overlapNumberCount: overlapNumbers.length,
+    duplicateNumberCount: duplicateNumbers.length,
     unverifiedCount: unverifiedFiles.length,
     rangeMismatchCount: rangeMismatches.length
   }

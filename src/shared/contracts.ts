@@ -166,7 +166,6 @@ export interface QueueChapter extends ChapterLink {
   chapterNumber: number | null
   archiveGap: boolean
   recommended: boolean
-  deliberateOverlap: boolean
 }
 
 export interface QueueDownloadOptions {
@@ -200,7 +199,6 @@ export interface QueueChapterSummary {
   total: number
   selected: number
   recommended: number
-  deliberateOverlap: number
   hasUncertainArchiveChapters: boolean
   latestTitle: string
 }
@@ -227,9 +225,6 @@ export interface DiscoveryQueueItem {
   targetOutputPath: string
   discoveryChanges: string
   recommendationSummary: string
-  overlapAllowed: boolean
-  includeOverlap: boolean
-  overlapCount: number
   repackageOnly: boolean
   saveAvailableChaptersOnly?: boolean
   downloadOptions: QueueDownloadOptions | null
@@ -311,7 +306,7 @@ export interface LibraryNovelSummary {
   stateCounts: Record<LibraryFolderState, number>
   coverage: {
     gapCount: number
-    overlapNumberCount: number
+    duplicateNumberCount: number
     unverifiedCount: number
     rangeMismatchCount: number
   }
@@ -343,11 +338,6 @@ export interface LibraryEpubMergeResult {
   conflictingChapterCount: number
   firstChapter: number | null
   lastChapter: number | null
-}
-
-export interface EbookConversionResult {
-  outputPath: string
-  outputBytes: number
 }
 
 export interface EpubRepairResult {
@@ -384,7 +374,7 @@ export type LibraryEpubMergeResponse =
   | Result<LibraryEpubMergeResult>
   | { ok: false; cancelled: true }
 
-export type LibraryOperationKind = 'merge-epubs' | 'epub-to-azw3' | 'azw3-to-epub' | 'repair-epub'
+export type LibraryOperationKind = 'merge-epubs' | 'repair-epub'
 export type LibraryOperationStatus = 'running' | 'completed' | 'failed' | 'interrupted'
 
 export interface LibraryOperation {
@@ -399,10 +389,6 @@ export interface LibraryOperation {
   startedAt: string
   updatedAt: string
 }
-
-export type EbookConversionResponse =
-  | Result<EbookConversionResult>
-  | { ok: false; cancelled: true }
 
 export type EpubRepairResponse =
   | Result<EpubRepairResult>
@@ -431,7 +417,7 @@ export interface NovelTrackerApi {
   forceRetryDiscoveryQueueItem(id: string): Promise<Result<void>>
   retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
   refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
-  acceptQueueRecommendations(id: string, includeOverlap: boolean, overlapCount: number): Promise<Result<void>>
+  acceptQueueRecommendations(id: string): Promise<Result<void>>
   enqueueEpub(input: GenerateEpubInput, queueItemId?: string): Promise<Result<QueuedEpubJob>>
   retryEpub(id: string): Promise<Result<void>>
   recoverEpubQueueItem(id: string): Promise<Result<void>>
@@ -460,8 +446,6 @@ export interface NovelTrackerApi {
   cancelLibraryScan(): Promise<void>
   correctLibraryFile(fileId: string, correction: LibraryFileCorrection): Promise<Result<LibraryIndexSummary>>
   mergeLibraryEpubs(fileIds: string[], filename: string): Promise<LibraryEpubMergeResponse>
-  convertEpubToAzw3(inputPath: string): Promise<EbookConversionResponse>
-  convertAzw3ToEpub(fileId: string): Promise<EbookConversionResponse>
   repairEpub(fileId: string): Promise<EpubRepairResponse>
   getLibraryOperations(): Promise<LibraryOperation[]>
   onLibraryOperationsUpdate(listener: (operations: LibraryOperation[]) => void): () => void

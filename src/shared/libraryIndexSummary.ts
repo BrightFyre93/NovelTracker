@@ -33,7 +33,7 @@ export function summarizeLibraryIndex(index: LibraryIndex): LibraryIndexSummary 
       stateCounts,
       coverage: {
         gapCount: coverage.gapCount,
-        overlapNumberCount: coverage.overlapNumberCount,
+        duplicateNumberCount: coverage.duplicateNumberCount,
         unverifiedCount: coverage.unverifiedCount,
         rangeMismatchCount: coverage.rangeMismatchCount
       }

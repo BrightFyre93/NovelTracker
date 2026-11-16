@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { lstat, realpath, stat } from 'node:fs/promises'
+import { lstat, realpath, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type {
@@ -17,7 +17,6 @@ import type {
   EpubRepairProgress,
   EpubRepairResult,
   EpubRepairResponse,
-  EbookConversionResponse,
   GenerateEpubInput,
   LibraryFileCorrection,
   LibraryFileRecord,
@@ -68,6 +67,8 @@ import {
   readLibraryIndexBackupDate,
   readLibraryOperations,
   readSettings,
+  migrateSettings,
+  takeStorageRecoveryWarnings,
   saveDownloadHistoryEntry,
   removeChapterArtifacts,
   writeLibraryCorrection,
@@ -99,14 +100,16 @@ import {
   suggestEpubFilename
 } from '../shared/epubFilename'
 import type { EpubMergeInput, EpubMergeResult } from './services/epubMerger'
-import { convertAzw3ToEpub, convertEpubToAzw3 } from './services/azw3Converter'
-import { initializeLocalLogger } from './services/localLogger'
+import { flushLocalLogger, initializeLocalLogger } from './services/localLogger'
 
 let mainWindow: BrowserWindow | null = null
+let mainWindowReady = false
+let focusRequestedBeforeWindowReady = false
 const approvedOutputDirectories = new Set<string>()
 let discoveryQueueNotificationTimer: ReturnType<typeof setTimeout> | null = null
 let libraryOperationFlushTimer: ReturnType<typeof setTimeout> | null = null
 let libraryOperationWrites = Promise.resolve()
+let settingsUpdateTail = Promise.resolve()
 let libraryOperations: LibraryOperation[] = []
 interface ActiveLibraryScan {
   worker: Worker | null
@@ -120,6 +123,10 @@ type LibraryScanWorkerMessage =
 
 let activeLibraryScan: ActiveLibraryScan | null = null
 let libraryIndexRestoreActive = false
+let libraryCorrectionActive = false
+const activeLibraryWorkers = new Set<Worker>()
+const activeBackgroundTasks = new Set<Promise<void>>()
+let activeLibraryOperationHandlers = 0
 let discoveryQueue: DiscoveryQueueItem[] = []
 const reservedOutputPaths = new Set<string>()
 let discoveryQueueWrites = Promise.resolve()
@@ -132,9 +139,31 @@ const activeBrowserDiscoveries = new Map<string, AbortController>()
 const activeQueueDiscoveries = new Map<string, AbortController>()
 let activeDiscoveries = 0
 let maxActiveDiscoveries = DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES
-const activeDownloads = new Map<string, { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' }>()
+const activeDownloads = new Map<
+  string,
+  { controller: AbortController; requestedAction: 'none' | 'pause' | 'cancel' | 'shutdown' }
+>()
 let downloadPumpRunning = false
 let downloadPumpRequested = false
+let fatalProcessErrorHandled = false
+let shuttingDown = false
+let shutdownComplete = false
+let shutdownPromise: Promise<void> | null = null
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (hasSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindowReady) {
+      focusRequestedBeforeWindowReady = true
+      return
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+} else {
+  app.quit()
+}
 
 function copyLibraryOperations(): LibraryOperation[] {
   return libraryOperations.map((operation) => ({
@@ -230,8 +259,56 @@ function dataDirectory(): string {
   return app.getPath('userData')
 }
 
+function updateSettings(
+  update: (settings: AppSettings) => void | Promise<void>,
+  afterUpdate?: (settings: AppSettings) => void | Promise<void>
+): Promise<AppSettings> {
+  const operation = settingsUpdateTail.then(async () => {
+    const settings = await readSettings(dataDirectory())
+    await update(settings)
+    await writeSettings(dataDirectory(), settings)
+    await afterUpdate?.(settings)
+    return settings
+  })
+  settingsUpdateTail = operation.then(() => undefined, () => undefined)
+  return operation
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function trackLibraryWorker(worker: Worker): Worker {
+  activeLibraryWorkers.add(worker)
+  worker.once('exit', () => activeLibraryWorkers.delete(worker))
+  return worker
+}
+
+function trackBackgroundTask(task: Promise<void>, label: string): void {
+  activeBackgroundTasks.add(task)
+  void task.then(
+    () => activeBackgroundTasks.delete(task),
+    (error: unknown) => {
+      activeBackgroundTasks.delete(task)
+      console.error(`${label} failed:`, error)
+    }
+  )
+}
+
+function handleFatalProcessError(kind: string, error: unknown): void {
+  console.error(`Fatal process error (${kind}):`, error)
+  if (fatalProcessErrorHandled) return
+  fatalProcessErrorHandled = true
+  dialog.showErrorBox(
+    'NovelTracker encountered an unexpected error',
+    `The application will close to protect your data.\n\n${errorMessage(error)}`
+  )
+  app.quit()
+}
+
+function registerProcessErrorHandlers(): void {
+  process.on('uncaughtException', (error) => handleFatalProcessError('uncaughtException', error))
+  process.on('unhandledRejection', (reason) => handleFatalProcessError('unhandledRejection', reason))
 }
 
 function discoverySnapshotIsStale(discoveredAt: string, freshnessHours: number): boolean {
@@ -307,7 +384,6 @@ function updateQueueChapterSummary(item: DiscoveryQueueItem): void {
     total: item.chapters.length,
     selected: item.chapters.filter((chapter) => chapter.selected).length,
     recommended: item.chapters.filter((chapter) => chapter.recommended).length,
-    deliberateOverlap: item.chapters.filter((chapter) => chapter.deliberateOverlap && !chapter.recommended).length,
     hasUncertainArchiveChapters: item.chapters.some(
       (chapter) => chapter.archiveStatus === 'uncertain' || chapter.archiveStatus === 'probable'
     ),
@@ -326,7 +402,23 @@ async function ensureQueueItemChapters(item: DiscoveryQueueItem): Promise<void> 
   if (!chapters || chapters.length !== item.chapterSummary.total) {
     throw new Error(`Saved chapter details are missing or incomplete for "${item.title}".`)
   }
-  item.chapters = chapters
+  let savedChapterDataChanged = false
+  item.chapters = chapters.map((chapter) => {
+    const normalized = {
+      id: chapter.id,
+      title: chapter.title,
+      url: chapter.url,
+      selected: chapter.selected,
+      archiveStatus: chapter.archiveStatus ?? 'missing',
+      archiveSources: chapter.archiveSources ?? [],
+      chapterNumber: chapter.chapterNumber ?? null,
+      archiveGap: chapter.archiveGap ?? false,
+      recommended: chapter.recommended ?? true
+    }
+    if (hasUnknownProperties(chapter, normalized)) savedChapterDataChanged = true
+    return normalized
+  })
+  if (savedChapterDataChanged) markQueueItemChaptersDirty(item)
 }
 
 function releaseQueueItemChapters(item: DiscoveryQueueItem): void {
@@ -441,31 +533,48 @@ async function ensureQueueItemHistoryEntry(
 
 function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
   const chapters = (item.chapters ?? []).map((chapter) => ({
-    ...chapter,
+    id: chapter.id,
+    title: chapter.title,
+    url: chapter.url,
+    selected: chapter.selected,
     archiveStatus: chapter.archiveStatus ?? 'missing',
     archiveSources: chapter.archiveSources ?? [],
     chapterNumber: chapter.chapterNumber ?? null,
     archiveGap: chapter.archiveGap ?? false,
-    recommended: chapter.recommended ?? true,
-    deliberateOverlap: chapter.deliberateOverlap ?? false
+    recommended: chapter.recommended ?? true
   }))
   const hydrated: DiscoveryQueueItem = {
-    ...item,
+    id: item.id,
+    title: item.title,
+    author: item.author,
     description: item.description ?? '',
     coverUrl: item.coverUrl ?? '',
     alternativeNames: item.alternativeNames ?? [],
     genres: item.genres ?? [],
     source: item.source ?? '',
     novelStatus: item.novelStatus ?? '',
+    sourceUrl: item.sourceUrl,
+    origin: item.origin,
     separateJob: item.separateJob ?? false,
+    trackerRow: item.trackerRow ?? null,
     status: item.status ?? 'needs-review',
+    parserName: item.parserName,
+    ...(item.siteExtractionMode === undefined ? {} : { siteExtractionMode: item.siteExtractionMode }),
+    chapters,
+    chapterSummary: {
+      total: item.chapterSummary?.total ?? 0,
+      selected: item.chapterSummary?.selected ?? 0,
+      recommended: item.chapterSummary?.recommended ?? 0,
+      hasUncertainArchiveChapters: item.chapterSummary?.hasUncertainArchiveChapters ?? false,
+      latestTitle: item.chapterSummary?.latestTitle ?? ''
+    },
+    targetOutputPath: item.targetOutputPath ?? '',
     discoveryChanges: item.discoveryChanges ?? '',
     recommendationSummary: item.recommendationSummary ?? '',
-    overlapAllowed: item.overlapAllowed ?? false,
-    includeOverlap: item.includeOverlap ?? false,
-    overlapCount: item.overlapCount ?? 10,
     repackageOnly: item.repackageOnly ?? false,
-    saveAvailableChaptersOnly: item.saveAvailableChaptersOnly ?? false,
+    ...(item.saveAvailableChaptersOnly === undefined
+      ? {}
+      : { saveAvailableChaptersOnly: item.saveAvailableChaptersOnly }),
     downloadOptions: item.downloadOptions
       ? {
           ...item.downloadOptions,
@@ -482,21 +591,19 @@ function hydrateQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
     completedChapterUrls: item.completedChapterUrls ?? [],
     failedChapters: item.failedChapters ?? [],
     outputPath: item.outputPath ?? '',
-    targetOutputPath: item.targetOutputPath ?? '',
     downloadHistoryId: item.downloadHistoryId ?? '',
     progress: item.progress ?? null,
-    chapters,
-    chapterSummary: item.chapterSummary ?? {
-      total: 0,
-      selected: 0,
-      recommended: 0,
-      deliberateOverlap: 0,
-      hasUncertainArchiveChapters: false,
-      latestTitle: ''
-    }
+    error: item.error ?? '',
+    discoveredAt: item.discoveredAt ?? '',
+    updatedAt: item.updatedAt ?? ''
   }
   if (chapters.length > 0 || !item.chapterSummary) updateQueueChapterSummary(hydrated)
   return hydrated
+}
+
+function hasUnknownProperties(saved: object, normalized: object): boolean {
+  const normalizedKeys = new Set(Object.keys(normalized))
+  return Object.keys(saved).some((key) => !normalizedKeys.has(key))
 }
 
 function expectedOutputPath(
@@ -600,10 +707,7 @@ function isWithinDirectory(directory: string, candidate: string): boolean {
     (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
 }
 
-async function getIndexedLibraryFile(
-  rawFileId: unknown,
-  expectedFormat: LibraryFileRecord['format']
-): Promise<string> {
+async function getIndexedLibraryFile(rawFileId: unknown): Promise<string> {
   if (typeof rawFileId !== 'string' || !rawFileId) throw new Error('Select an indexed library file.')
   const [index, settings] = await Promise.all([
     readLibraryIndex(dataDirectory()),
@@ -612,8 +716,8 @@ async function getIndexedLibraryFile(
   if (!index) throw new Error('Scan the library before working with indexed files.')
   if (!settings.libraryRoot) throw new Error('Go to Configuration and choose a historical library root first.')
   const file = index.files.find((candidate) => candidate.id === rawFileId)
-  if (!file || file.format !== expectedFormat) {
-    throw new Error(`The selected ${expectedFormat} is no longer indexed. Rescan and try again.`)
+  if (!file || file.format !== 'EPUB') {
+    throw new Error('The selected EPUB is no longer indexed. Rescan and try again.')
   }
   const [libraryRoot, indexRoot] = await Promise.all([
     realpath(settings.libraryRoot),
@@ -628,9 +732,9 @@ async function getIndexedLibraryFile(
     inputDetails.isSymbolicLink() ||
     !inputDetails.isFile() ||
     !isWithinDirectory(libraryRoot, inputPath) ||
-    extname(inputPath).toLowerCase() !== (expectedFormat === 'EPUB' ? '.epub' : '.azw3')
+    extname(inputPath).toLowerCase() !== '.epub'
   ) {
-    throw new Error(`The selected ${expectedFormat} is not a regular file inside the configured library.`)
+    throw new Error('The selected EPUB is not a regular file inside the configured library.')
   }
   if (inputDetails.size !== file.size || inputDetails.mtime.toISOString() !== file.modifiedAt) {
     throw new Error(`The source file changed since the last scan: ${file.filename}. Rescan and try again.`)
@@ -661,50 +765,6 @@ async function getSiblingOutputPath(
       defaultId: 1,
       cancelId: 1,
       title: 'Replace existing EPUB?',
-      message: `Replace "${basename(outputPath)}"?`
-    })
-    if (confirmation.response !== 0) return null
-  } catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
-  }
-  return outputPath
-}
-
-async function chooseConversionOutputPath(
-  window: BrowserWindow,
-  inputPath: string,
-  outputDirectory: string,
-  extension: 'azw3' | 'epub',
-  defaultFilename?: string
-): Promise<string | null> {
-  const formatName = extension.toUpperCase()
-  const sourceName = basename(inputPath).replace(/\.[^.]+$/, '')
-  const saveResult = await dialog.showSaveDialog(window, {
-    defaultPath: join(outputDirectory, defaultFilename ?? `${sourceName}.${extension}`),
-    filters: [{ name: `${formatName} books`, extensions: [extension] }]
-  })
-  if (saveResult.canceled || !saveResult.filePath) return null
-
-  const outputPath = extname(saveResult.filePath).toLowerCase() === `.${extension}`
-    ? saveResult.filePath
-    : `${saveResult.filePath}.${extension}`
-  if (resolve(outputPath).toLocaleLowerCase() === inputPath.toLocaleLowerCase()) {
-    throw new Error(`The ${formatName} output cannot replace the source file.`)
-  }
-  const outputFolderDetails = await stat(dirname(outputPath))
-  if (!outputFolderDetails.isDirectory()) throw new Error(`The ${formatName} output location is not a folder.`)
-
-  try {
-    const existing = await lstat(outputPath)
-    if (existing.isSymbolicLink() || !existing.isFile()) {
-      throw new Error(`The ${formatName} output path is already used by a folder or symbolic link.`)
-    }
-    const confirmation = await dialog.showMessageBox(window, {
-      type: 'warning',
-      buttons: ['Replace', 'Cancel'],
-      defaultId: 1,
-      cancelId: 1,
-      title: `Replace existing ${formatName}?`,
       message: `Replace "${basename(outputPath)}"?`
     })
     if (confirmation.response !== 0) return null
@@ -823,7 +883,6 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
       chapterNumber: null,
       archiveGap: false,
       recommended: true,
-      deliberateOverlap: false,
       selected: previousByUrl.get(chapter.url)?.selected ?? true
     }))
     const libraryIndex = await readLibraryIndex(dataDirectory())
@@ -839,16 +898,9 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
       if (!dirtyQueueChapterIds.has(id)) releaseQueueItemChapters(item)
       return
     }
-    const recommendation = recommendArchiveCoverage(
-      { ...item, chapters: refreshedChapters },
-      libraryIndex?.files ?? [],
-      item.includeOverlap,
-      item.overlapCount
-    )
+    const recommendation = recommendArchiveCoverage({ ...item, chapters: refreshedChapters }, libraryIndex?.files ?? [])
     item.chapters = recommendation.chapters
     markQueueItemChaptersDirty(item)
-    item.overlapAllowed = recommendation.overlapAllowed
-    item.includeOverlap = item.includeOverlap && recommendation.overlapAllowed
     item.recommendationSummary = recommendation.summary
     item.discoveryChanges =
       hadPreviousSnapshot && (addedCount > 0 || removedCount > 0 || orderChanged)
@@ -896,14 +948,15 @@ async function discoverQueueItem(id: string, browserAssisted = false): Promise<v
 }
 
 function pumpDiscoveryQueue(): void {
-  while (activeDiscoveries < maxActiveDiscoveries && pendingDiscoveries.length > 0) {
+  while (!shuttingDown && activeDiscoveries < maxActiveDiscoveries && pendingDiscoveries.length > 0) {
     const id = pendingDiscoveries.shift()!
     activeDiscoveries += 1
     const browserAssisted = browserAssistedDiscoveries.delete(id)
-    void discoverQueueItem(id, browserAssisted).finally(() => {
+    const task = discoverQueueItem(id, browserAssisted).finally(() => {
       activeDiscoveries -= 1
-      pumpDiscoveryQueue()
+      if (!shuttingDown) pumpDiscoveryQueue()
     })
+    trackBackgroundTask(task, `Discovery task ${id}`)
   }
 }
 
@@ -1531,6 +1584,17 @@ async function runQueuedDownload(
       await persistDownloadState(item, historyEntry)
       return
     }
+    if (requestedAction === 'shutdown') {
+      item.status = 'downloading'
+      item.progress = {
+        ...(item.progress ?? { current: 0, total: selectedChapters.length, message: '' }),
+        message: 'Interrupted; resuming after app restart'
+      }
+      historyEntry.status = 'interrupted'
+      historyEntry.error = 'The app closed before this job finished.'
+      await persistDownloadState(item, historyEntry)
+      return
+    }
     if (requestedAction === 'cancel' || controller.signal.aborted) {
       item.status = 'cancelled'
       item.progress = { ...(item.progress ?? { current: 0, total: selectedChapters.length, message: '' }), message: 'Cancelled' }
@@ -1706,7 +1770,17 @@ async function runQueuedDownload(
     }
   } catch (error) {
     const requestedAction = activeDownloads.get(itemId)?.requestedAction ?? 'none'
-    if (requestedAction === 'pause' || requestedAction === 'cancel') {
+    if (requestedAction === 'shutdown') {
+      item.status = 'downloading'
+      item.error = ''
+      historyEntry.status = 'interrupted'
+      historyEntry.error = 'The app closed before this job finished.'
+      item.progress = {
+        current: historyEntry.completedChapters,
+        total: historyEntry.selectedChapterCount,
+        message: 'Interrupted; resuming after app restart'
+      }
+    } else if (requestedAction === 'pause' || requestedAction === 'cancel') {
       item.status = requestedAction === 'pause' ? 'paused' : 'cancelled'
       historyEntry.status = requestedAction === 'pause' ? 'paused' : 'cancelled'
       historyEntry.error = ''
@@ -1718,10 +1792,12 @@ async function runQueuedDownload(
       historyEntry.error = item.error
       console.error(`Queued EPUB job ${itemId} failed:`, error)
     }
-    item.progress = {
-      current: historyEntry.completedChapters,
-      total: historyEntry.selectedChapterCount,
-      message: item.status
+    if (requestedAction !== 'shutdown') {
+      item.progress = {
+        current: historyEntry.completedChapters,
+        total: historyEntry.selectedChapterCount,
+        message: item.status
+      }
     }
     try {
       await persistDownloadState(item, historyEntry)
@@ -1734,6 +1810,7 @@ async function runQueuedDownload(
 }
 
 async function pumpDownloadQueue(): Promise<void> {
+  if (shuttingDown) return
   if (downloadPumpRunning) {
     downloadPumpRequested = true
     return
@@ -1750,7 +1827,7 @@ async function pumpDownloadQueue(): Promise<void> {
         `Maximum simultaneous novel downloads must be from ${MIN_SIMULTANEOUS_DOWNLOADS} to ${MAX_SIMULTANEOUS_DOWNLOADS}.`
       )
     }
-    while (activeDownloads.size < settings.maxSimultaneousDownloads) {
+    while (!shuttingDown && activeDownloads.size < settings.maxSimultaneousDownloads) {
       const item = discoveryQueue
         .filter((candidate) => candidate.status === 'queued' && candidate.downloadOptions)
         .sort((left, right) => left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id))[0]
@@ -1827,7 +1904,7 @@ async function pumpDownloadQueue(): Promise<void> {
         notifyDiscoveryQueueChanged()
         continue
       }
-      void runQueuedDownload(
+      const task = runQueuedDownload(
         item.id,
         controller,
         historyEntry,
@@ -1846,6 +1923,7 @@ async function pumpDownloadQueue(): Promise<void> {
           console.error('Download queue scheduler failed:', error)
         })
       })
+      trackBackgroundTask(task, `EPUB download task ${item.id}`)
     }
   } catch (error) {
     console.error('Download queue scheduler failed:', error)
@@ -1875,7 +1953,7 @@ async function pumpDownloadQueue(): Promise<void> {
     notifyDiscoveryQueueChanged()
   } finally {
     downloadPumpRunning = false
-    if (downloadPumpRequested) {
+    if (downloadPumpRequested && !shuttingDown) {
       downloadPumpRequested = false
       void pumpDownloadQueue().catch((error: unknown) => {
         console.error('Download queue scheduler failed:', error)
@@ -1899,9 +1977,15 @@ async function createWindow(): Promise<void> {
     }
   })
   mainWindow = window
+  mainWindowReady = false
   window.once('ready-to-show', () => {
+    mainWindowReady = true
     window.maximize()
     window.show()
+    if (focusRequestedBeforeWindowReady) {
+      focusRequestedBeforeWindowReady = false
+      window.focus()
+    }
   })
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -1933,14 +2017,9 @@ async function createWindow(): Promise<void> {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle('chapter:discover', async (event, value: unknown): Promise<Result<Awaited<ReturnType<typeof discoverChapters>>>> => {
+  ipcMain.handle('chapter:discover', async (_event, value: unknown): Promise<Result<Awaited<ReturnType<typeof discoverChapters>>>> => {
     try {
-      return {
-        ok: true,
-        value: await discoverChapters(value, (progress) =>
-          sendToCurrentFrame(event.sender, event.senderFrame, 'job:progress', progress)
-        )
-      }
+      return { ok: true, value: await discoverChapters(value) }
     } catch (error) {
       console.error('Chapter discovery failed:', error)
       return { ok: false, error: errorMessage(error) }
@@ -1956,6 +2035,7 @@ function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('browser:discover', async (event, value: unknown): Promise<Result<Awaited<ReturnType<typeof discoverChapters>>>> => {
+    if (shuttingDown) return { ok: false, error: 'NovelTracker is closing.' }
     const controller = new AbortController()
     const operationId = `renderer:${event.sender.id}`
     if (activeBrowserDiscoveries.has(operationId)) {
@@ -2001,10 +2081,10 @@ function registerIpcHandlers(): void {
     const directory = await realpath(result.filePaths[0])
     const details = await stat(directory)
     if (!details.isDirectory()) throw new Error('The selected output path is not a folder.')
+    await updateSettings((settings) => {
+      settings.outputDirectory = directory
+    })
     approvedOutputDirectories.add(directory)
-    const settings = await readSettings(dataDirectory())
-    settings.outputDirectory = directory
-    await writeSettings(dataDirectory(), settings)
     return directory
   })
 
@@ -2015,9 +2095,9 @@ function registerIpcHandlers(): void {
       if (typeof rawCss !== 'string' || rawCss.length > MAX_EPUB_CSS_LENGTH) {
         throw new Error(`EPUB CSS must be text of at most ${MAX_EPUB_CSS_LENGTH.toLocaleString()} characters.`)
       }
-      const settings = await readSettings(dataDirectory())
-      settings.epubCss = rawCss
-      await writeSettings(dataDirectory(), settings)
+      const settings = await updateSettings((current) => {
+        current.epubCss = rawCss
+      })
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2029,9 +2109,9 @@ function registerIpcHandlers(): void {
       if (rawTheme !== 'light' && rawTheme !== 'dark') {
         throw new Error('The app theme must be light or dark.')
       }
-      const settings = await readSettings(dataDirectory())
-      settings.appTheme = rawTheme
-      await writeSettings(dataDirectory(), settings)
+      const settings = await updateSettings((current) => {
+        current.appTheme = rawTheme
+      })
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2050,12 +2130,16 @@ function registerIpcHandlers(): void {
           `Maximum simultaneous downloads must be a whole number from ${MIN_SIMULTANEOUS_DOWNLOADS} to ${MAX_SIMULTANEOUS_DOWNLOADS}.`
         )
       }
-      const settings = await readSettings(dataDirectory())
-      settings.maxSimultaneousDownloads = rawValue
-      await writeSettings(dataDirectory(), settings)
-      void pumpDownloadQueue().catch((error: unknown) => {
-        console.error('Download queue scheduler failed:', error)
-      })
+      const settings = await updateSettings(
+        (settings) => {
+          settings.maxSimultaneousDownloads = rawValue
+        },
+        () => {
+          void pumpDownloadQueue().catch((error: unknown) => {
+            console.error('Download queue scheduler failed:', error)
+          })
+        }
+      )
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2074,11 +2158,15 @@ function registerIpcHandlers(): void {
           `Maximum simultaneous discoveries must be a whole number from ${MIN_SIMULTANEOUS_DISCOVERIES} to ${MAX_SIMULTANEOUS_DISCOVERIES}.`
         )
       }
-      const settings = await readSettings(dataDirectory())
-      settings.maxSimultaneousDiscoveries = rawValue
-      await writeSettings(dataDirectory(), settings)
-      maxActiveDiscoveries = rawValue
-      pumpDiscoveryQueue()
+      const settings = await updateSettings(
+        (current) => {
+          current.maxSimultaneousDiscoveries = rawValue
+        },
+        () => {
+          maxActiveDiscoveries = rawValue
+          pumpDiscoveryQueue()
+        }
+      )
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2097,9 +2185,9 @@ function registerIpcHandlers(): void {
           `Maximum chapter requests per novel must be a whole number from ${MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL} to ${MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL}.`
         )
       }
-      const settings = await readSettings(dataDirectory())
-      settings.maxSimultaneousChaptersPerNovel = rawValue
-      await writeSettings(dataDirectory(), settings)
+      const settings = await updateSettings((current) => {
+        current.maxSimultaneousChaptersPerNovel = rawValue
+      })
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2108,10 +2196,14 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('settings:domain-request-delays', async (_event, rawPreferences: unknown): Promise<Result<AppSettings>> => {
     try {
-      const settings = await readSettings(dataDirectory())
-      settings.domainRequestDelays = normalizeDomainRequestDelays(rawPreferences)
-      await writeSettings(dataDirectory(), settings)
-      setDomainRequestDelays(settings.domainRequestDelays)
+      const settings = await updateSettings(
+        (current) => {
+          current.domainRequestDelays = normalizeDomainRequestDelays(rawPreferences)
+        },
+        (current) => {
+          setDomainRequestDelays(current.domainRequestDelays)
+        }
+      )
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2122,9 +2214,9 @@ function registerIpcHandlers(): void {
     'settings:site-extraction-preferences',
     async (_event, rawPreferences: unknown): Promise<Result<AppSettings>> => {
       try {
-        const settings = await readSettings(dataDirectory())
-        settings.siteExtractionPreferences = normalizeSiteExtractionPreferences(rawPreferences)
-        await writeSettings(dataDirectory(), settings)
+        const settings = await updateSettings((current) => {
+          current.siteExtractionPreferences = normalizeSiteExtractionPreferences(rawPreferences)
+        })
         return { ok: true, value: settings }
       } catch (error) {
         return { ok: false, error: errorMessage(error) }
@@ -2142,10 +2234,10 @@ function registerIpcHandlers(): void {
         if (typeof rawScanOldCompletedFolder !== 'boolean') {
           throw new Error('The Old Completed-folder scan option must be enabled or disabled.')
         }
-        const settings = await readSettings(dataDirectory())
-        settings.scanOldFolder = rawScanOldFolder
-        settings.scanOldCompletedFolder = rawScanOldCompletedFolder
-        await writeSettings(dataDirectory(), settings)
+        const settings = await updateSettings((current) => {
+          current.scanOldFolder = rawScanOldFolder
+          current.scanOldCompletedFolder = rawScanOldCompletedFolder
+        })
         return { ok: true, value: settings }
       } catch (error) {
         return { ok: false, error: errorMessage(error) }
@@ -2165,12 +2257,16 @@ function registerIpcHandlers(): void {
           `The discovery freshness window must be a whole number from ${MIN_DISCOVERY_FRESHNESS_HOURS} to ${MAX_DISCOVERY_FRESHNESS_HOURS} hours.`
         )
       }
-      const settings = await readSettings(dataDirectory())
-      settings.discoveryFreshnessHours = rawValue
-      await writeSettings(dataDirectory(), settings)
-      void pumpDownloadQueue().catch((error: unknown) => {
-        console.error('Download queue scheduler failed:', error)
-      })
+      const settings = await updateSettings(
+        (current) => {
+          current.discoveryFreshnessHours = rawValue
+        },
+        () => {
+          void pumpDownloadQueue().catch((error: unknown) => {
+            console.error('Download queue scheduler failed:', error)
+          })
+        }
+      )
       return { ok: true, value: settings }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
@@ -2189,19 +2285,19 @@ function registerIpcHandlers(): void {
     const details = await lstat(directory)
     if (!details.isDirectory() || details.isSymbolicLink()) throw new Error('The selected library root is not a folder.')
 
-    const settings = await readSettings(dataDirectory())
-    settings.libraryRoot = directory
-    const downloaded = resolve(directory, 'Downloaded')
-    try {
-      const downloadedDetails = await lstat(downloaded)
-      if (downloadedDetails.isDirectory() && !downloadedDetails.isSymbolicLink() && !settings.outputDirectory) {
-        settings.outputDirectory = await realpath(downloaded)
-        approvedOutputDirectories.add(settings.outputDirectory)
+    const settings = await updateSettings(async (current) => {
+      current.libraryRoot = directory
+      const downloaded = resolve(directory, 'Downloaded')
+      try {
+        const downloadedDetails = await lstat(downloaded)
+        if (downloadedDetails.isDirectory() && !downloadedDetails.isSymbolicLink() && !current.outputDirectory) {
+          current.outputDirectory = await realpath(downloaded)
+        }
+      } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
       }
-    } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
-    }
-    await writeSettings(dataDirectory(), settings)
+    })
+    if (settings.outputDirectory) approvedOutputDirectories.add(settings.outputDirectory)
     return directory
   })
 
@@ -2217,9 +2313,9 @@ function registerIpcHandlers(): void {
     const path = await realpath(result.filePaths[0])
     const details = await lstat(path)
     if (!details.isFile() || details.isSymbolicLink()) throw new Error('The selected CSV path is not a file.')
-    const settings = await readSettings(dataDirectory())
-    settings.trackerCsvPath = path
-    await writeSettings(dataDirectory(), settings)
+    await updateSettings((settings) => {
+      settings.trackerCsvPath = path
+    })
     return path
   })
 
@@ -2296,16 +2392,12 @@ function registerIpcHandlers(): void {
             total: 0,
             selected: 0,
             recommended: 0,
-            deliberateOverlap: 0,
             hasUncertainArchiveChapters: false,
             latestTitle: ''
           },
           targetOutputPath: '',
           discoveryChanges: '',
           recommendationSummary: '',
-          overlapAllowed: false,
-          includeOverlap: false,
-          overlapCount: 10,
           downloadOptions: null,
           repackageOnly: false,
           saveAvailableChaptersOnly: false,
@@ -2520,16 +2612,9 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     'discovery-queue:accept-recommendations',
-    async (_event, rawId: unknown, rawIncludeOverlap: unknown, rawOverlapCount: unknown): Promise<Result<void>> => {
+    async (_event, rawId: unknown): Promise<Result<void>> => {
       try {
-        if (
-          typeof rawId !== 'string' ||
-          typeof rawIncludeOverlap !== 'boolean' ||
-          typeof rawOverlapCount !== 'number' ||
-          !Number.isInteger(rawOverlapCount) ||
-          rawOverlapCount < 0 ||
-          rawOverlapCount > 1000
-        ) {
+        if (typeof rawId !== 'string') {
           throw new Error('Invalid recommendation settings.')
         }
         const item = discoveryQueue.find((candidate) => candidate.id === rawId)
@@ -2537,27 +2622,13 @@ function registerIpcHandlers(): void {
           throw new Error('The selected item is not ready for recommendations.')
         }
         await ensureQueueItemChapters(item)
-        if (rawIncludeOverlap && !item.overlapAllowed) {
-          throw new Error('Overlap cannot be applied because archive coverage is uncertain or has unresolved gaps.')
-        }
         const libraryIndex = await readLibraryIndex(dataDirectory())
-        const recommendation = recommendArchiveCoverage(
-          item,
-          libraryIndex?.files ?? [],
-          rawIncludeOverlap,
-          rawOverlapCount
-        )
-        if (rawIncludeOverlap && !recommendation.overlapAllowed) {
-          throw new Error('Overlap cannot be applied because archive coverage is uncertain or has unresolved gaps.')
-        }
+        const recommendation = recommendArchiveCoverage(item, libraryIndex?.files ?? [])
         item.chapters = recommendation.chapters.map((chapter) => ({
           ...chapter,
-          selected: chapter.recommended || chapter.deliberateOverlap
+          selected: chapter.recommended
         }))
         markQueueItemChaptersDirty(item)
-        item.includeOverlap = rawIncludeOverlap
-        item.overlapCount = rawOverlapCount
-        item.overlapAllowed = recommendation.overlapAllowed
         item.recommendationSummary = recommendation.summary
         item.status = item.chapters.some((chapter) => chapter.selected) ? 'ready' : 'needs-review'
         item.updatedAt = new Date().toISOString()
@@ -2751,23 +2822,18 @@ function registerIpcHandlers(): void {
               archiveSources: [],
               chapterNumber: null,
               archiveGap: false,
-              recommended: true,
-              deliberateOverlap: false
+              recommended: true
             })),
             chapterSummary: {
               total: 0,
               selected: 0,
               recommended: 0,
-              deliberateOverlap: 0,
               hasUncertainArchiveChapters: false,
               latestTitle: ''
             },
             targetOutputPath: '',
             discoveryChanges: '',
             recommendationSummary: '',
-            overlapAllowed: false,
-            includeOverlap: false,
-            overlapCount: 10,
             downloadOptions: null,
             repackageOnly: false,
             queuedAt: '',
@@ -2787,7 +2853,6 @@ function registerIpcHandlers(): void {
           const recommendation = recommendArchiveCoverage(createdItem, libraryIndex?.files ?? [])
           createdItem.chapters = recommendation.chapters
           markQueueItemChaptersDirty(createdItem)
-          createdItem.overlapAllowed = recommendation.overlapAllowed
           createdItem.recommendationSummary = recommendation.summary
         } else {
           const existingItem = item
@@ -3349,7 +3414,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle('library:index-backup-date', async () => readLibraryIndexBackupDate(dataDirectory()))
 
   ipcMain.handle('library:restore-index-backup', async (): Promise<Result<LibraryIndexSummary>> => {
-    if (activeLibraryScan || libraryIndexRestoreActive) {
+    if (shuttingDown) return { ok: false, error: 'NovelTracker is closing.' }
+    if (activeLibraryScan || libraryIndexRestoreActive || libraryCorrectionActive) {
       return { ok: false, error: 'Wait for the current library operation to finish before restoring its backup.' }
     }
     libraryIndexRestoreActive = true
@@ -3378,8 +3444,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     'library:scan',
     async (event, rawForceRebuild: unknown = false): Promise<Result<LibraryIndexSummary>> => {
+    if (shuttingDown) return { ok: false, error: 'NovelTracker is closing.' }
     if (typeof rawForceRebuild !== 'boolean') return { ok: false, error: 'Invalid library scan option.' }
-    if (activeLibraryScan || libraryIndexRestoreActive) {
+    if (activeLibraryScan || libraryIndexRestoreActive || libraryCorrectionActive) {
       return { ok: false, error: 'Another library operation is already running.' }
     }
     const scan: ActiveLibraryScan = { worker: null, cancelRequested: false }
@@ -3388,7 +3455,7 @@ function registerIpcHandlers(): void {
       const settings = await readSettings(dataDirectory())
       if (!settings.libraryRoot) throw new Error('Go to Configuration and choose a historical library root first.')
       if (scan.cancelRequested) throw new Error('Library scan cancelled.')
-      const worker = new Worker(join(__dirname, 'libraryScanWorker.js'), {
+      const worker = trackLibraryWorker(new Worker(join(__dirname, 'libraryScanWorker.js'), {
         workerData: {
           libraryRoot: settings.libraryRoot,
           dataDirectory: dataDirectory(),
@@ -3397,7 +3464,7 @@ function registerIpcHandlers(): void {
           scanOldCompletedFolder: settings.scanOldCompletedFolder
         },
         resourceLimits: { maxOldGenerationSizeMb: 1024 }
-      })
+      }))
       scan.worker = worker
       if (scan.cancelRequested) worker.postMessage({ type: 'cancel' })
       await runLibraryScanWorker(worker, (progress) => {
@@ -3422,6 +3489,11 @@ function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('library:correct-file', async (_event, rawFileId: unknown, rawCorrection: unknown) => {
+    if (shuttingDown) return { ok: false, error: 'NovelTracker is closing.' }
+    if (activeLibraryScan || libraryIndexRestoreActive || libraryCorrectionActive) {
+      return { ok: false, error: 'Wait for the current library operation to finish before correcting files.' }
+    }
+    libraryCorrectionActive = true
     try {
       if (typeof rawFileId !== 'string' || typeof rawCorrection !== 'object' || rawCorrection === null) {
         throw new Error('Invalid library correction.')
@@ -3447,13 +3519,17 @@ function registerIpcHandlers(): void {
       return { ok: true, value: summarizeLibraryIndex(index) }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
+    } finally {
+      libraryCorrectionActive = false
     }
   })
 
   ipcMain.handle(
     'library:merge-epubs',
     async (event, rawFileIds: unknown, rawFilename: unknown): Promise<LibraryEpubMergeResponse> => {
+      if (shuttingDown) return { ok: false, error: 'NovelTracker is closing.' }
       let operationId: string | null = null
+      activeLibraryOperationHandlers += 1
       try {
         if (
           !Array.isArray(rawFileIds) ||
@@ -3467,7 +3543,7 @@ function registerIpcHandlers(): void {
         if (typeof rawFilename !== 'string' || rawFilename.length > 200) {
           throw new Error('Enter an EPUB filename of 200 characters or fewer.')
         }
-        if (activeLibraryScan || libraryIndexRestoreActive) {
+        if (activeLibraryScan || libraryIndexRestoreActive || libraryCorrectionActive) {
           throw new Error('Wait for the current library operation to finish before combining EPUBs.')
         }
         const index = await readLibraryIndex(dataDirectory())
@@ -3566,10 +3642,10 @@ function registerIpcHandlers(): void {
           error: ''
         })
         operationId = trackedOperationId
-        const worker = new Worker(join(__dirname, 'epubMergeWorker.js'), {
+        const worker = trackLibraryWorker(new Worker(join(__dirname, 'epubMergeWorker.js'), {
           workerData: input,
           resourceLimits: { maxOldGenerationSizeMb: 1024 }
-        })
+        }))
         const result = await runEpubMergeWorker(worker, (progress) => {
           void updateLibraryOperation(trackedOperationId, {
             progress: progress.percentage,
@@ -3597,113 +3673,8 @@ function registerIpcHandlers(): void {
         }
         console.error('Existing EPUB merge failed:', error)
         return { ok: false, error: errorMessage(error) }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    'library:convert-azw3',
-    async (_event, rawInputPath: unknown): Promise<EbookConversionResponse> => {
-      let operationId: string | null = null
-      try {
-        if (typeof rawInputPath !== 'string' || extname(rawInputPath).toLowerCase() !== '.epub') {
-          throw new Error('Select an EPUB file to convert.')
-        }
-        if (!mainWindow || mainWindow.isDestroyed()) {
-          throw new Error('The app window is not available to choose an AZW3 output path.')
-        }
-
-        const settings = await readSettings(dataDirectory())
-        const inputFile = resolve(rawInputPath)
-        const inputDetails = await lstat(inputFile)
-        if (inputDetails.isSymbolicLink() || !inputDetails.isFile()) {
-          throw new Error('The selected EPUB is not a regular file.')
-        }
-        const inputPath = await realpath(inputFile)
-        const allowedRoots: string[] = []
-        for (const rootPath of [settings.libraryRoot, settings.outputDirectory]) {
-          if (!rootPath) continue
-          try {
-            allowedRoots.push(await realpath(rootPath))
-          } catch (error) {
-            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
-          }
-        }
-        if (!allowedRoots.some((rootPath) => isWithinDirectory(rootPath, inputPath))) {
-          throw new Error('The selected EPUB must be inside the configured library or EPUB output folder.')
-        }
-
-        const outputDirectory = settings.outputDirectory || dirname(inputPath)
-        const outputPath = await chooseConversionOutputPath(mainWindow, inputPath, outputDirectory, 'azw3')
-        if (!outputPath) return { ok: false, cancelled: true }
-
-        operationId = await startLibraryOperation({
-          kind: 'epub-to-azw3',
-          inputFiles: [inputPath],
-          outputPath,
-          progress: null,
-          message: 'Converting EPUB to AZW3 with Calibre…',
-          error: ''
-        })
-        const result = await convertEpubToAzw3(inputPath, outputPath)
-        await updateLibraryOperation(operationId, {
-          status: 'completed',
-          outputPath: result.outputPath,
-          progress: 100,
-          message: 'AZW3 conversion completed.',
-          error: ''
-        }, true)
-        return { ok: true, value: result }
-      } catch (error) {
-        if (operationId) {
-          await updateLibraryOperation(operationId, {
-            status: 'failed',
-            message: 'EPUB to AZW3 conversion failed.',
-            error: errorMessage(error)
-          }, true)
-        }
-        console.error('EPUB to AZW3 conversion failed:', error)
-        return { ok: false, error: errorMessage(error) }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    'library:convert-azw3-to-epub',
-    async (_event, rawFileId: unknown): Promise<EbookConversionResponse> => {
-      let operationId: string | null = null
-      try {
-        const inputPath = await getIndexedLibraryFile(rawFileId, 'AZW3')
-        const outputPath = await getSiblingOutputPath(inputPath, '')
-        if (!outputPath) return { ok: false, cancelled: true }
-
-        operationId = await startLibraryOperation({
-          kind: 'azw3-to-epub',
-          inputFiles: [inputPath],
-          outputPath,
-          progress: null,
-          message: 'Converting AZW3 to EPUB with Calibre…',
-          error: ''
-        })
-        const result = await convertAzw3ToEpub(inputPath, outputPath)
-        await updateLibraryOperation(operationId, {
-          status: 'completed',
-          outputPath: result.outputPath,
-          progress: 100,
-          message: 'EPUB conversion completed.',
-          error: ''
-        }, true)
-        return { ok: true, value: result }
-      } catch (error) {
-        if (operationId) {
-          await updateLibraryOperation(operationId, {
-            status: 'failed',
-            message: 'AZW3 to EPUB conversion failed.',
-            error: errorMessage(error)
-          }, true)
-        }
-        console.error('AZW3 to EPUB conversion failed:', error)
-        return { ok: false, error: errorMessage(error) }
+      } finally {
+        activeLibraryOperationHandlers -= 1
       }
     }
   )
@@ -3711,9 +3682,11 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     'library:repair-epub',
     async (_event, rawFileId: unknown): Promise<EpubRepairResponse> => {
+      if (shuttingDown) return { ok: false, error: 'NovelTracker is closing.' }
       let operationId: string | null = null
+      activeLibraryOperationHandlers += 1
       try {
-        const inputPath = await getIndexedLibraryFile(rawFileId, 'EPUB')
+        const inputPath = await getIndexedLibraryFile(rawFileId)
         const outputPath = await getSiblingOutputPath(inputPath, '-repaired')
         if (!outputPath) return { ok: false, cancelled: true }
 
@@ -3726,10 +3699,10 @@ function registerIpcHandlers(): void {
           error: ''
         })
         const trackedOperationId = operationId
-        const worker = new Worker(join(__dirname, 'epubRepairWorker.js'), {
+        const worker = trackLibraryWorker(new Worker(join(__dirname, 'epubRepairWorker.js'), {
           workerData: { inputPath, outputPath },
           resourceLimits: { maxOldGenerationSizeMb: 1024 }
-        })
+        }))
         const result = await runEpubRepairWorker(worker, (progress) => {
           void updateLibraryOperation(trackedOperationId, {
             progress: progress.percentage,
@@ -3759,6 +3732,8 @@ function registerIpcHandlers(): void {
         }
         console.error('EPUB repair failed:', error)
         return { ok: false, error: errorMessage(error) }
+      } finally {
+        activeLibraryOperationHandlers -= 1
       }
     }
   )
@@ -3774,6 +3749,13 @@ function registerIpcHandlers(): void {
       if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
         throw new Error('The requested path is outside the configured library.')
       }
+      const targetDetails = await stat(target)
+      if (
+        !targetDetails.isDirectory() &&
+        (!targetDetails.isFile() || !['.epub', '.azw3'].includes(extname(target).toLowerCase()))
+      ) {
+        throw new Error('Only folders and EPUB or AZW3 files can be opened from the library.')
+      }
       if (reveal) shell.showItemInFolder(target)
       else {
         const error = await shell.openPath(target)
@@ -3788,7 +3770,10 @@ function registerIpcHandlers(): void {
 }
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return
   initializeLocalLogger(dataDirectory(), app.getVersion())
+  registerProcessErrorHandlers()
+  await migrateSettings(dataDirectory())
   if (app.isPackaged) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = join(process.resourcesPath, 'playwright-browsers')
   }
@@ -3806,8 +3791,19 @@ app.whenReady().then(async () => {
   }
   if (interruptedLibraryOperations) await flushLibraryOperations()
   await markInterruptedDownloadJobs(dataDirectory())
-  discoveryQueue = (await readDiscoveryQueue(dataDirectory())).map(hydrateQueueItem)
-  let queueStorageMigrationNeeded = false
+  const savedQueue = await readDiscoveryQueue(dataDirectory())
+  discoveryQueue = savedQueue.map(hydrateQueueItem)
+  let queueStorageMigrationNeeded = savedQueue.some((saved, index) => {
+    const normalized = discoveryQueue[index]
+    return (
+      hasUnknownProperties(saved, normalized) ||
+      hasUnknownProperties(saved.chapterSummary, normalized.chapterSummary) ||
+      (saved.chapters ?? []).some((chapter, chapterIndex) => {
+        const normalizedChapter = normalized.chapters[chapterIndex]
+        return normalizedChapter !== undefined && hasUnknownProperties(chapter, normalizedChapter)
+      })
+    )
+  })
   for (const item of discoveryQueue) {
     if (item.chapters.length > 0) {
       if (item.status === 'completed') releaseQueueItemChapters(item)
@@ -3939,6 +3935,7 @@ app.whenReady().then(async () => {
   }
   if (interruptedDiscoveries) await persistDiscoveryQueue()
   const settings = await readSettings(dataDirectory())
+  const storageRecoveryWarnings = takeStorageRecoveryWarnings()
   maxActiveDiscoveries = settings.maxSimultaneousDiscoveries
   setDomainRequestDelays(settings.domainRequestDelays)
   if (settings.outputDirectory) {
@@ -3950,6 +3947,14 @@ app.whenReady().then(async () => {
     }
   }
   await createWindow()
+  if (storageRecoveryWarnings.length > 0) {
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Saved data was recovered',
+      message: 'Some saved data could not be used. NovelTracker started with safe defaults.',
+      detail: storageRecoveryWarnings.join('\n')
+    })
+  }
   void pumpDownloadQueue().catch((error: unknown) => {
     console.error('Download queue scheduler failed:', error)
   })
@@ -3963,6 +3968,7 @@ app.whenReady().then(async () => {
   })
 }).catch((error: unknown) => {
   console.error('Application startup failed:', error)
+  dialog.showErrorBox('NovelTracker could not start', errorMessage(error))
   app.quit()
 })
 
@@ -3970,12 +3976,129 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-let closingBrowserSession = false
+async function sweepNovelTrackerTemporaryFiles(): Promise<void> {
+  const directories = new Set([
+    dataDirectory(),
+    ...approvedOutputDirectories,
+    ...libraryOperations.filter((operation) => operation.outputPath).map((operation) => dirname(operation.outputPath))
+  ])
+  for (const directory of directories) {
+    let entries
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') continue
+      throw error
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^\.novel-tracker-[\da-f-]+\.tmp$/i.test(entry.name)) continue
+      const path = join(directory, entry.name)
+      try {
+        await rm(path, { force: true })
+      } catch (error) {
+        console.warn(`Temporary file ${path} could not be removed during shutdown:`, error)
+      }
+    }
+  }
+}
+
+async function drainApplicationWork(): Promise<void> {
+  shuttingDown = true
+  pendingDiscoveries.length = 0
+  browserAssistedDiscoveries.clear()
+  if (discoveryQueueNotificationTimer) {
+    clearTimeout(discoveryQueueNotificationTimer)
+    discoveryQueueNotificationTimer = null
+  }
+  if (libraryOperationFlushTimer) {
+    clearTimeout(libraryOperationFlushTimer)
+    libraryOperationFlushTimer = null
+  }
+
+  for (const controller of activeQueueDiscoveries.values()) controller.abort()
+  for (const controller of activeBrowserDiscoveries.values()) controller.abort()
+  for (const active of activeDownloads.values()) {
+    if (active.requestedAction === 'none') active.requestedAction = 'shutdown'
+    active.controller.abort()
+  }
+  if (activeLibraryScan) {
+    activeLibraryScan.cancelRequested = true
+    activeLibraryScan.worker?.postMessage({ type: 'cancel' })
+  }
+
+  const workerResults = await Promise.allSettled(
+    [...activeLibraryWorkers].map((worker) => worker.terminate())
+  )
+  for (const result of workerResults) {
+    if (result.status === 'rejected') console.error('A worker could not be terminated during shutdown:', result.reason)
+  }
+
+  const deadline = Date.now() + 15_000
+  while (
+    (downloadPumpRunning ||
+      activeDownloads.size > 0 ||
+      activeBackgroundTasks.size > 0 ||
+      activeQueueDiscoveries.size > 0 ||
+      activeBrowserDiscoveries.size > 0 ||
+      activeLibraryScan !== null ||
+      activeLibraryWorkers.size > 0 ||
+      activeLibraryOperationHandlers > 0 ||
+      libraryIndexRestoreActive ||
+      libraryCorrectionActive) &&
+    Date.now() < deadline
+  ) {
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 25))
+  }
+  if (
+    downloadPumpRunning ||
+    activeDownloads.size > 0 ||
+    activeBackgroundTasks.size > 0 ||
+    activeQueueDiscoveries.size > 0 ||
+    activeBrowserDiscoveries.size > 0 ||
+    activeLibraryScan !== null ||
+    activeLibraryWorkers.size > 0 ||
+    activeLibraryOperationHandlers > 0 ||
+    libraryIndexRestoreActive ||
+    libraryCorrectionActive
+  ) {
+    console.warn('Shutdown continued after the work-drain deadline; some operations did not settle.')
+  }
+
+  try {
+    await closeBrowserSession()
+  } catch (error) {
+    console.error('The browser session could not be closed cleanly:', error)
+  }
+
+  await Promise.all([
+    settingsUpdateTail,
+    discoveryQueueWrites,
+    historyWrites,
+    libraryOperationWrites
+  ])
+  await flushLibraryOperations()
+  if (discoveryQueueNotificationTimer) {
+    clearTimeout(discoveryQueueNotificationTimer)
+    discoveryQueueNotificationTimer = null
+  }
+  try {
+    await sweepNovelTrackerTemporaryFiles()
+  } catch (error) {
+    console.error('NovelTracker temporary files could not be swept during shutdown:', error)
+  }
+  await flushLocalLogger()
+}
+
 app.on('before-quit', (event) => {
-  if (closingBrowserSession) return
+  if (shutdownComplete) return
   event.preventDefault()
-  closingBrowserSession = true
-  void closeBrowserSession().catch(() => {
-    console.error('The browser session could not be closed cleanly.')
-  }).finally(() => app.quit())
+  if (shutdownPromise) return
+  shutdownPromise = drainApplicationWork()
+    .catch((error: unknown) => {
+      console.error('Application shutdown did not complete cleanly:', error)
+    })
+    .finally(() => {
+      shutdownComplete = true
+      app.quit()
+    })
 })

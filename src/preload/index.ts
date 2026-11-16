@@ -2,7 +2,6 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DiscoveryResult,
   AppSettings,
-  EbookConversionResponse,
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
@@ -14,7 +13,7 @@ import type {
   QueuedEpubJob,
   LibraryFileCorrection,
   LibraryFileRecord,
-  LibraryEpubMergeResult,
+  LibraryEpubMergeResponse,
   LibraryIndexSummary,
   LibraryOperation,
   LibraryProgress,
@@ -71,8 +70,8 @@ const api: NovelTrackerApi = {
     ipcRenderer.invoke('discovery-queue:retry-browser', id) as Promise<Result<void>>,
   refreshDiscoveryQueueItem: (id: string) =>
     ipcRenderer.invoke('discovery-queue:refresh', id) as Promise<Result<void>>,
-  acceptQueueRecommendations: (id: string, includeOverlap: boolean, overlapCount: number) =>
-    ipcRenderer.invoke('discovery-queue:accept-recommendations', id, includeOverlap, overlapCount) as Promise<Result<void>>,
+  acceptQueueRecommendations: (id: string) =>
+    ipcRenderer.invoke('discovery-queue:accept-recommendations', id) as Promise<Result<void>>,
   enqueueEpub: (input: GenerateEpubInput, queueItemId?: string) =>
     ipcRenderer.invoke('download-queue:enqueue', input, queueItemId) as Promise<Result<QueuedEpubJob>>,
   retryEpub: (id: string) => ipcRenderer.invoke('download-queue:retry', id) as Promise<Result<void>>,
@@ -104,10 +103,6 @@ const api: NovelTrackerApi = {
   getLibraryIndexBackupDate: () => ipcRenderer.invoke('library:index-backup-date') as Promise<string | null>,
   restoreLibraryIndexBackup: () =>
     ipcRenderer.invoke('library:restore-index-backup') as Promise<Result<LibraryIndexSummary>>,
-  convertEpubToAzw3: (inputPath: string) =>
-    ipcRenderer.invoke('library:convert-azw3', inputPath) as Promise<EbookConversionResponse>,
-  convertAzw3ToEpub: (fileId: string) =>
-    ipcRenderer.invoke('library:convert-azw3-to-epub', fileId) as Promise<EbookConversionResponse>,
   repairEpub: (fileId: string) =>
     ipcRenderer.invoke('library:repair-epub', fileId) as Promise<EpubRepairResponse>,
   getLibraryOperations: () =>
@@ -123,7 +118,7 @@ const api: NovelTrackerApi = {
   correctLibraryFile: (fileId: string, correction: LibraryFileCorrection) =>
     ipcRenderer.invoke('library:correct-file', fileId, correction) as Promise<Result<LibraryIndexSummary>>,
   mergeLibraryEpubs: (fileIds: string[], filename: string) =>
-    ipcRenderer.invoke('library:merge-epubs', fileIds, filename) as Promise<Result<LibraryEpubMergeResult>>,
+    ipcRenderer.invoke('library:merge-epubs', fileIds, filename) as Promise<LibraryEpubMergeResponse>,
   onLibraryEpubMergeProgress: (listener: (progress: EpubMergeProgress) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: EpubMergeProgress) => listener(progress)
     ipcRenderer.on('library:merge-progress', handler)

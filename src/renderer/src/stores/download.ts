@@ -8,7 +8,6 @@ export interface SelectableChapter extends ChapterLink {
   chapterNumber?: number | null
   archiveGap?: boolean
   recommended?: boolean
-  deliberateOverlap?: boolean
 }
 
 export const useDownloadStore = defineStore('download', {

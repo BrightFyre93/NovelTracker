@@ -124,3 +124,7 @@ export function initializeLocalLogger(dataDirectory: string, appVersion: string)
   console.warn = (...args: unknown[]) => write('warn', originalConsole!.warn, args)
   console.error = (...args: unknown[]) => write('error', originalConsole!.error, args)
 }
+
+export async function flushLocalLogger(): Promise<void> {
+  await writeQueue
+}

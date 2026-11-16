@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto'
-import { lstat, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, readFile, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
 import JSZip from 'jszip'
 import sharp from 'sharp'
@@ -14,6 +13,7 @@ import {
   MAX_TOTAL_EPUB_IMAGE_BYTES
 } from '../../shared/constants'
 import { resizeSmallKindleCover } from './kindleCover'
+import { atomicWriteFile } from './atomicFile'
 
 interface XmlObject {
   [key: string]: unknown
@@ -409,13 +409,7 @@ export async function repairEpubFile(
   }
 
   onProgress({ stage: 'saving', percentage: 96, message: 'Writing repaired EPUB copy…' })
-  const temporaryPath = `${outputPath}.${randomUUID()}.tmp`
-  try {
-    await writeFile(temporaryPath, output, { flag: 'wx' })
-    await rename(temporaryPath, outputPath)
-  } finally {
-    await rm(temporaryPath, { force: true })
-  }
+  await atomicWriteFile(outputPath, output)
   const outputDetails = await stat(outputPath)
   onProgress({
     stage: 'complete',

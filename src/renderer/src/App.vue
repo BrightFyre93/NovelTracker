@@ -43,7 +43,6 @@ const trackerSources = ref<Record<string, string>>({})
 const trackerCsvPath = ref('')
 const chapterSearch = ref('')
 const downloadHistory = ref<DownloadHistoryEntry[]>([])
-const convertingHistoryId = ref('')
 const libraryOperations = ref<LibraryOperation[]>([])
 const {
   url,
@@ -186,9 +185,8 @@ onUnmounted(() => {
 function libraryOperationLabel(operation: LibraryOperation): string {
   switch (operation.kind) {
     case 'merge-epubs': return 'Merge EPUBs'
-    case 'epub-to-azw3': return 'EPUB to AZW3'
-    case 'azw3-to-epub': return 'AZW3 to EPUB'
     case 'repair-epub': return 'Check / repair EPUB'
+    default: return 'Library operation'
   }
 }
 
@@ -525,25 +523,6 @@ async function createEpub(): Promise<void> {
   }
 }
 
-async function convertHistoryEpub(job: DownloadHistoryEntry): Promise<void> {
-  if (job.status !== 'completed' || !job.outputPath.toLocaleLowerCase().endsWith('.epub')) return
-  store.error = ''
-  store.success = ''
-  convertingHistoryId.value = job.id
-  try {
-    const result = await window.novelTracker.convertEpubToAzw3(job.outputPath)
-    if (!result.ok) {
-      if (!('cancelled' in result)) store.error = result.error
-      return
-    }
-    store.success = `Created ${result.value.outputPath} (${(result.value.outputBytes / 1024 / 1024).toFixed(1)} MB). AZW3 conversion does not guarantee Send-to-Kindle acceptance.`
-  } catch (reason) {
-    store.error = reason instanceof Error ? reason.message : String(reason)
-  } finally {
-    convertingHistoryId.value = ''
-  }
-}
-
 function toggleAll(selected: boolean): void {
   for (const chapter of store.chapters) chapter.selected = selected
 }
@@ -812,7 +791,6 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
               <span v-if="chapter.archiveStatus" class="chapter-archive-status">
                 {{ chapter.archiveStatus }} archive coverage
                 <template v-if="chapter.chapterNumber !== null && chapter.chapterNumber !== undefined"> · chapter {{ chapter.chapterNumber }}</template>
-                <template v-if="chapter.deliberateOverlap"> · included as overlap</template>
                 <template v-if="chapter.archiveGap"> · unresolved earlier gap</template>
                 <template v-if="chapter.archiveSources?.length"> · {{ chapter.archiveSources.join(', ') }}</template>
               </span>
@@ -888,17 +866,6 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         <span class="history-status" :class="`status-${job.status}`">{{ job.status }}</span>
         <span v-if="job.error" class="history-error">{{ job.error }}</span>
         <span v-else-if="job.outputPath" class="history-error">{{ job.outputPath }}</span>
-        <Button
-          v-if="job.status === 'completed' && job.outputPath.toLocaleLowerCase().endsWith('.epub')"
-          label="Convert to AZW3"
-          icon="pi pi-file-export"
-          severity="secondary"
-          text
-          size="small"
-          :loading="convertingHistoryId === job.id"
-          :disabled="Boolean(convertingHistoryId)"
-          @click="convertHistoryEpub(job)"
-        />
       </div>
     </section>
 

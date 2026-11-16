@@ -2,6 +2,14 @@ import { resolve } from 'node:path'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 
+const developmentCspPlugin = {
+  name: 'development-csp',
+  apply: 'serve' as const,
+  transformIndexHtml(html: string): string {
+    return html.replace("connect-src 'self'", "connect-src 'self' ws://localhost:* http://localhost:*")
+  }
+}
+
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
@@ -29,7 +37,7 @@ export default defineConfig({
   },
   renderer: {
     root: resolve('src/renderer'),
-    plugins: [vue()],
+    plugins: [vue(), developmentCspPlugin],
     resolve: {
       alias: {
         '@': resolve('src/renderer/src')

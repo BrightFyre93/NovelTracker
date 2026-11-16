@@ -675,11 +675,7 @@ function selectedChapters(item: DiscoveryQueueItem) {
 
 async function queueRecommendedEpub(item: DiscoveryQueueItemSummary): Promise<string | null> {
   if (item.status === 'needs-review') {
-    const accepted = await window.novelTracker.acceptQueueRecommendations(
-      item.id,
-      false,
-      0
-    )
+    const accepted = await window.novelTracker.acceptQueueRecommendations(item.id)
     if (!accepted.ok) return `${item.title}: ${accepted.error}`
   }
 
@@ -810,11 +806,7 @@ async function acceptRecommendations(item: DiscoveryQueueItemSummary): Promise<v
   error.value = ''
   notice.value = ''
   try {
-    const result = await window.novelTracker.acceptQueueRecommendations(
-      item.id,
-      false,
-      0
-    )
+    const result = await window.novelTracker.acceptQueueRecommendations(item.id)
     if (!result.ok) {
       error.value = result.error
       return
@@ -832,11 +824,7 @@ async function acceptSafeSuggestions(): Promise<void> {
   let applied = 0
   try {
     for (const item of batchAcceptableItems.value) {
-      const result = await window.novelTracker.acceptQueueRecommendations(
-        item.id,
-        false,
-        0
-      )
+      const result = await window.novelTracker.acceptQueueRecommendations(item.id)
       if (!result.ok) {
         error.value = `${applied} item(s) accepted before "${item.title}" failed: ${result.error}`
         return
