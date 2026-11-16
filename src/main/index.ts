@@ -1073,7 +1073,9 @@ function runLibraryScanWorker(
         rejectOnce(new Error(message.error))
       }
     })
-    worker.once('error', (error) => rejectOnce(error))
+    worker.once('error', (error: unknown) => {
+      rejectOnce(error instanceof Error ? error : new Error(String(error)))
+    })
     worker.once('exit', (code) => {
       if (settled) return
       if (code !== 0) rejectOnce(new Error(`Library scan worker exited unexpectedly (code ${code}).`))
@@ -1497,7 +1499,7 @@ async function runQueuedDownload(
     }
 
     let nextChapterIndex = 0
-    let fatalError: unknown
+    let fatalError: Error | undefined
     const worker = async (): Promise<void> => {
       while (true) {
         const active = activeDownloads.get(itemId)
@@ -1509,7 +1511,7 @@ async function runQueuedDownload(
         try {
           await processChapter(index, chapter)
         } catch (error) {
-          fatalError ??= error
+          fatalError ??= error instanceof Error ? error : new Error(String(error))
           controller.abort()
           return
         }
@@ -1553,11 +1555,11 @@ async function runQueuedDownload(
     const chapters: ChapterContent[] = []
     for (const chapter of selectedChapters) {
       let content: ChapterContent | null = null
-      let artifactError: unknown
+      let artifactError: Error | undefined
       try {
         content = await readChapterArtifact(dataDirectory(), itemId, chapter.url)
       } catch (error) {
-        artifactError = error
+        artifactError = error instanceof Error ? error : new Error(String(error))
       }
       if (!content || content.url !== chapter.url) {
         const reason = `Saved chapter content is missing or invalid for "${chapter.title}".`
@@ -1972,7 +1974,7 @@ function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('browser:cancel-discovery', async (event, rawQueueItemId: unknown): Promise<void> => {
+  ipcMain.handle('browser:cancel-discovery', (event, rawQueueItemId: unknown): void => {
     const operationId = typeof rawQueueItemId === 'string'
       ? `queue:${rawQueueItemId}`
       : `renderer:${event.sender.id}`
@@ -3439,7 +3441,7 @@ function registerIpcHandlers(): void {
         throw new Error('Chapter corrections must be a list of non-negative numbers.')
       }
       const index = await writeLibraryCorrection(dataDirectory(), rawFileId, {
-        novelTitle: novelTitle as string | undefined,
+        novelTitle,
         chapterNumbers: chapterNumbers as number[] | undefined
       } satisfies LibraryFileCorrection)
       return { ok: true, value: summarizeLibraryIndex(index) }
@@ -3952,8 +3954,12 @@ app.whenReady().then(async () => {
     console.error('Download queue scheduler failed:', error)
   })
 
-  app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) await createWindow()
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      void createWindow().catch((error: unknown) => {
+        console.error('Failed to recreate application window:', error)
+      })
+    }
   })
 }).catch((error: unknown) => {
   console.error('Application startup failed:', error)

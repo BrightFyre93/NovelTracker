@@ -59,7 +59,8 @@ function resolveArchivePath(documentPath: string, href: string): string | null {
 }
 
 function findCoverImagePath(packageXml: string, packagePath: string): string | null {
-  const packageData = object(xmlParser.parse(packageXml).package)
+  const parsedPackage: unknown = xmlParser.parse(packageXml)
+  const packageData = object(object(parsedPackage).package)
   const metadata = object(packageData.metadata)
   const manifestItems = xmlObjects(object(packageData.manifest).item)
   const coverId = text(
@@ -212,8 +213,9 @@ export async function repairEpubFile(
   }
   const containerXml = (await readEntry(containerFile, MAX_EPUB_MERGE_ENTRY_BYTES)).toString('utf8')
   validateXml(containerXml, 'META-INF/container.xml')
-  const rootfilesValue = object(object(object(xmlParser.parse(containerXml)).container).rootfiles).rootfile
-  const rootfile = Array.isArray(rootfilesValue) ? rootfilesValue[0] : rootfilesValue
+  const parsedContainer: unknown = xmlParser.parse(containerXml)
+  const rootfilesValue = object(object(object(parsedContainer).container).rootfiles).rootfile
+  const rootfile = xmlObjects(rootfilesValue)[0]
   const packagePath = text(object(rootfile)['@_full-path'])
   if (!packagePath || packagePath.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(packagePath)) {
     throw new Error('The EPUB container does not identify a safe package document.')

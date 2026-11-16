@@ -123,7 +123,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
           resolveTurn()
         }, (error: unknown) => {
           signal.removeEventListener('abort', abort)
-          rejectTurn(error)
+          rejectTurn(error instanceof Error ? error : new Error(String(error)))
         })
         if (signal.aborted) abort()
       })
@@ -158,13 +158,12 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
     let wait = Math.max(0, (domainNextRequestAt.get(hostname) ?? 0) - Date.now())
     while (wait > 0) {
       await new Promise<void>((resolveWait, rejectWait) => {
-        let timer: ReturnType<typeof setTimeout>
         const abort = (): void => {
           clearTimeout(timer)
           signal?.removeEventListener('abort', abort)
           rejectWait(new Error('EPUB creation was cancelled.'))
         }
-        timer = setTimeout(() => {
+        const timer = setTimeout(() => {
           signal?.removeEventListener('abort', abort)
           resolveWait()
         }, wait)
@@ -225,7 +224,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
       throw new Error('The page response had no readable content.')
     }
 
-    const reader = response.body.getReader()
+    const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
     const chunks: Uint8Array[] = []
     let totalLength = 0
 
@@ -395,7 +394,7 @@ export async function fetchImageResource(
       }
       if (!response.body) throw new Error('The image response had no readable content.')
 
-      const reader = response.body.getReader()
+      const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
       const chunks: Uint8Array[] = []
       let totalLength = 0
       while (true) {

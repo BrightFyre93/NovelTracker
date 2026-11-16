@@ -14,13 +14,13 @@ function isHttpUrl(value: string): boolean {
 
 export async function readTrackerCsv(path: string): Promise<TrackerNovel[]> {
   const source = await readFile(path, 'utf8')
-  const rows = parse(source, {
+  const rows = parse<Record<string, string>>(source, {
     bom: true,
     columns: true,
     relax_column_count: true,
     skip_empty_lines: true,
     trim: true
-  }) as Record<string, string>[]
+  })
 
   return rows.map((row, index) => {
     const title = row['Name of Series']?.trim() ?? ''

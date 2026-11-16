@@ -8,8 +8,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "package:win": "npm run build && node scripts/package-windows.mjs",
-    "lint": "eslint src",
-    "typecheck": "vue-tsc --noEmit"
+    "lint": "eslint src --max-warnings 0",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.node.json && vue-tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
     "@primeuix/themes": "^1.2.3",
@@ -33,6 +33,7 @@
     "eslint": "^10.14.0",
     "eslint-plugin-vue": "^10.12.1",
     "globals": "^17.14.0",
+    "prettier": "^3.10.1",
     "typescript": "^5.8.2",
     "typescript-eslint": "^8.72.2",
     "vite": "^6.2.2",

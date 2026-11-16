@@ -11,7 +11,7 @@ async function findCalibreConverter(): Promise<string> {
   const candidates = process.platform === 'win32'
     ? [
         process.env.ProgramFiles ? join(process.env.ProgramFiles, 'Calibre2', executableName) : '',
-        process.env['ProgramFiles(x86)'] ? join(process.env['ProgramFiles(x86)']!, 'Calibre2', executableName) : '',
+        process.env['ProgramFiles(x86)'] ? join(process.env['ProgramFiles(x86)'], 'Calibre2', executableName) : '',
         ...(process.env.PATH ?? '').split(delimiter).filter(Boolean).map((directory) => join(directory, executableName))
       ]
     : (process.env.PATH ?? '').split(delimiter).filter(Boolean).map((directory) => join(directory, executableName))
