@@ -8,6 +8,50 @@ export interface RetryOptions {
   cancellationMessage: string
 }
 
+export async function runPool(
+  count: number,
+  concurrency: number,
+  operation: (index: number) => Promise<void>,
+  signal?: AbortSignal,
+  cancellationMessage = 'Operation was cancelled.'
+): Promise<void> {
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new RangeError('Pool item count must be a non-negative whole number.')
+  }
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new RangeError('Pool concurrency must be a positive whole number.')
+  }
+
+  let nextIndex = 0
+  let hasError = false
+  let firstError: unknown
+  const worker = async (): Promise<void> => {
+    while (!hasError && !signal?.aborted) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= count) return
+      try {
+        await operation(index)
+      } catch (error) {
+        if (!hasError) firstError = error
+        hasError = true
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, count) },
+      () => worker()
+    )
+  )
+
+  if (hasError) throw firstError
+  if (signal?.aborted) {
+    throw new OperationCancelledError(cancellationMessage)
+  }
+}
+
 export async function abortableDelay(
   milliseconds: number,
   signal?: AbortSignal,

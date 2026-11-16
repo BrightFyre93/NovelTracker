@@ -12,6 +12,8 @@ export interface WorkerRunnerOptions<Progress> {
   missingResultMessage: string
   onProgress: (progress: Progress) => void
   signal?: AbortSignal
+  onCancel?: () => void
+  cancelTimeoutMs?: number
 }
 
 export function runWorker<Progress, Result>(
@@ -21,12 +23,17 @@ export function runWorker<Progress, Result>(
   return new Promise((resolve, reject) => {
     let settled = false
     let completion: { result: Result } | null = null
+    let cancelTimer: ReturnType<typeof setTimeout> | null = null
 
     const cleanup = (): void => {
       worker.off('message', onMessage)
       worker.off('error', onError)
       worker.off('exit', onExit)
       options.signal?.removeEventListener('abort', onAbort)
+      if (cancelTimer) {
+        clearTimeout(cancelTimer)
+        cancelTimer = null
+      }
     }
 
     const resolveOnce = (result: Result): void => {
@@ -62,6 +69,10 @@ export function runWorker<Progress, Result>(
     const onError = (error: Error): void => rejectOnce(error)
     const onExit = (code: number): void => {
       if (settled) return
+      if (options.signal?.aborted) {
+        rejectOnce(new OperationCancelledError(`${options.workerName} was cancelled.`))
+        return
+      }
       if (code !== 0) {
         rejectOnce(
           new Error(
@@ -75,6 +86,38 @@ export function runWorker<Progress, Result>(
       }
     }
     const onAbort = (): void => {
+      if (options.onCancel) {
+        try {
+          options.onCancel()
+        } catch (error) {
+          rejectOnce(
+            error instanceof Error ? error : new Error(String(error))
+          )
+          void worker.terminate().catch((terminateError: unknown) => {
+            console.error(
+              `${options.workerName} worker could not be terminated:`,
+              terminateError
+            )
+          })
+          return
+        }
+        cancelTimer = setTimeout(() => {
+          const error = new OperationCancelledError(
+            `${options.workerName} did not stop after cancellation.`
+          )
+          void worker.terminate().then(
+            () => rejectOnce(error),
+            (terminateError: unknown) => {
+              console.error(
+                `${options.workerName} worker could not be terminated:`,
+                terminateError
+              )
+              rejectOnce(error)
+            }
+          )
+        }, options.cancelTimeoutMs ?? 5000)
+        return
+      }
       rejectOnce(
         new OperationCancelledError(`${options.workerName} was cancelled.`)
       )

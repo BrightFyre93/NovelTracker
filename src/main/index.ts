@@ -20,6 +20,7 @@ import type {
   DiscoveryQueueUpdate,
   DomainRequestDelayPreference,
   DownloadHistoryEntry,
+  EpubMergeProgress,
   GenerateEpubInput,
   LibraryOperation,
   Result,
@@ -111,6 +112,11 @@ import {
 import { recoverStartupState } from './app/startupRecovery'
 import { createQueueRuntime } from './services/queue/runtime'
 import type { ActiveDownload } from './services/queue/runtime'
+import type {
+  EpubPackagingInput,
+  EpubPackagingProgress,
+  EpubPackagingResult
+} from './services/epubPackaging'
 import { createJsonQueueRepository } from './services/queue/repository'
 import { QueueStore } from './services/queue/store'
 import { createJsonLibraryIndexRepository } from './services/library/libraryIndexRepository'
@@ -266,6 +272,24 @@ function dataDirectory(): string {
   return app.getPath('userData')
 }
 
+function packageEpubInWorker(
+  input: EpubPackagingInput,
+  signal: AbortSignal,
+  onProgress: (progress: EpubPackagingProgress) => void
+): Promise<EpubPackagingResult> {
+  const worker = new Worker(join(__dirname, 'epubPackageWorker.js'), {
+    workerData: input,
+    resourceLimits: { maxOldGenerationSizeMb: 1024 }
+  })
+  return runWorker<EpubMergeProgress, EpubPackagingResult>(worker, {
+    workerName: 'EPUB packaging',
+    missingResultMessage: 'EPUB packaging worker exited without creating an EPUB.',
+    onProgress,
+    signal,
+    onCancel: () => worker.postMessage({ type: 'cancel' })
+  })
+}
+
 const queueRepository = createJsonQueueRepository(dataDirectory)
 const queueStore = new QueueStore(queueRepository, hasUnknownProperties)
 const discoveryQueue = queueStore.items
@@ -298,6 +322,7 @@ const queueRuntime = createQueueRuntime({
   dataDirectory,
   settingsService,
   libraryIndexRepository,
+  packageEpub: packageEpubInWorker,
   isShuttingDown: () => shuttingDown,
   queueHelpers,
   notifyDiscoveryQueueChanged,

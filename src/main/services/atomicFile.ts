@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import { createWriteStream } from 'node:fs'
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import { isNodeError } from '../../shared/errors'
 
 function isTransientRenameError(error: unknown): boolean {
@@ -38,6 +40,26 @@ export async function atomicWriteFile(
     await mkdir(directory, { recursive: true })
     await writeFile(temporaryPath, contents, { flag: 'wx' })
     beforeRename?.()
+    await renameWithRetry(temporaryPath, path)
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch((cleanupError: unknown) => {
+      console.warn(`Temporary file ${temporaryPath} could not be removed:`, cleanupError)
+    })
+    throw error
+  }
+}
+
+export async function atomicWriteStream(
+  path: string,
+  source: NodeJS.ReadableStream,
+  beforeRename?: (temporaryPath: string) => void | Promise<void>
+): Promise<void> {
+  const directory = dirname(path)
+  const temporaryPath = join(directory, `.novel-tracker-${randomUUID()}.tmp`)
+  try {
+    await mkdir(directory, { recursive: true })
+    await pipeline(source, createWriteStream(temporaryPath, { flags: 'wx' }))
+    await beforeRename?.(temporaryPath)
     await renameWithRetry(temporaryPath, path)
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch((cleanupError: unknown) => {

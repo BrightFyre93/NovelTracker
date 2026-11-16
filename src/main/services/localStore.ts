@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { readFile, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import {
@@ -31,6 +32,7 @@ import type {
   AppSettings,
   ChapterImage,
   ChapterContent,
+  ChapterContentBlock,
   DiscoveryQueueItem,
   QueueChapter,
   DownloadHistoryEntry,
@@ -555,9 +557,73 @@ function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapter
   return join(dataDirectory, 'download-artifacts', queueItemId, filename)
 }
 
+function chapterImageArtifactPath(
+  chapterPath: string,
+  imageHash: string
+): string {
+  if (!/^[\da-f]{64}$/i.test(imageHash)) throw new Error('Invalid chapter image identifier.')
+  return join(`${chapterPath}.images`, `image-${imageHash}.bin`)
+}
+
 function coverArtifactPath(dataDirectory: string, queueItemId: string): string {
   if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
   return join(dataDirectory, 'download-artifacts', queueItemId, 'cover.json')
+}
+
+interface StoredChapterImage {
+  sourceUrl: string
+  mediaType: ChapterImage['mediaType']
+  sha256: string
+}
+
+interface StoredChapterArtifactV2 {
+  artifactVersion: 2
+  title: string
+  url: string
+  paragraphs?: string[]
+  blocks?: ChapterContentBlock[]
+  images: StoredChapterImage[]
+}
+
+export interface ChapterArtifactImageFile extends Omit<StoredChapterImage, 'sha256'> {
+  path: string
+  sha256: string
+}
+
+export interface ChapterArtifactDescriptor {
+  title: string
+  url: string
+  paragraphs: string[]
+  blocks?: ChapterContentBlock[]
+  images: ChapterArtifactImageFile[]
+}
+
+function isValidChapterBlocks(
+  value: unknown,
+  imageCount: number
+): value is ChapterContentBlock[] {
+  if (!Array.isArray(value)) return false
+  return value.every(
+    (block) =>
+      isRecord(block) &&
+      ((block.type === 'paragraph' && typeof block.text === 'string') ||
+        (block.type === 'image' &&
+          typeof block.imageIndex === 'number' &&
+          Number.isInteger(block.imageIndex) &&
+          block.imageIndex >= 0 &&
+          block.imageIndex < imageCount &&
+          typeof block.alt === 'string' &&
+          block.alt.length <= 1000))
+  )
+}
+
+function isEpubImageMediaType(
+  value: unknown
+): value is ChapterImage['mediaType'] {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, value)
+  )
 }
 
 function isValidChapterImage(value: unknown): value is ChapterImage {
@@ -572,8 +638,7 @@ function isValidChapterImage(value: unknown): value is ChapterImage {
   }
   if (
     typeof value.sourceUrl !== 'string' ||
-    typeof value.mediaType !== 'string' ||
-    !Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, value.mediaType) ||
+    !isEpubImageMediaType(value.mediaType) ||
     typeof value.dataBase64 !== 'string' ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.dataBase64)
   ) return false
@@ -598,56 +663,226 @@ export async function readChapterArtifact(
   queueItemId: string,
   chapterUrl: string
 ): Promise<ChapterContent | null> {
-  const artifact = await readJson<ChapterContent | null>(
-    chapterArtifactPath(dataDirectory, queueItemId, chapterUrl),
-    null
-  )
-  const images = artifact?.images ?? []
+  const path = chapterArtifactPath(dataDirectory, queueItemId, chapterUrl)
+  const artifact = await readJson<unknown>(path, null)
+  if (artifact === null) return null
+
   if (
+    typeof artifact === 'object' &&
     artifact !== null &&
-    (typeof artifact.title !== 'string' ||
-      typeof artifact.url !== 'string' ||
-      !Array.isArray(artifact.paragraphs) ||
-      artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string') ||
-      !Array.isArray(images) ||
-      images.length > MAX_CHAPTER_IMAGES)
+    'artifactVersion' in artifact &&
+    artifact.artifactVersion === 2
+  ) {
+    const stored = artifact as Partial<StoredChapterArtifactV2>
+    const images = stored.images
+    const validImageMetadata =
+      Array.isArray(images) &&
+      images.length <= MAX_CHAPTER_IMAGES &&
+      images.every((image) => {
+        if (
+          typeof image !== 'object' ||
+          image === null ||
+          typeof image.sourceUrl !== 'string' ||
+          !isEpubImageMediaType(image.mediaType) ||
+          typeof image.sha256 !== 'string' ||
+          !/^[\da-f]{64}$/i.test(image.sha256)
+        ) return false
+        try {
+          const source = new URL(image.sourceUrl)
+          return (
+            (source.protocol === 'http:' || source.protocol === 'https:') &&
+            !source.username &&
+            !source.password
+          )
+        } catch {
+          return false
+        }
+      })
+    const validContent =
+      typeof stored.title === 'string' &&
+      typeof stored.url === 'string' &&
+      (stored.blocks !== undefined
+        ? isValidChapterBlocks(stored.blocks, images?.length ?? 0)
+        : Array.isArray(stored.paragraphs) &&
+          stored.paragraphs.every((paragraph) => typeof paragraph === 'string'))
+    if (!validImageMetadata || !validContent) {
+      throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+    }
+
+    let totalImageBytes = 0
+    const loadedImages: ChapterImage[] = []
+    for (const image of images) {
+      const data = await readFile(chapterImageArtifactPath(path, image.sha256))
+      totalImageBytes += data.length
+      if (
+        data.length === 0 ||
+        data.length > MAX_IMAGE_BYTES ||
+        totalImageBytes > MAX_CHAPTER_IMAGE_BYTES ||
+        createHash('sha256').update(data).digest('hex') !== image.sha256
+      ) {
+        throw new Error(
+          'A saved chapter artifact contains invalid image data and must be fetched again.'
+        )
+      }
+      loadedImages.push({
+        sourceUrl: image.sourceUrl,
+        mediaType: image.mediaType,
+        dataBase64: data.toString('base64')
+      })
+    }
+
+    const blocks = stored.blocks
+    const paragraphs =
+      blocks !== undefined
+        ? blocks.flatMap((block) =>
+            block.type === 'paragraph' ? [block.text] : []
+          )
+        : stored.paragraphs!
+    return {
+      title: stored.title!,
+      url: stored.url!,
+      paragraphs,
+      images: loadedImages,
+      ...(blocks !== undefined ? { blocks } : {})
+    }
+  }
+
+  const legacyArtifact = artifact as ChapterContent
+  const legacyImages = legacyArtifact.images ?? []
+  if (
+    typeof legacyArtifact.title !== 'string' ||
+    typeof legacyArtifact.url !== 'string' ||
+    !Array.isArray(legacyArtifact.paragraphs) ||
+    legacyArtifact.paragraphs.some((paragraph) => typeof paragraph !== 'string') ||
+    !Array.isArray(legacyImages) ||
+    legacyImages.length > MAX_CHAPTER_IMAGES
   ) {
     throw new Error('A saved chapter artifact is invalid and must be fetched again.')
   }
-  if (artifact) {
-    let totalImageBytes = 0
-    for (const image of images) {
-      if (!isValidChapterImage(image)) {
-        throw new Error('A saved chapter artifact contains invalid image data and must be fetched again.')
-      }
-      const imageBytes = Buffer.byteLength(image.dataBase64, 'base64')
-      totalImageBytes += imageBytes
-      if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
-        throw new Error('A saved chapter artifact exceeds its image size limit and must be fetched again.')
-      }
+  let totalImageBytes = 0
+  for (const image of legacyImages) {
+    if (!isValidChapterImage(image)) {
+      throw new Error('A saved chapter artifact contains invalid image data and must be fetched again.')
     }
-
-    if (artifact.blocks !== undefined) {
-      if (!Array.isArray(artifact.blocks)) {
-        throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
-      }
-      for (const block of artifact.blocks) {
-        if (
-          typeof block !== 'object' ||
-          block === null ||
-          (block.type === 'paragraph' && typeof block.text === 'string') ||
-          (block.type === 'image' &&
-            Number.isInteger(block.imageIndex) &&
-            block.imageIndex >= 0 &&
-            block.imageIndex < images.length &&
-            typeof block.alt === 'string' &&
-            block.alt.length <= 1000)
-        ) continue
-        throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
-      }
+    const imageBytes = Buffer.byteLength(image.dataBase64, 'base64')
+    totalImageBytes += imageBytes
+    if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
+      throw new Error('A saved chapter artifact exceeds its image size limit and must be fetched again.')
     }
   }
-  return artifact
+  if (
+    legacyArtifact.blocks !== undefined &&
+    !isValidChapterBlocks(legacyArtifact.blocks, legacyImages.length)
+  ) {
+    throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
+  }
+  return legacyArtifact
+}
+
+export async function readChapterArtifactDescriptor(
+  dataDirectory: string,
+  queueItemId: string,
+  chapterUrl: string
+): Promise<ChapterArtifactDescriptor | null> {
+  const path = chapterArtifactPath(dataDirectory, queueItemId, chapterUrl)
+  const stored = await readJson<unknown>(path, null)
+  if (stored === null) return null
+  if (
+    !isRecord(stored) ||
+    stored.artifactVersion !== 2 ||
+    !Array.isArray(stored.images)
+  ) {
+    const legacy = await readChapterArtifact(dataDirectory, queueItemId, chapterUrl)
+    if (!legacy) return null
+    await writeChapterArtifact(dataDirectory, queueItemId, legacy)
+    return readChapterArtifactDescriptor(dataDirectory, queueItemId, chapterUrl)
+  }
+
+  const artifact = stored as Partial<StoredChapterArtifactV2>
+  const artifactImages = artifact.images
+  if (!Array.isArray(artifactImages) || artifactImages.length > MAX_CHAPTER_IMAGES) {
+    throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+  }
+  if (
+    typeof artifact.title !== 'string' ||
+    typeof artifact.url !== 'string' ||
+    (artifact.blocks !== undefined
+      ? !isValidChapterBlocks(artifact.blocks, artifactImages.length)
+      : !Array.isArray(artifact.paragraphs) ||
+        artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string'))
+  ) {
+    throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+  }
+
+  const images: ChapterArtifactImageFile[] = []
+  let totalImageBytes = 0
+  for (const value of artifactImages as unknown[]) {
+    if (!isRecord(value)) {
+      throw new Error('A saved chapter artifact contains invalid image metadata.')
+    }
+    const sourceUrl = value.sourceUrl
+    const mediaType = value.mediaType
+    const sha256 = value.sha256
+    if (
+      typeof sourceUrl !== 'string' ||
+      !isEpubImageMediaType(mediaType) ||
+      typeof sha256 !== 'string' ||
+      !/^[\da-f]{64}$/i.test(sha256)
+    ) {
+      throw new Error('A saved chapter artifact contains invalid image metadata.')
+    }
+    let source: URL
+    try {
+      source = new URL(sourceUrl)
+    } catch {
+      throw new Error('A saved chapter artifact contains invalid image metadata.')
+    }
+    if (
+      (source.protocol !== 'http:' && source.protocol !== 'https:') ||
+      source.username ||
+      source.password
+    ) {
+      throw new Error('A saved chapter artifact contains invalid image metadata.')
+    }
+
+    const imagePath = chapterImageArtifactPath(path, sha256)
+    const details = await stat(imagePath)
+    totalImageBytes += details.size
+    if (
+      details.size === 0 ||
+      details.size > MAX_IMAGE_BYTES ||
+      totalImageBytes > MAX_CHAPTER_IMAGE_BYTES
+    ) {
+      throw new Error('A saved chapter artifact exceeds its image size limit.')
+    }
+    const hash = createHash('sha256')
+    for await (const value of createReadStream(imagePath)) {
+      const chunk: unknown = value
+      if (!Buffer.isBuffer(chunk)) {
+        throw new Error('A saved chapter artifact contains invalid image data.')
+      }
+      hash.update(chunk)
+    }
+    if (hash.digest('hex') !== sha256) {
+      throw new Error(
+        'A saved chapter artifact contains invalid image data and must be fetched again.'
+      )
+    }
+    images.push({
+      sourceUrl,
+      mediaType,
+      sha256,
+      path: imagePath
+    })
+  }
+
+  return {
+    title: artifact.title,
+    url: artifact.url,
+    paragraphs: artifact.blocks !== undefined ? [] : artifact.paragraphs!,
+    ...(artifact.blocks !== undefined ? { blocks: artifact.blocks } : {}),
+    images
+  }
 }
 
 export async function readCoverArtifact(dataDirectory: string, queueItemId: string): Promise<ChapterImage | null> {
@@ -672,7 +907,59 @@ export function writeChapterArtifact(
   queueItemId: string,
   chapter: ChapterContent
 ): Promise<void> {
-  return writeJson(chapterArtifactPath(dataDirectory, queueItemId, chapter.url), chapter)
+  return (async () => {
+    if (
+      typeof chapter.title !== 'string' ||
+      typeof chapter.url !== 'string' ||
+      !Array.isArray(chapter.paragraphs) ||
+      chapter.paragraphs.some((paragraph) => typeof paragraph !== 'string')
+    ) {
+      throw new Error('The chapter cannot be saved because its content is invalid.')
+    }
+
+    const images = chapter.images ?? []
+    if (!Array.isArray(images) || images.length > MAX_CHAPTER_IMAGES) {
+      throw new Error('The chapter cannot be saved because its image list is invalid.')
+    }
+    if (
+      chapter.blocks !== undefined &&
+      !isValidChapterBlocks(chapter.blocks, images.length)
+    ) {
+      throw new Error('The chapter cannot be saved because its content blocks are invalid.')
+    }
+
+    const path = chapterArtifactPath(dataDirectory, queueItemId, chapter.url)
+    const storedImages: StoredChapterImage[] = []
+    let totalImageBytes = 0
+    for (const image of images) {
+      if (!isValidChapterImage(image)) {
+        throw new Error('The chapter cannot be saved because an image is invalid.')
+      }
+      const data = Buffer.from(image.dataBase64, 'base64')
+      totalImageBytes += data.length
+      if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
+        throw new Error('The chapter cannot be saved because its images exceed the size limit.')
+      }
+      const sha256 = createHash('sha256').update(data).digest('hex')
+      await atomicWriteFile(chapterImageArtifactPath(path, sha256), data)
+      storedImages.push({
+        sourceUrl: image.sourceUrl,
+        mediaType: image.mediaType,
+        sha256
+      })
+    }
+
+    const stored: StoredChapterArtifactV2 = {
+      artifactVersion: 2,
+      title: chapter.title,
+      url: chapter.url,
+      ...(chapter.blocks !== undefined
+        ? { blocks: chapter.blocks }
+        : { paragraphs: chapter.paragraphs }),
+      images: storedImages
+    }
+    await writeJson(path, stored)
+  })()
 }
 
 export async function removeChapterArtifacts(dataDirectory: string, queueItemId: string): Promise<void> {

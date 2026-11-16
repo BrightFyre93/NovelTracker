@@ -1,7 +1,6 @@
 import { statfs } from 'node:fs/promises'
 import type {
   ChapterContent,
-  ChapterImage,
   ChapterLink,
   DiscoveryQueueItem,
   QueueChapter
@@ -34,8 +33,12 @@ import {
   writeChapterArtifact,
   writeCoverArtifact
 } from '../localStore'
-import { writeEpub } from '../epub'
-import { withRetry } from '../retry'
+import { runPool, withRetry } from '../retry'
+import type {
+  EpubPackagingInput,
+  EpubPackagingProgress,
+  EpubPackagingResult
+} from '../epubPackaging'
 import type { SettingsService } from '../settingsService'
 import type { QueueHelpers } from './helpers'
 import { transitionQueueItem } from './queueStateMachine'
@@ -64,6 +67,11 @@ interface QueueRuntimeDependencies {
   activeDownloads: Map<string, ActiveDownload>
   reservedOutputPaths: Set<string>
   dataDirectory: () => string
+  packageEpub: (
+    input: EpubPackagingInput,
+    signal: AbortSignal,
+    onProgress: (progress: EpubPackagingProgress) => void
+  ) => Promise<EpubPackagingResult>
   settingsService: Pick<SettingsService, 'get' | 'current'>
   libraryIndexRepository: Pick<LibraryIndexRepository, 'read'>
   isShuttingDown: () => boolean
@@ -111,6 +119,7 @@ export function createQueueRuntime(
     activeDownloads,
     reservedOutputPaths,
     dataDirectory,
+    packageEpub,
     settingsService,
     libraryIndexRepository,
     isShuttingDown,
@@ -651,39 +660,36 @@ export function createQueueRuntime(
         await persistChapterProgress()
       }
   
-      let nextChapterIndex = 0
-      let fatalError: Error | undefined
-      const worker = async (): Promise<void> => {
-        while (true) {
-          const active = activeDownloads.get(itemId)
-          if (
-            !active ||
-            active.requestedAction !== 'none' ||
-            controller.signal.aborted ||
-            fatalError
-          )
-            return
-          const index = nextChapterIndex
-          nextChapterIndex += 1
-          const chapter = selectedChapters[index]
-          if (!chapter) return
-          try {
-            await processChapter(index, chapter)
-          } catch (error) {
-            fatalError ??=
-              error instanceof Error ? error : new Error(String(error))
-            controller.abort()
-            return
-          }
-        }
+      let poolError: unknown
+      let poolFailed = false
+      try {
+        await runPool(
+          selectedChapters.length,
+          maxSimultaneousChapters,
+          async (index) => {
+            const active = activeDownloads.get(itemId)
+            const chapter = selectedChapters[index]
+            if (
+              !active ||
+              active.requestedAction !== 'none' ||
+              !chapter
+            ) return
+            try {
+              await processChapter(index, chapter)
+            } catch (error) {
+              controller.abort()
+              throw error
+            }
+          },
+          controller.signal,
+          'EPUB creation was cancelled.'
+        )
+      } catch (error) {
+        poolFailed = true
+        poolError = error
       }
-      const workerCount = Math.min(
-        maxSimultaneousChapters,
-        selectedChapters.length
-      )
-      await Promise.all(Array.from({ length: workerCount }, () => worker()))
       await progressCheckpointTail
-      if (fatalError) throw fatalError
+      if (poolFailed) throw poolError
   
       const requestedAction =
         activeDownloads.get(itemId)?.requestedAction ?? 'cancel'
@@ -741,7 +747,7 @@ export function createQueueRuntime(
         return
       }
   
-      const chapters: ChapterContent[] = []
+      const chapters: Array<Pick<ChapterLink, 'title' | 'url'>> = []
       for (const chapter of selectedChapters) {
         let content: ChapterContent | null = null
         let artifactError: Error | undefined
@@ -765,19 +771,20 @@ export function createQueueRuntime(
           continue
         }
         missingSelectedChapterUrls.delete(chapter.url)
-        chapters.push(content)
+        chapters.push({ title: content.title, url: content.url })
       }
       if (chapters.length === 0) {
         throw new Error(
           'No valid saved chapter content is available to create an EPUB.'
         )
       }
-      let cover: ChapterImage | undefined
+      let includeCover = false
       if (options.coverUrl) {
         if (item.repackageOnly) {
           try {
-            cover =
-              (await readCoverArtifact(dataDirectory(), itemId)) ?? undefined
+            includeCover = Boolean(
+              await readCoverArtifact(dataDirectory(), itemId)
+            )
           } catch (error) {
             if (!saveAvailableChaptersOnly) throw error
             console.warn(
@@ -785,22 +792,23 @@ export function createQueueRuntime(
               errorMessage(error)
             )
           }
-          if (!cover && !saveAvailableChaptersOnly) {
+          if (!includeCover && !saveAvailableChaptersOnly) {
             throw new Error(
               'Saved cover content is missing; retry this EPUB online before repackaging.'
             )
           }
         } else {
           try {
-            cover =
-              (await readCoverArtifact(dataDirectory(), itemId)) ?? undefined
+            includeCover = Boolean(
+              await readCoverArtifact(dataDirectory(), itemId)
+            )
           } catch (error) {
             console.warn(
               `Saved cover artifact for queue item ${itemId} will be fetched again:`,
               errorMessage(error)
             )
           }
-          if (!cover) {
+          if (!includeCover) {
             item.progress = {
               current: selectedChapters.length,
               total: selectedChapters.length,
@@ -808,7 +816,7 @@ export function createQueueRuntime(
             }
             await persistDownloadState(item)
             try {
-              cover = await withRetry(
+              const fetchedCover = await withRetry(
                 async () => {
                   const fetchedCover = await fetchImageResource(
                     options.coverUrl,
@@ -825,6 +833,7 @@ export function createQueueRuntime(
                   cancellationMessage: 'EPUB creation was cancelled.'
                 }
               )
+              includeCover = Boolean(fetchedCover)
             } catch (error) {
               if (controller.signal.aborted) {
                 throw new OperationCancelledError('EPUB creation was cancelled.')
@@ -867,23 +876,35 @@ export function createQueueRuntime(
         await persistDownloadState(item)
       }
       packagingStarted = true
-      const result = await writeEpub(
-        options.outputDirectory,
-        options.title,
-        options.author,
-        options.language,
-        chapters,
-        outputFilename,
-        controller.signal,
-        options.epubCss,
+      const result = await packageEpub(
         {
-          description: options.description,
-          alternativeNames: options.alternativeNames,
-          genres: options.genres,
-          source: options.source,
-          novelStatus: options.novelStatus,
-          sourceUrl: options.sourceUrl || item.sourceUrl,
-          cover
+          dataDirectory: dataDirectory(),
+          queueItemId: itemId,
+          chapters,
+          outputDirectory: options.outputDirectory,
+          title: options.title,
+          author: options.author,
+          language: options.language,
+          filename: outputFilename,
+          css: options.epubCss,
+          includeCover,
+          metadata: {
+            description: options.description,
+            alternativeNames: options.alternativeNames,
+            genres: options.genres,
+            source: options.source,
+            novelStatus: options.novelStatus,
+            sourceUrl: options.sourceUrl || item.sourceUrl
+          }
+        },
+        controller.signal,
+        (progress) => {
+          item.progress = {
+            current: chapters.length,
+            total: selectedChapters.length,
+            message: progress.message
+          }
+          notifyDiscoveryQueueChanged()
         }
       )
       packagingStarted = false
