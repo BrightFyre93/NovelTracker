@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia'
+import { shallowRef } from 'vue'
 import type { ChapterArchiveStatus, ChapterLink, DiscoveryResult } from '../../../shared/contracts'
 
 export interface SelectableChapter extends ChapterLink {
-  selected: boolean
   archiveStatus?: ChapterArchiveStatus
   archiveSources?: string[]
   chapterNumber?: number | null
@@ -28,14 +28,15 @@ export const useDownloadStore = defineStore('download', {
     queueItemId: '',
     sourceUrl: '',
     parserName: '',
-    chapters: [] as SelectableChapter[],
+    chapters: shallowRef<SelectableChapter[]>([]),
+    chapterSelection: shallowRef(new Set<string>()),
     outputDirectory: '',
     busy: false,
     error: '',
     success: ''
   }),
   getters: {
-    selectedCount: (state) => state.chapters.filter((chapter) => chapter.selected).length
+    selectedCount: (state) => state.chapterSelection.size
   },
   actions: {
     applyDiscovery(result: DiscoveryResult) {
@@ -51,10 +52,27 @@ export const useDownloadStore = defineStore('download', {
       this.source = result.source
       this.novelStatus = result.novelStatus
       this.filename = ''
-      this.chapters = result.chapters.map((chapter) => ({ ...chapter, selected: true }))
+      this.chapters = result.chapters.map(({ ...chapter }) => chapter)
+      this.chapterSelection = new Set(result.chapters.map((chapter) => chapter.id))
       this.parserName = result.parserName
       this.error = ''
       this.success = ''
+    },
+    setChapterSelected(id: string, selected: boolean) {
+      const selection = new Set(this.chapterSelection)
+      if (selected) selection.add(id)
+      else selection.delete(id)
+      this.chapterSelection = selection
+    },
+    selectAllChapters(selected: boolean) {
+      this.chapterSelection = selected
+        ? new Set(this.chapters.map((chapter) => chapter.id))
+        : new Set()
+    },
+    selectBoundaryChapter(boundary: 'first' | 'last') {
+      const index = boundary === 'first' ? 0 : this.chapters.length - 1
+      const chapter = this.chapters[index]
+      this.chapterSelection = chapter ? new Set([chapter.id]) : new Set()
     }
   }
 })

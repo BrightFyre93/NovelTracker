@@ -1,4 +1,9 @@
-import type { ResultErrorCode } from './contracts/common'
+import type { Result, ResultErrorCode } from './contracts/common'
+
+export function unwrapResult<T>(result: Result<T>): T {
+  if (!result.ok) throw new Error(result.error)
+  return result.value
+}
 
 export function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

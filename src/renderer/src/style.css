@@ -387,18 +387,27 @@ input {
 }
 
 .chapter-list {
-  max-height: 370px;
-  overflow: auto;
+  height: 370px;
   border-top: 1px solid #edf0f5;
 }
 
 .chapter-row {
+  box-sizing: border-box;
   display: flex;
-  align-items: flex-start;
+  height: 80px;
+  align-items: center;
   gap: 12px;
-  padding: 12px 5px;
+  overflow: hidden;
+  padding: 8px 5px;
   border-bottom: 1px solid #edf0f5;
   cursor: pointer;
+}
+
+.chapter-checkbox {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: #3b82f6;
 }
 
 .chapter-row:hover {
@@ -420,9 +429,12 @@ input {
 }
 
 .chapter-title {
+  overflow: hidden;
   color: #283548;
   font-size: 12px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chapter-url {
@@ -434,9 +446,11 @@ input {
 }
 
 .chapter-archive-status {
+  overflow: hidden;
   color: #627186;
   font-size: 10px;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .output-row {
@@ -847,6 +861,10 @@ input {
   color: #8290a4;
   font-size: 10px;
   font-weight: 500;
+}
+
+.queue-show-more {
+  margin: 4px 0 2px;
 }
 
 .queue-header-actions,
@@ -1347,13 +1365,14 @@ footer {
 
 .novel-list,
 .library-file-list {
+  min-height: 160px;
   max-height: 560px;
-  overflow: auto;
   margin-top: 12px;
 }
 
 .novel-choice,
 .library-file-row {
+  box-sizing: border-box;
   display: grid;
   width: 100%;
   gap: 4px;
@@ -1364,6 +1383,16 @@ footer {
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+
+.novel-choice {
+  height: 80px;
+  align-content: start;
+  overflow: hidden;
+}
+
+.library-file-row {
+  height: 52px;
 }
 
 .novel-choice:hover,
@@ -1402,9 +1431,13 @@ footer {
 }
 
 .novel-coverage-summary {
+  display: -webkit-box;
+  overflow: hidden;
   color: #94712d;
   font-size: 9px;
   line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .coverage-warning-panel {

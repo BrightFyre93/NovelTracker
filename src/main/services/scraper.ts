@@ -235,13 +235,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
       chunks.push(value)
     }
 
-    const bytes = new Uint8Array(totalLength)
-    let offset = 0
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset)
-      offset += chunk.byteLength
-    }
-
+    const bytes = Buffer.concat(chunks, totalLength)
     return { html: new TextDecoder().decode(bytes), finalUrl }
   } catch (error) {
     if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
@@ -411,7 +405,7 @@ export async function fetchImageResource(
         chunks.push(value)
       }
 
-      const data = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), totalLength)
+      const data = Buffer.concat(chunks, totalLength)
       const mediaType = imageMediaType(data)
       if (!Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, mediaType)) {
         throw new Error('An image uses an unsupported format.')

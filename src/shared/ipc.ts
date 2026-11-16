@@ -4,6 +4,9 @@ import type {
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
+  DiscoveryQueueSnapshot,
+  DiscoveryQueueUpdate,
+  ChapterSelectionUpdate,
   AppSettings,
   DownloadHistoryEntry,
   DomainRequestDelayPreference,
@@ -12,8 +15,11 @@ import type {
   GenerateEpubInput,
   LibraryEpubMergeResponse,
   LibraryFileCorrection,
+  LibraryFileCorrectionResult,
+  LibraryFileSearchPage,
   LibraryFileRecord,
-  LibraryIndexSummary,
+  LibraryIndexOverview,
+  LibraryNovelSearchPage,
   LibraryOperation,
   LibraryProgress,
   QueuedEpubJob,
@@ -45,7 +51,21 @@ export interface IpcMap {
   }
   'library:index-summary': {
     args: []
-    result: LibraryIndexSummary | null
+    result: LibraryIndexOverview | null
+  }
+  'library:search-novels': {
+    args: [
+      query: string,
+      multipleFilesOnly: boolean,
+      offset: number,
+      limit: number,
+      selectedNovelKey?: string
+    ]
+    result: Result<LibraryNovelSearchPage>
+  }
+  'library:search-novel-files': {
+    args: [novelKey: string, query: string, offset: number, limit: number]
+    result: Result<LibraryFileSearchPage>
   }
   'library:novel-files': {
     args: [novelKey: string]
@@ -57,7 +77,7 @@ export interface IpcMap {
   }
   'library:restore-index-backup': {
     args: []
-    result: Result<LibraryIndexSummary>
+    result: Result<LibraryIndexOverview>
   }
   'library:repair-epub': {
     args: [fileId: string]
@@ -69,7 +89,7 @@ export interface IpcMap {
   }
   'library:scan': {
     args: [forceRebuild?: boolean]
-    result: Result<LibraryIndexSummary>
+    result: Result<LibraryIndexOverview>
   }
   'library:cancel-scan': {
     args: []
@@ -77,7 +97,7 @@ export interface IpcMap {
   }
   'library:correct-file': {
     args: [fileId: string, correction: LibraryFileCorrection]
-    result: Result<LibraryIndexSummary>
+    result: Result<LibraryFileCorrectionResult>
   }
   'library:merge-epubs': {
     args: [fileIds: string[], filename: string]
@@ -187,6 +207,10 @@ export interface IpcMap {
     args: []
     result: DiscoveryQueueItemSummary[]
   }
+  'discovery-queue:snapshot': {
+    args: []
+    result: DiscoveryQueueSnapshot
+  }
   'discovery-queue:item': {
     args: [id: string]
     result: Result<DiscoveryQueueItem>
@@ -236,7 +260,7 @@ export interface IpcMap {
     result: Result<void>
   }
   'discovery-queue:update-selection': {
-    args: [id: string, selectedChapterUrls: string[]]
+    args: [id: string, selection: ChapterSelectionUpdate]
     result: Result<void>
   }
 }
@@ -244,7 +268,8 @@ export interface IpcMap {
 export type IpcChannel = keyof IpcMap
 
 export interface IpcEventMap {
-  'discovery-queue:update': DiscoveryQueueItemSummary[]
+  'discovery-queue:update': DiscoveryQueueUpdate
+  'download-history:update': DownloadHistoryEntry[]
   'library:operations:update': LibraryOperation[]
   'library:merge-progress': EpubMergeProgress
   'library:progress': LibraryProgress

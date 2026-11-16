@@ -13,6 +13,8 @@ import type {
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
   DiscoveryQueueStatus,
+  DiscoveryQueueUpdate,
+  DiscoveryQueueSnapshot,
   GenerateEpubInput,
   TrackerNovel
 } from '../../../shared/contracts'
@@ -48,8 +50,10 @@ const queueStatusOptions: QueueStatusOption[] = [
   { value: 'cancelled', label: 'Cancelled' }
 ]
 const queueViewPreferencesKey = 'novel-tracker.queue-view-preferences'
+const QUEUE_ITEMS_PER_PAGE = 30
 
 const items = ref<DiscoveryQueueItemSummary[]>([])
+const queuePageSizes = ref<Partial<Record<DiscoveryQueueStatus, number>>>({})
 const selectedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
 const collapsedQueueStatuses = ref<DiscoveryQueueStatus[]>([])
 const selectedQueueItemIds = ref<string[]>([])
@@ -84,6 +88,10 @@ const clearingCompleted = ref(false)
 const error = ref('')
 const notice = ref('')
 let removeQueueListener: (() => void) | undefined
+let queueRevision = 0
+let queueSnapshotLoaded = false
+let queueSnapshotRequestActive = false
+const pendingQueueUpdates: DiscoveryQueueUpdate[] = []
 loadQueueViewPreferences()
 
 const activeDownloadCount = computed(() => items.value.filter((item) => item.status === 'downloading').length)
@@ -155,6 +163,13 @@ const allVisibleQueueSectionsCollapsed = computed(() =>
   queueGroups.value.length > 0 &&
   queueGroups.value.every((group) => isQueueSectionCollapsed(group.status))
 )
+const renderedQueueItemCount = computed(() =>
+  queueGroups.value.reduce(
+    (total, group) =>
+      total + Math.min(group.items.length, queuePageSizes.value[group.status] ?? QUEUE_ITEMS_PER_PAGE),
+    0
+  )
+)
 
 function toggleQueueStatus(status: DiscoveryQueueStatus): void {
   selectedQueueStatuses.value = selectedQueueStatuses.value.includes(status)
@@ -197,6 +212,21 @@ function toggleAllQueueSections(): void {
     collapsedQueueStatuses.value = collapsedQueueStatuses.value.filter((status) => !statuses.includes(status))
   } else {
     collapsedQueueStatuses.value = [...new Set([...collapsedQueueStatuses.value, ...statuses])]
+  }
+}
+
+function visibleQueueItems(group: QueueStatusGroup): DiscoveryQueueItemSummary[] {
+  return group.items.slice(
+    0,
+    queuePageSizes.value[group.status] ?? QUEUE_ITEMS_PER_PAGE
+  )
+}
+
+function showMoreQueueItems(status: DiscoveryQueueStatus, total: number): void {
+  const current = queuePageSizes.value[status] ?? QUEUE_ITEMS_PER_PAGE
+  queuePageSizes.value = {
+    ...queuePageSizes.value,
+    [status]: Math.min(current + QUEUE_ITEMS_PER_PAGE, total)
   }
 }
 
@@ -278,34 +308,85 @@ function estimatedTimeRemaining(item: DiscoveryQueueItemSummary): string | null 
 }
 
 async function refreshQueue(): Promise<void> {
+  if (queueSnapshotRequestActive) return
+  queueSnapshotRequestActive = true
   loading.value = true
   try {
-    const updatedItems = await window.novelTracker.getDiscoveryQueue()
-    items.value = updatedItems
-    if (
-      cancelingDiscoveryId.value &&
-      !updatedItems.some((item) => item.id === cancelingDiscoveryId.value && item.status === 'discovering')
-    ) {
-      cancelingDiscoveryId.value = ''
-    }
+    applyQueueSnapshot(await window.novelTracker.getDiscoveryQueueSnapshot())
   } catch (reason) {
     error.value = toMessage(reason)
   } finally {
     loading.value = false
+    queueSnapshotRequestActive = false
+    if (
+      queueSnapshotLoaded &&
+      pendingQueueUpdates.some((update) => update.revision > queueRevision + 1)
+    ) {
+      void refreshQueue()
+    }
   }
+}
+
+function updateCancelingDiscovery(items: DiscoveryQueueItemSummary[]): void {
+  if (
+    cancelingDiscoveryId.value &&
+    !items.some((item) => item.id === cancelingDiscoveryId.value && item.status === 'discovering')
+  ) {
+    cancelingDiscoveryId.value = ''
+  }
+}
+
+function applyQueueSnapshot(snapshot: DiscoveryQueueSnapshot): void {
+  if (snapshot.revision < queueRevision) return
+  items.value = snapshot.items
+  queueRevision = snapshot.revision
+  queueSnapshotLoaded = true
+  updateCancelingDiscovery(snapshot.items)
+  const pending = pendingQueueUpdates
+    .filter((update) => update.revision > queueRevision)
+    .sort((left, right) => left.revision - right.revision)
+  pendingQueueUpdates.length = 0
+  for (const update of pending) {
+    if (update.revision !== queueRevision + 1) {
+      pendingQueueUpdates.push(update)
+      void refreshQueue()
+      return
+    }
+    applyQueueUpdateNow(update)
+  }
+}
+
+function applyQueueUpdate(update: DiscoveryQueueUpdate): void {
+  if (!queueSnapshotLoaded || update.revision > queueRevision + 1) {
+    if (!pendingQueueUpdates.some((pending) => pending.revision === update.revision))
+      pendingQueueUpdates.push(update)
+    if (queueSnapshotLoaded) void refreshQueue()
+    return
+  }
+  if (update.revision <= queueRevision) return
+  applyQueueUpdateNow(update)
+}
+
+function applyQueueUpdateNow(update: DiscoveryQueueUpdate): void {
+  const byId = new Map(items.value.map((item) => [item.id, item]))
+  for (const id of update.removedIds) byId.delete(id)
+  for (const item of update.upserted) byId.set(item.id, item)
+  const orderedItems = update.order
+    .map((id) => byId.get(id))
+    .filter((item): item is DiscoveryQueueItemSummary => item !== undefined)
+  if (orderedItems.length !== update.order.length) {
+    pendingQueueUpdates.push(update)
+    void refreshQueue()
+    return
+  }
+  items.value = orderedItems
+  queueRevision = update.revision
+  updateCancelingDiscovery(orderedItems)
 }
 
 onMounted(() => {
   document.addEventListener('pointerdown', closeQueueStatusFilterOnOutsideClick)
-  removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate((updatedItems) => {
-    items.value = updatedItems
-    if (
-      cancelingDiscoveryId.value &&
-      !updatedItems.some((item) => item.id === cancelingDiscoveryId.value && item.status === 'discovering')
-    ) {
-      cancelingDiscoveryId.value = ''
-    }
-  })
+  removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate(applyQueueUpdate)
   void refreshQueue()
   void window.novelTracker.getSettings().then((settings) => {
     maxDownloads.value = settings.maxSimultaneousDownloads
@@ -1179,7 +1260,9 @@ async function clearCompletedQueueItems(): Promise<void> {
         size="small"
         @click="selectedQueueItemIds = []"
       />
-      <span class="queue-visible-count">Showing {{ filteredQueueItems.length }} of {{ items.length }}</span>
+      <span class="queue-visible-count">
+        Showing {{ renderedQueueItemCount }} of {{ filteredQueueItems.length }} filtered · {{ items.length }} total
+      </span>
     </div>
     <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration to queue downloads.</p>
     <p v-if="loading && items.length === 0" class="help-text">Loading saved queue…</p>
@@ -1195,7 +1278,7 @@ async function clearCompletedQueueItems(): Promise<void> {
           <span>{{ group.label }}</span>
           <small>{{ group.items.length }}</small>
         </summary>
-        <div v-for="item in group.items" :key="item.id" class="queue-item">
+        <div v-for="item in visibleQueueItems(group)" :key="item.id" class="queue-item">
           <div class="queue-item-summary">
             <div class="queue-item-heading">
               <label v-if="isQueueItemSelectable(item.id)" class="queue-item-select">
@@ -1534,6 +1617,15 @@ async function clearCompletedQueueItems(): Promise<void> {
         :aria-label="`${item.title} download progress`"
       />
     </div>
+    <Button
+      v-if="visibleQueueItems(group).length < group.items.length"
+      :label="`Show ${Math.min(QUEUE_ITEMS_PER_PAGE, group.items.length - visibleQueueItems(group).length)} more of ${group.items.length - visibleQueueItems(group).length} remaining`"
+      severity="secondary"
+      text
+      size="small"
+      class="queue-show-more"
+      @click="showMoreQueueItems(group.status, group.items.length)"
+    />
       </details>
     </template>
   </section>

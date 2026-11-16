@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
+import VirtualScroller from 'primevue/virtualscroller'
+import type { VirtualScrollerLazyEvent } from 'primevue/virtualscroller'
 import type {
   EpubMergeProgress,
+  LibraryFileListItem,
   LibraryFileRecord,
-  LibraryIndexSummary
+  LibraryIndexOverview,
+  LibraryNovelSummary
 } from '../../../shared/contracts'
-import { toMessage } from '../../../shared/errors'
+import { toMessage, unwrapResult } from '../../../shared/errors'
 import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
@@ -20,13 +24,18 @@ const emit = defineEmits<{
 const libraryState = useLibraryStore()
 const libraryRoot = ref('')
 const outputDirectory = ref('')
-const index = shallowRef<LibraryIndexSummary | null>(null)
+const index = shallowRef<LibraryIndexOverview | null>(null)
+const novelSummaries = shallowRef<Array<LibraryNovelSummary | null>>([])
+const totalNovelCount = ref(0)
 const backupDate = ref<string | null>(null)
 const selectedFiles = shallowRef<LibraryFileRecord[]>([])
 const search = ref('')
 const multipleFilesOnly = ref(false)
 const selectedNovel = ref('')
+const selectedNovelSummary = shallowRef<LibraryNovelSummary | null>(null)
 const selectedFileId = ref('')
+const fileListItems = shallowRef<Array<LibraryFileListItem | null>>([])
+const totalFileListCount = ref(0)
 const restoringBackup = ref(false)
 const merging = ref(false)
 const repairing = ref(false)
@@ -40,31 +49,15 @@ const busy = computed(() =>
 )
 const error = ref('')
 const success = ref('')
-const visibleFileLimit = 100
 const loadingNovelFiles = ref(false)
+const searchingNovels = ref(false)
+const searchingFiles = ref(false)
+const NOVEL_ROW_HEIGHT = 80
+const FILE_ROW_HEIGHT = 52
+const MIN_LIST_HEIGHT = 160
+const MAX_LIST_HEIGHT = 560
 
-const novelSummaries = computed(() => {
-  const query = search.value.trim().toLocaleLowerCase()
-  return (index.value?.novels ?? [])
-    .filter((group) =>
-      (!multipleFilesOnly.value || group.files.length > 1) &&
-      (
-        !query ||
-        group.title.toLocaleLowerCase().includes(query) ||
-        group.files.some((file) => file.filename.toLocaleLowerCase().includes(query))
-      )
-    )
-})
-
-const selectedGroup = computed(() => novelSummaries.value.find((group) => group.key === selectedNovel.value))
-const filteredFiles = computed(() => {
-  const query = search.value.trim().toLocaleLowerCase()
-  const allFiles = selectedFiles.value
-  if (selectedGroup.value?.title.toLocaleLowerCase().includes(query)) return allFiles.slice(0, visibleFileLimit)
-  return allFiles
-    .filter((file) => !query || `${file.filename} ${file.relativePath}`.toLocaleLowerCase().includes(query))
-    .slice(0, visibleFileLimit)
-})
+const selectedGroup = computed(() => selectedNovelSummary.value)
 const selectedFile = computed(() =>
   selectedFiles.value.find((file) => file.id === selectedFileId.value) ?? null
 )
@@ -80,17 +73,240 @@ const selectedMergeFiles = computed(() =>
       return leftStart - rightStart || left.filename.localeCompare(right.filename)
     })
 )
+const novelListHeight = computed(() =>
+  virtualListHeight(totalNovelCount.value, NOVEL_ROW_HEIGHT)
+)
+const libraryFileListHeight = computed(() =>
+  virtualListHeight(totalFileListCount.value, FILE_ROW_HEIGHT)
+)
 
-watch(novelSummaries, (summaries) => {
-  if (selectedNovel.value && !summaries.some((group) => group.key === selectedNovel.value)) {
-    selectedNovel.value = ''
-    selectedFileId.value = ''
-    selectedFiles.value = []
-    mergeFileIds.value = []
-    mergeFilename.value = ''
-    loadingNovelFiles.value = false
+function virtualListHeight(itemCount: number, itemHeight: number): string {
+  const height = Math.min(MAX_LIST_HEIGHT, Math.max(MIN_LIST_HEIGHT, itemCount * itemHeight))
+  return `${height}px`
+}
+
+const NOVEL_SEARCH_DEBOUNCE_MS = 150
+const NOVEL_SEARCH_PAGE_SIZE = 100
+let novelSearchTimer: ReturnType<typeof setTimeout> | undefined
+let novelSearchRevision = 0
+const loadedNovelPages = new Set<number>()
+const pendingNovelPages = new Map<number, number>()
+let fileSearchRevision = 0
+const loadedFilePages = new Set<number>()
+const pendingFilePages = new Map<number, number>()
+
+function clearSelectedNovel(): void {
+  fileSearchRevision += 1
+  selectedNovel.value = ''
+  selectedNovelSummary.value = null
+  selectedFileId.value = ''
+  selectedFiles.value = []
+  fileListItems.value = []
+  totalFileListCount.value = 0
+  searchingFiles.value = false
+  loadedFilePages.clear()
+  pendingFilePages.clear()
+  mergeFileIds.value = []
+  mergeFilename.value = ''
+  loadingNovelFiles.value = false
+}
+
+function scheduleNovelSearch(): void {
+  if (novelSearchTimer) clearTimeout(novelSearchTimer)
+  const requestId = ++novelSearchRevision
+  searchingNovels.value = true
+  novelSearchTimer = setTimeout(() => {
+    novelSearchTimer = undefined
+    void refreshNovelSummaries(requestId)
+  }, NOVEL_SEARCH_DEBOUNCE_MS)
+}
+
+async function refreshNovelSummaries(requestId?: number): Promise<void> {
+  if (novelSearchTimer) {
+    clearTimeout(novelSearchTimer)
+    novelSearchTimer = undefined
   }
+  const activeRequestId = requestId ?? ++novelSearchRevision
+  loadedNovelPages.clear()
+  pendingNovelPages.clear()
+  if (!index.value) {
+    if (activeRequestId === novelSearchRevision) {
+      novelSummaries.value = []
+      totalNovelCount.value = 0
+      searchingNovels.value = false
+      clearSelectedNovel()
+    }
+    return
+  }
+  const selectedNovelKey = selectedNovel.value || undefined
+  novelSummaries.value = []
+  totalNovelCount.value = 0
+  searchingNovels.value = true
+  try {
+    const result = unwrapResult(await window.novelTracker.searchLibraryNovels(
+      search.value,
+      multipleFilesOnly.value,
+      0,
+      NOVEL_SEARCH_PAGE_SIZE,
+      selectedNovelKey
+    ))
+    if (activeRequestId !== novelSearchRevision) return
+    const items: Array<LibraryNovelSummary | null> =
+      Array.from({ length: result.total }, () => null)
+    result.items.forEach((novel, index) => {
+      items[result.offset + index] = novel
+    })
+    loadedNovelPages.add(0)
+    totalNovelCount.value = result.total
+    novelSummaries.value = items
+    if (selectedNovelKey && selectedNovel.value === selectedNovelKey) {
+      if (result.selectedNovel) {
+        selectedNovelSummary.value = result.selectedNovel
+        await refreshNovelFileRows()
+      } else {
+        clearSelectedNovel()
+      }
+    }
+    searchingNovels.value = false
+  } catch (reason) {
+    if (activeRequestId === novelSearchRevision) {
+      error.value = toMessage(reason)
+      searchingNovels.value = false
+    }
+  }
+}
+
+function loadNovelRows(event: VirtualScrollerLazyEvent): void {
+  if (totalNovelCount.value === 0) return
+  const firstPage = Math.floor(event.first / NOVEL_SEARCH_PAGE_SIZE)
+  const lastIndex = Math.max(event.first, event.last - 1)
+  const lastPage = Math.floor(lastIndex / NOVEL_SEARCH_PAGE_SIZE)
+  for (let page = firstPage; page <= lastPage; page += 1) {
+    void loadNovelPage(page, novelSearchRevision)
+  }
+}
+
+async function loadNovelPage(page: number, requestId: number): Promise<void> {
+  if (
+    requestId !== novelSearchRevision ||
+    loadedNovelPages.has(page) ||
+    pendingNovelPages.get(page) === requestId
+  ) {
+    return
+  }
+  pendingNovelPages.set(page, requestId)
+  const offset = page * NOVEL_SEARCH_PAGE_SIZE
+  try {
+    const result = unwrapResult(await window.novelTracker.searchLibraryNovels(
+      search.value,
+      multipleFilesOnly.value,
+      offset,
+      NOVEL_SEARCH_PAGE_SIZE
+    ))
+    if (requestId !== novelSearchRevision) return
+    const items = [...novelSummaries.value]
+    result.items.forEach((novel, index) => {
+      items[result.offset + index] = novel
+    })
+    novelSummaries.value = items
+    loadedNovelPages.add(page)
+  } catch (reason) {
+    if (requestId === novelSearchRevision)
+      error.value = toMessage(reason)
+  } finally {
+    if (pendingNovelPages.get(page) === requestId)
+      pendingNovelPages.delete(page)
+  }
+}
+
+async function refreshNovelFileRows(): Promise<void> {
+  const novelKey = selectedNovel.value
+  const requestId = ++fileSearchRevision
+  loadedFilePages.clear()
+  pendingFilePages.clear()
+  fileListItems.value = []
+  totalFileListCount.value = 0
+  if (!novelKey) {
+    searchingFiles.value = false
+    return
+  }
+  searchingFiles.value = true
+  try {
+    const result = unwrapResult(await window.novelTracker.searchLibraryNovelFiles(
+      novelKey,
+      search.value,
+      0,
+      NOVEL_SEARCH_PAGE_SIZE
+    ))
+    if (requestId !== fileSearchRevision || selectedNovel.value !== novelKey) return
+    const items: Array<LibraryFileListItem | null> =
+      Array.from({ length: result.total }, () => null)
+    result.items.forEach((file, index) => {
+      items[result.offset + index] = file
+    })
+    fileListItems.value = items
+    totalFileListCount.value = result.total
+    loadedFilePages.add(0)
+  } catch (reason) {
+    if (requestId === fileSearchRevision)
+      error.value = toMessage(reason)
+  } finally {
+    if (requestId === fileSearchRevision) searchingFiles.value = false
+  }
+}
+
+function loadFileRows(event: VirtualScrollerLazyEvent): void {
+  if (totalFileListCount.value === 0) return
+  const firstPage = Math.floor(event.first / NOVEL_SEARCH_PAGE_SIZE)
+  const lastIndex = Math.max(event.first, event.last - 1)
+  const lastPage = Math.floor(lastIndex / NOVEL_SEARCH_PAGE_SIZE)
+  for (let page = firstPage; page <= lastPage; page += 1) {
+    void loadFilePage(page, fileSearchRevision, selectedNovel.value)
+  }
+}
+
+async function loadFilePage(
+  page: number,
+  requestId: number,
+  novelKey: string
+): Promise<void> {
+  if (
+    requestId !== fileSearchRevision ||
+    loadedFilePages.has(page) ||
+    pendingFilePages.get(page) === requestId
+  ) {
+    return
+  }
+  pendingFilePages.set(page, requestId)
+  const offset = page * NOVEL_SEARCH_PAGE_SIZE
+  try {
+    const result = unwrapResult(await window.novelTracker.searchLibraryNovelFiles(
+      novelKey,
+      search.value,
+      offset,
+      NOVEL_SEARCH_PAGE_SIZE
+    ))
+    if (requestId !== fileSearchRevision || selectedNovel.value !== novelKey) return
+    const items = [...fileListItems.value]
+    result.items.forEach((file, index) => {
+      items[result.offset + index] = file
+    })
+    fileListItems.value = items
+    loadedFilePages.add(page)
+  } catch (reason) {
+    if (requestId === fileSearchRevision)
+      error.value = toMessage(reason)
+  } finally {
+    if (pendingFilePages.get(page) === requestId)
+      pendingFilePages.delete(page)
+  }
+}
+
+watch([search, multipleFilesOnly], scheduleNovelSearch)
+watch(search, () => {
+  if (selectedNovel.value) void refreshNovelFileRows()
 })
+
 let removeProgressListener: (() => void) | undefined
 let removeMergeProgressListener: (() => void) | undefined
 
@@ -117,6 +333,7 @@ onMounted(async () => {
       : null
     if (index.value) {
       if (!libraryRoot.value) libraryRoot.value = index.value.libraryRoot
+      await refreshNovelSummaries()
       selectFirstNovel()
     }
   } catch (reason) {
@@ -130,6 +347,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (novelSearchTimer) clearTimeout(novelSearchTimer)
+  novelSearchRevision += 1
   removeProgressListener?.()
   removeMergeProgressListener?.()
 })
@@ -157,8 +376,10 @@ function mergeProgressStepStatus(index: number): 'done' | 'active' | 'pending' |
 }
 
 function selectFirstNovel(): void {
-  const firstNovel = novelSummaries.value[0]
-  if (!selectedNovel.value && firstNovel) void selectNovel(firstNovel.key)
+  const firstNovel = novelSummaries.value.find(
+    (novel): novel is LibraryNovelSummary => novel !== null
+  )
+  if (!selectedNovel.value && firstNovel) void selectNovel(firstNovel)
   else if (!firstNovel) {
     selectedFiles.value = []
     selectedFileId.value = ''
@@ -166,24 +387,31 @@ function selectFirstNovel(): void {
   }
 }
 
-async function selectNovel(key: string): Promise<void> {
-  selectedNovel.value = key
+async function selectNovel(novel: LibraryNovelSummary): Promise<void> {
+  fileSearchRevision += 1
+  selectedNovel.value = novel.key
+  selectedNovelSummary.value = novel
   selectedFileId.value = ''
   selectedFiles.value = []
+  fileListItems.value = []
+  totalFileListCount.value = 0
   mergeFileIds.value = []
   mergeFilename.value = ''
   loadingNovelFiles.value = true
   try {
-    const result = await window.novelTracker.getLibraryNovelFiles(key)
+    const result = await window.novelTracker.getLibraryNovelFiles(novel.key)
     if (!result.ok) {
       error.value = result.error
       return
     }
-    if (selectedNovel.value === key) selectedFiles.value = result.value
+    if (selectedNovel.value === novel.key) {
+      selectedFiles.value = result.value
+      await refreshNovelFileRows()
+    }
   } catch (reason) {
     error.value = toMessage(reason)
   } finally {
-    if (selectedNovel.value === key) loadingNovelFiles.value = false
+    if (selectedNovel.value === novel.key) loadingNovelFiles.value = false
   }
 }
 
@@ -202,10 +430,8 @@ async function scan(forceRebuild = false): Promise<void> {
     }
     index.value = result.value
     backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
-    selectedNovel.value = ''
-    selectedFileId.value = ''
-    mergeFileIds.value = []
-    mergeFilename.value = ''
+    clearSelectedNovel()
+    await refreshNovelSummaries()
     selectFirstNovel()
     const cacheSummary = result.value.scanSummary
     const cacheMessage = cacheSummary
@@ -241,10 +467,8 @@ async function restoreBackup(): Promise<void> {
     }
     index.value = result.value
     libraryRoot.value = result.value.libraryRoot
-    selectedNovel.value = ''
-    selectedFileId.value = ''
-    mergeFileIds.value = []
-    mergeFilename.value = ''
+    clearSelectedNovel()
+    await refreshNovelSummaries()
     selectFirstNovel()
     backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
     success.value = 'Library index backup restored.'
@@ -261,7 +485,14 @@ async function openFile(file: LibraryFileRecord, reveal: boolean): Promise<void>
   if (!result.ok) error.value = result.error
 }
 
-function selectFile(file: LibraryFileRecord): void {
+function selectFile(fileSummary: LibraryFileListItem | LibraryFileRecord): void {
+  const file = 'chapterTitles' in fileSummary
+    ? fileSummary
+    : selectedFiles.value.find((candidate) => candidate.id === fileSummary.id)
+  if (!file) {
+    error.value = 'The selected library file is no longer available. Refresh the library index and try again.'
+    return
+  }
   selectedFileId.value = file.id
   correctedTitle.value = file.novelTitle
   correctedCoverage.value = ''
@@ -408,11 +639,11 @@ async function saveCorrection(): Promise<void> {
       error.value = result.error
       return
     }
-    index.value = result.value
-    const correctedGroup = result.value.novels.find((group) =>
-      group.files.some((file) => file.id === correctedFileId)
-    )
-    if (correctedGroup) await selectNovel(correctedGroup.key)
+    index.value = result.value.index
+    search.value = ''
+    await nextTick()
+    await refreshNovelSummaries()
+    await selectNovel(result.value.novel)
     success.value = 'Library correction saved locally.'
   } catch (reason) {
     error.value = toMessage(reason)
@@ -483,7 +714,7 @@ function chapterRangeLabel(start: number, end: number): string {
         Set or change the historical library root in Configuration. Scans are read-only; EPUB chapter lists are inspected, while AZW3 files are indexed by filename and file metadata only.
       </p>
       <div v-if="index" class="library-summary">
-        <div><strong>{{ novelSummaries.length.toLocaleString() }}</strong><span>visible novels</span></div>
+        <div><strong>{{ totalNovelCount.toLocaleString() }}</strong><span>visible novels</span></div>
         <div><strong>{{ index.fileCount.toLocaleString() }}</strong><span>indexed ebook files</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
@@ -506,44 +737,57 @@ function chapterRangeLabel(start: number, end: number): string {
           <input v-model="multipleFilesOnly" type="checkbox" />
           <span>Show novels with more than one file</span>
         </label>
-        <div class="novel-list">
-          <button
-            v-for="novel in novelSummaries"
-            :key="novel.key"
-            class="novel-choice"
-            :class="{ active: selectedNovel === novel.key }"
-            @click="selectNovel(novel.key)"
-          >
-            <span class="novel-choice-title">{{ novel.title }}</span>
-            <span class="novel-choice-count">
-              {{ novel.files.length }} files
-              <template v-if="novel.stateCounts.Completed"> · Completed {{ novel.stateCounts.Completed }}</template>
-              <template v-if="novel.stateCounts.Sent"> · Sent {{ novel.stateCounts.Sent }}</template>
-              <template v-if="novel.stateCounts.Downloaded"> · Downloaded {{ novel.stateCounts.Downloaded }}</template>
-              <template v-if="novel.stateCounts.Old"> · Old {{ novel.stateCounts.Old }}</template>
-              <template v-if="novel.stateCounts['Old Completed']"> · Old Completed {{ novel.stateCounts['Old Completed'] }}</template>
-            </span>
-            <span
-              v-if="novel.coverage.duplicateNumberCount || novel.coverage.gapCount || novel.coverage.unverifiedCount || novel.coverage.rangeMismatchCount"
-              class="novel-coverage-summary"
+        <VirtualScroller
+          v-if="totalNovelCount > 0"
+          :items="novelSummaries"
+          :itemSize="NOVEL_ROW_HEIGHT"
+          :lazy="true"
+          class="novel-list"
+          :style="{ height: novelListHeight }"
+          aria-label="Indexed novels"
+          @lazy-load="loadNovelRows"
+        >
+          <template #item="{ item: novel }">
+            <button
+              v-if="novel"
+              class="novel-choice"
+              :class="{ active: selectedNovel === novel.key }"
+              @click="selectNovel(novel)"
             >
-              <template v-if="novel.coverage.gapCount">{{ novel.coverage.gapCount }} possible gaps</template>
-              <template v-if="novel.coverage.duplicateNumberCount">
-                <template v-if="novel.coverage.gapCount"> · </template>
-                {{ novel.coverage.duplicateNumberCount }} duplicate chapter numbers
-              </template>
-              <template v-if="novel.coverage.unverifiedCount">
-                <template v-if="novel.coverage.gapCount || novel.coverage.duplicateNumberCount"> · </template>
-                {{ novel.coverage.unverifiedCount }} files need review
-              </template>
-              <template v-if="novel.coverage.rangeMismatchCount">
-                <template v-if="novel.coverage.gapCount || novel.coverage.duplicateNumberCount || novel.coverage.unverifiedCount"> · </template>
-                {{ novel.coverage.rangeMismatchCount }} range mismatch{{ novel.coverage.rangeMismatchCount === 1 ? '' : 'es' }}
-              </template>
-            </span>
-          </button>
-          <p v-if="novelSummaries.length === 0" class="empty-state">No matching novels.</p>
-        </div>
+              <span class="novel-choice-title">{{ novel.title }}</span>
+              <span class="novel-choice-count">
+                {{ novel.files.length }} files
+                <template v-if="novel.stateCounts.Completed"> · Completed {{ novel.stateCounts.Completed }}</template>
+                <template v-if="novel.stateCounts.Sent"> · Sent {{ novel.stateCounts.Sent }}</template>
+                <template v-if="novel.stateCounts.Downloaded"> · Downloaded {{ novel.stateCounts.Downloaded }}</template>
+                <template v-if="novel.stateCounts.Old"> · Old {{ novel.stateCounts.Old }}</template>
+                <template v-if="novel.stateCounts['Old Completed']"> · Old Completed {{ novel.stateCounts['Old Completed'] }}</template>
+              </span>
+              <span
+                v-if="novel.coverage.duplicateNumberCount || novel.coverage.gapCount || novel.coverage.unverifiedCount || novel.coverage.rangeMismatchCount"
+                class="novel-coverage-summary"
+              >
+                <template v-if="novel.coverage.gapCount">{{ novel.coverage.gapCount }} possible gaps</template>
+                <template v-if="novel.coverage.duplicateNumberCount">
+                  <template v-if="novel.coverage.gapCount"> · </template>
+                  {{ novel.coverage.duplicateNumberCount }} duplicate chapter numbers
+                </template>
+                <template v-if="novel.coverage.unverifiedCount">
+                  <template v-if="novel.coverage.gapCount || novel.coverage.duplicateNumberCount"> · </template>
+                  {{ novel.coverage.unverifiedCount }} files need review
+                </template>
+                <template v-if="novel.coverage.rangeMismatchCount">
+                  <template v-if="novel.coverage.gapCount || novel.coverage.duplicateNumberCount || novel.coverage.unverifiedCount"> · </template>
+                  {{ novel.coverage.rangeMismatchCount }} range mismatch{{ novel.coverage.rangeMismatchCount === 1 ? '' : 'es' }}
+                </template>
+              </span>
+            </button>
+            <div v-else class="novel-choice novel-choice-placeholder" aria-hidden="true"></div>
+          </template>
+        </VirtualScroller>
+        <p v-else class="empty-state">
+          {{ searchingNovels ? 'Searching…' : 'No matching novels.' }}
+        </p>
       </section>
 
       <section class="card library-files" aria-label="Files and coverage">
@@ -554,21 +798,32 @@ function chapterRangeLabel(start: number, end: number): string {
           </div>
         </div>
         <div v-if="selectedGroup && loadingNovelFiles" class="help-text">Loading this novel's chapter and coverage details…</div>
-        <div v-else-if="selectedGroup" class="library-file-list">
-          <button
-            v-for="file in filteredFiles"
-            :key="file.id"
-            class="library-file-row"
-            :class="{ active: selectedFileId === file.id }"
-            @click="selectFile(file)"
-          >
-            <span class="library-file-name">{{ file.filename }}</span>
-            <span class="library-file-meta">{{ file.folderState }} · {{ file.format }} · {{ coverageLabel(file) }}</span>
-          </button>
-          <p v-if="selectedGroup.files.length > visibleFileLimit" class="empty-state">
-            Showing first {{ visibleFileLimit }} files. Search by filename to narrow the list.
-          </p>
-        </div>
+        <VirtualScroller
+          v-else-if="selectedGroup && totalFileListCount > 0"
+          :items="fileListItems"
+          :itemSize="FILE_ROW_HEIGHT"
+          :lazy="true"
+          class="library-file-list"
+          :style="{ height: libraryFileListHeight }"
+          aria-label="Novel files"
+          @lazy-load="loadFileRows"
+        >
+          <template #item="{ item: file }">
+            <button
+              v-if="file"
+              class="library-file-row"
+              :class="{ active: selectedFileId === file.id }"
+              @click="selectFile(file)"
+            >
+              <span class="library-file-name">{{ file.filename }}</span>
+              <span class="library-file-meta">{{ file.folderState }} · {{ file.format }} · {{ file.coverage }}</span>
+            </button>
+            <div v-else class="library-file-row library-file-row-placeholder" aria-hidden="true"></div>
+          </template>
+        </VirtualScroller>
+        <p v-else-if="selectedGroup" class="empty-state">
+          {{ searchingFiles ? 'Searching files…' : 'No matching files.' }}
+        </p>
         <p v-else class="empty-state">Choose a novel to inspect its files.</p>
 
         <section v-if="selectedGroup" class="library-merge-panel">

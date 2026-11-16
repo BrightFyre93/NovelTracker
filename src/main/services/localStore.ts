@@ -25,6 +25,7 @@ import {
 import { normalizeSiteExtractionPreferences } from '../../shared/siteExtractionPreferences'
 import { normalizeDomainRequestDelays } from '../../shared/domainRequestPreferences'
 import { isNodeError } from '../../shared/errors'
+import { invalidateLibraryIndexSummary } from '../../shared/libraryIndexSummary'
 import { atomicWriteFile, renameWithRetry } from './atomicFile'
 import type {
   AppSettings,
@@ -57,6 +58,17 @@ const EMPTY_SETTINGS: AppSettings = {
 }
 const fileWriteTails = new Map<string, Promise<void>>()
 let downloadHistoryWriteTail = Promise.resolve()
+let downloadHistoryCachePath: string | null = null
+let downloadHistoryCache: DownloadHistoryEntry[] | null = null
+let libraryIndexCache:
+  | {
+      path: string
+      size: number
+      modifiedAtMs: number
+      changedAtMs: number
+      index: LibraryIndex | null
+    }
+  | undefined
 const storageRecoveryWarnings = new Set<string>()
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
@@ -310,7 +322,33 @@ function supportedEbookIndex(index: LibraryIndex | null): LibraryIndex | null {
 }
 
 export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIndex | null> {
-  return supportedEbookIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.json'), null))
+  const path = join(dataDirectory, 'library-index.json')
+  let details
+  try {
+    details = await stat(path)
+  } catch (error) {
+    if (!(isNodeError(error) && error.code === 'ENOENT')) throw error
+    if (libraryIndexCache?.path === path) libraryIndexCache = undefined
+    return null
+  }
+  if (
+    libraryIndexCache?.path === path &&
+    libraryIndexCache.size === details.size &&
+    libraryIndexCache.modifiedAtMs === details.mtimeMs &&
+    libraryIndexCache.changedAtMs === details.ctimeMs
+  ) {
+    return libraryIndexCache.index
+  }
+
+  const index = supportedEbookIndex(await readJson<LibraryIndex | null>(path, null))
+  libraryIndexCache = {
+    path,
+    size: details.size,
+    modifiedAtMs: details.mtimeMs,
+    changedAtMs: details.ctimeMs,
+    index
+  }
+  return index
 }
 
 export async function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
@@ -333,6 +371,8 @@ export async function writeLibraryIndex(
   previousIndex?: LibraryIndex | null
 ): Promise<void> {
   const indexPath = join(dataDirectory, 'library-index.json')
+  libraryIndexCache = undefined
+  invalidateLibraryIndexSummary(index)
   let backupCandidate = previousIndex
   if (backupCandidate === undefined) {
     try {
@@ -347,10 +387,38 @@ export async function writeLibraryIndex(
     await writeJson(join(dataDirectory, 'library-index.backup.json'), backupCandidate)
   }
   await writeJson(indexPath, index)
+  const details = await stat(indexPath)
+  libraryIndexCache = {
+    path: indexPath,
+    size: details.size,
+    modifiedAtMs: details.mtimeMs,
+    changedAtMs: details.ctimeMs,
+    index: supportedEbookIndex(index)
+  }
 }
 
-export async function readDownloadHistory(dataDirectory: string): Promise<DownloadHistoryEntry[]> {
-  return readJsonWithQuarantine(join(dataDirectory, 'download-history.json'), [], isDownloadHistoryArray)
+function copyDownloadHistory(
+  history: DownloadHistoryEntry[]
+): DownloadHistoryEntry[] {
+  return history.map((entry) => ({
+    ...entry,
+    ...(entry.trackerRow ? { trackerRow: { ...entry.trackerRow } } : {})
+  }))
+}
+
+export async function readDownloadHistory(
+  dataDirectory: string
+): Promise<DownloadHistoryEntry[]> {
+  const path = join(dataDirectory, 'download-history.json')
+  if (downloadHistoryCachePath !== path || !downloadHistoryCache) {
+    downloadHistoryCache = await readJsonWithQuarantine(
+      path,
+      [],
+      isDownloadHistoryArray
+    )
+    downloadHistoryCachePath = path
+  }
+  return copyDownloadHistory(downloadHistoryCache)
 }
 
 function isLibraryOperation(value: unknown): value is LibraryOperation {
@@ -411,18 +479,48 @@ function discoveryQueueChaptersPath(dataDirectory: string, queueItemId: string):
   return join(dataDirectory, 'download-artifacts', queueItemId, 'queue-chapters.json')
 }
 
+function discoveryQueueSelectionPath(
+  dataDirectory: string,
+  queueItemId: string
+): string {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+  return join(dataDirectory, 'download-artifacts', queueItemId, 'queue-selection.json')
+}
+
 export async function readDiscoveryQueueItemChapters(
   dataDirectory: string,
   queueItemId: string
 ): Promise<QueueChapter[] | null> {
-  const chapters = await readJson<QueueChapter[] | null>(
-    discoveryQueueChaptersPath(dataDirectory, queueItemId),
-    null
-  )
+  const chaptersPath = discoveryQueueChaptersPath(dataDirectory, queueItemId)
+  const selectionPath = discoveryQueueSelectionPath(dataDirectory, queueItemId)
+  const chapters = await readJson<QueueChapter[] | null>(chaptersPath, null)
   if (chapters !== null && !Array.isArray(chapters)) {
     throw new Error('The saved queue chapter list is invalid.')
   }
-  return chapters
+  if (!chapters) return null
+
+  const savedSelection = await readJson<string[] | null>(selectionPath, null)
+  if (savedSelection !== null && (
+    !Array.isArray(savedSelection) ||
+    savedSelection.some((id) => typeof id !== 'string')
+  )) {
+    throw new Error('The saved queue chapter selection is invalid.')
+  }
+  const selectedIds = savedSelection ?? chapters
+    .filter((chapter) => chapter.selected)
+    .map((chapter) => chapter.id)
+  if (savedSelection === null) {
+    await writeJson(selectionPath, selectedIds)
+    await writeJson(
+      chaptersPath,
+      chapters.map(({ selected: _selected, ...chapter }) => chapter)
+    )
+  }
+  const selectedIdSet = new Set(selectedIds)
+  return chapters.map((chapter) => ({
+    ...chapter,
+    selected: selectedIdSet.has(chapter.id)
+  }))
 }
 
 export function writeDiscoveryQueueItemChapters(
@@ -430,7 +528,25 @@ export function writeDiscoveryQueueItemChapters(
   queueItemId: string,
   chapters: QueueChapter[]
 ): Promise<void> {
-  return writeJson(discoveryQueueChaptersPath(dataDirectory, queueItemId), chapters)
+  const selectedIds = chapters
+    .filter((chapter) => chapter.selected)
+    .map((chapter) => chapter.id)
+  const chapterData = chapters.map(({ selected: _selected, ...chapter }) => chapter)
+  return Promise.all([
+    writeJson(discoveryQueueChaptersPath(dataDirectory, queueItemId), chapterData),
+    writeJson(discoveryQueueSelectionPath(dataDirectory, queueItemId), selectedIds)
+  ]).then(() => undefined)
+}
+
+export function writeDiscoveryQueueItemSelection(
+  dataDirectory: string,
+  queueItemId: string,
+  selectedChapterIds: string[]
+): Promise<void> {
+  return writeJson(
+    discoveryQueueSelectionPath(dataDirectory, queueItemId),
+    [...new Set(selectedChapterIds)]
+  )
 }
 
 function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapterUrl: string): string {
@@ -567,7 +683,7 @@ export async function removeChapterArtifacts(dataDirectory: string, queueItemId:
 export async function saveDownloadHistoryEntry(
   dataDirectory: string,
   entry: DownloadHistoryEntry,
-  queueReferencedIds: readonly string[] = []
+  queueReferencedIds: readonly string[]
 ): Promise<DownloadHistoryEntry[]> {
   return serializeDownloadHistoryWrite(async () => {
     const history = await readDownloadHistory(dataDirectory)
@@ -577,19 +693,17 @@ export async function saveDownloadHistoryEntry(
     history.sort((left, right) =>
       (right.startedAt || right.updatedAt).localeCompare(left.startedAt || left.updatedAt)
     )
-    const activeQueue = await readDiscoveryQueue(dataDirectory)
     const referencedHistoryIds = new Set(
-      [
-        ...activeQueue.map((item) => item.downloadHistoryId),
-        ...queueReferencedIds
-      ].filter((id) => typeof id === 'string' && id.length > 0)
+      queueReferencedIds.filter((id) => id.length > 0)
     )
     const recentHistoryIds = new Set(history.slice(0, 50).map((item) => item.id))
     const retained = history.filter(
       (item) => referencedHistoryIds.has(item.id) || recentHistoryIds.has(item.id)
     )
     await writeJson(join(dataDirectory, 'download-history.json'), retained)
-    return retained
+    downloadHistoryCachePath = join(dataDirectory, 'download-history.json')
+    downloadHistoryCache = copyDownloadHistory(retained)
+    return copyDownloadHistory(retained)
   })
 }
 
@@ -605,7 +719,11 @@ export async function markInterruptedDownloadJobs(dataDirectory: string): Promis
         changed = true
       }
     }
-    if (changed) await writeJson(join(dataDirectory, 'download-history.json'), history)
+    if (changed) {
+      await writeJson(join(dataDirectory, 'download-history.json'), history)
+      downloadHistoryCachePath = join(dataDirectory, 'download-history.json')
+      downloadHistoryCache = copyDownloadHistory(history)
+    }
   })
 }
 

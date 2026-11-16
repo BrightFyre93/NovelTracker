@@ -21,6 +21,7 @@ import type {
   DiscoveryQueueInput,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
+  DiscoveryQueueUpdate,
   DomainRequestDelayPreference,
   DownloadHistoryEntry,
   EpubMergeProgress,
@@ -85,6 +86,7 @@ import {
   writeCoverArtifact,
   writeDiscoveryQueue,
   writeDiscoveryQueueItemChapters,
+  writeDiscoveryQueueItemSelection,
   writeChapterArtifact,
   writeSettings
 } from './services/localStore'
@@ -126,7 +128,13 @@ import type {
   IpcEventMap,
   IpcMap
 } from '../shared/ipc'
-import { summarizeLibraryIndex } from '../shared/libraryIndexSummary'
+import {
+  searchLibraryFileSummaries,
+  searchLibraryNovelSummaries,
+  summarizeLibraryIndex,
+  summarizeLibraryIndexOverview
+} from '../shared/libraryIndexSummary'
+import { resolveChapterSelection } from '../shared/chapterSelection'
 import {
   normalizeNovelTitleForGrouping,
   normalizeNovelTitleForMatching
@@ -161,6 +169,8 @@ const activeLibraryWorkers = new Set<Worker>()
 const activeBackgroundTasks = new Set<Promise<void>>()
 let activeLibraryOperationHandlers = 0
 let discoveryQueue: DiscoveryQueueItem[] = []
+let discoveryQueueRevision = 0
+const discoveryQueueBroadcastState = new Map<string, string>()
 const reservedOutputPaths = new Set<string>()
 const discoveryQueueWrites = new SerialQueue()
 const dirtyQueueChapterIds = new Map<string, number>()
@@ -559,7 +569,15 @@ function releaseQueueItemChapters(item: DiscoveryQueueItem): void {
   item.completedChapterUrls = []
 }
 
-function persistDiscoveryQueue(): Promise<void> {
+interface QueueSelectionPersistence {
+  id: string
+  selectedChapterIds: string[]
+  previousSelectedChapterIds: string[]
+}
+
+function persistDiscoveryQueue(
+  selectionUpdate?: QueueSelectionPersistence
+): Promise<void> {
   const changedChapterData = [...dirtyQueueChapterIds.entries()].flatMap(
     ([id, revision]) => {
       const item = discoveryQueue.find((candidate) => candidate.id === id)
@@ -576,13 +594,36 @@ function persistDiscoveryQueue(): Promise<void> {
   )
   const snapshot = discoveryQueue.map(copyQueueItemForPersistence)
   return discoveryQueueWrites.enqueue(async () => {
-    for (const { id, chapters } of changedChapterData) {
-      await writeDiscoveryQueueItemChapters(dataDirectory(), id, chapters)
-    }
-    await writeDiscoveryQueue(dataDirectory(), snapshot)
-    for (const { id, revision } of changedChapterData) {
-      if (dirtyQueueChapterIds.get(id) === revision)
-        dirtyQueueChapterIds.delete(id)
+    try {
+      for (const { id, chapters } of changedChapterData) {
+        await writeDiscoveryQueueItemChapters(dataDirectory(), id, chapters)
+      }
+      if (selectionUpdate) {
+        await writeDiscoveryQueueItemSelection(
+          dataDirectory(),
+          selectionUpdate.id,
+          selectionUpdate.selectedChapterIds
+        )
+      }
+      await writeDiscoveryQueue(dataDirectory(), snapshot)
+      for (const { id, revision } of changedChapterData) {
+        if (dirtyQueueChapterIds.get(id) === revision)
+          dirtyQueueChapterIds.delete(id)
+      }
+    } catch (error) {
+      if (selectionUpdate) {
+        await writeDiscoveryQueueItemSelection(
+          dataDirectory(),
+          selectionUpdate.id,
+          selectionUpdate.previousSelectedChapterIds
+        ).catch((rollbackError: unknown) => {
+          console.error(
+            `Chapter selection rollback for ${selectionUpdate.id} could not be saved:`,
+            rollbackError
+          )
+        })
+      }
+      throw error
     }
   })
 }
@@ -598,16 +639,18 @@ async function persistDiscoveryQueueOrRollback(
   }
 }
 
-function persistHistoryEntry(
+async function persistHistoryEntry(
   entry: DownloadHistoryEntry
 ): Promise<DownloadHistoryEntry[]> {
-  return historyWrites.enqueue(() =>
+  const entries = await historyWrites.enqueue(() =>
     saveDownloadHistoryEntry(
       dataDirectory(),
       entry,
       discoveryQueue.map((item) => item.downloadHistoryId)
     )
   )
+  notifyDownloadHistoryChanged(entries)
+  return entries
 }
 
 function historyEntryForQueueItem(
@@ -946,15 +989,46 @@ function notifyDiscoveryQueueChanged(): void {
   discoveryQueueNotificationTimer = setTimeout(() => {
     discoveryQueueNotificationTimer = null
     const items = copyDiscoveryQueue()
+    const currentState = new Map(
+      items.map((item) => [item.id, JSON.stringify(item)])
+    )
+    const upserted = items.filter(
+      (item) => discoveryQueueBroadcastState.get(item.id) !== currentState.get(item.id)
+    )
+    const removedIds = [...discoveryQueueBroadcastState.keys()].filter(
+      (id) => !currentState.has(id)
+    )
+    discoveryQueueBroadcastState.clear()
+    for (const [id, snapshot] of currentState)
+      discoveryQueueBroadcastState.set(id, snapshot)
+    if (upserted.length === 0 && removedIds.length === 0) return
+    const update: DiscoveryQueueUpdate = {
+      revision: ++discoveryQueueRevision,
+      upserted,
+      removedIds,
+      order: items.map((item) => item.id)
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       const webContents = window.webContents
       if (webContents.isDestroyed() || webContents.isLoadingMainFrame())
         continue
       const frame = webContents.mainFrame
       if (frame.isDestroyed()) continue
-      sendIpcEvent(frame, 'discovery-queue:update', items)
+      sendIpcEvent(frame, 'discovery-queue:update', update)
     }
   }, 1000)
+}
+
+function notifyDownloadHistoryChanged(
+  history: DownloadHistoryEntry[]
+): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed() || webContents.isLoadingMainFrame()) continue
+    const frame = webContents.mainFrame
+    if (frame.isDestroyed()) continue
+    sendIpcEvent(frame, 'download-history:update', history)
+  }
 }
 
 function sendIpcEvent<Channel extends IpcEventChannel>(
@@ -2624,6 +2698,11 @@ function registerIpcHandlers(): void {
     copyDiscoveryQueue()
   )
 
+  handleTypedIpc('discovery-queue:snapshot', z.tuple([]), () => ({
+    revision: discoveryQueueRevision,
+    items: copyDiscoveryQueue()
+  }))
+
   handleResultIpc(
     'discovery-queue:item',
     z.tuple([
@@ -3114,18 +3193,21 @@ function registerIpcHandlers(): void {
         (value): value is string => typeof value === 'string',
         'Invalid chapter selection update.'
       ),
-      z.custom<string[]>(
-        (value): value is string[] =>
-          Array.isArray(value) &&
-          value.length <= MAX_SELECTED_CHAPTERS &&
-          value.every((url) => typeof url === 'string'),
-        'Invalid chapter selection update.'
-      )
+      z.union([
+        z.object({
+          mode: z.literal('ids'),
+          ids: z.array(z.string()).max(MAX_SELECTED_CHAPTERS)
+        }).strict(),
+        z.object({
+          mode: z.literal('ranges'),
+          ranges: z.array(z.object({
+            start: z.number().int().min(0),
+            end: z.number().int().min(0)
+          }).strict()).max(MAX_SELECTED_CHAPTERS)
+        }).strict()
+      ])
     ]),
-    async (_event, id, rawSelectedUrls) => {
-      const selectedUrls = new Set(
-        rawSelectedUrls.map((url) => validateHttpUrl(url))
-      )
+    async (_event, id, selectionUpdate) => {
       const item = discoveryQueue.find((candidate) => candidate.id === id)
       if (
         !item ||
@@ -3136,18 +3218,48 @@ function registerIpcHandlers(): void {
         )
       }
       await ensureQueueItemChapters(item)
-      const availableUrls = new Set(item.chapters.map((chapter) => chapter.url))
-      if ([...selectedUrls].some((url) => !availableUrls.has(url))) {
+      const selectedChapterIds = resolveChapterSelection(
+        item.chapters,
+        selectionUpdate,
+        MAX_SELECTED_CHAPTERS
+      )
+      const availableChapterIds = new Set(
+        item.chapters.map((chapter) => chapter.id)
+      )
+      if (
+        [...selectedChapterIds].some(
+          (chapterId) => !availableChapterIds.has(chapterId)
+        )
+      ) {
         throw new Error(
           'The chapter selection no longer matches the saved discovery snapshot.'
         )
       }
+      const previousSelectedChapterIds = item.chapters
+        .filter((chapter) => chapter.selected)
+        .map((chapter) => chapter.id)
+      const previousStatus = item.status
+      const previousUpdatedAt = item.updatedAt
       for (const chapter of item.chapters)
-        chapter.selected = selectedUrls.has(chapter.url)
-      markQueueItemChaptersDirty(item)
+        chapter.selected = selectedChapterIds.has(chapter.id)
+      updateQueueChapterSummary(item)
       item.status = 'ready'
       item.updatedAt = new Date().toISOString()
-      await persistDiscoveryQueue()
+      try {
+        await persistDiscoveryQueue({
+          id: item.id,
+          selectedChapterIds: [...selectedChapterIds],
+          previousSelectedChapterIds
+        })
+      } catch (error) {
+        const previousSelection = new Set(previousSelectedChapterIds)
+        for (const chapter of item.chapters)
+          chapter.selected = previousSelection.has(chapter.id)
+        updateQueueChapterSummary(item)
+        item.status = previousStatus
+        item.updatedAt = previousUpdatedAt
+        throw error
+      }
       releaseQueueItemChapters(item)
       notifyDiscoveryQueueChanged()
     }
@@ -3968,10 +4080,62 @@ function registerIpcHandlers(): void {
     }
   )
 
+  handleValidatedResultIpc(
+    'library:search-novels',
+    z.tuple([
+      z.string(),
+      z.boolean(),
+      z.number().int().min(0),
+      z.number().int().min(1).max(100),
+      z.string().optional()
+    ]),
+    async (_event, query, multipleFilesOnly, offset, limit, selectedNovelKey) => {
+      const index = await readLibraryIndex(dataDirectory())
+      if (!index)
+        throw new Error('Scan the library before searching novels.')
+      return {
+        ok: true,
+        value: searchLibraryNovelSummaries(
+          index,
+          query,
+          multipleFilesOnly,
+          offset,
+          limit,
+          selectedNovelKey
+        )
+      }
+    }
+  )
+
   handleTypedIpc('library:index-summary', z.tuple([]), async () => {
     const index = await readLibraryIndex(dataDirectory())
-    return index ? summarizeLibraryIndex(index) : null
+    return index ? summarizeLibraryIndexOverview(index) : null
   })
+
+  handleValidatedResultIpc(
+    'library:search-novel-files',
+    z.tuple([
+      z.string().max(300),
+      z.string(),
+      z.number().int().min(0),
+      z.number().int().min(1).max(100)
+    ]),
+    async (_event, novelKey, query, offset, limit) => {
+      const index = await readLibraryIndex(dataDirectory())
+      if (!index)
+        throw new Error('Scan the library before viewing its files.')
+      return {
+        ok: true,
+        value: searchLibraryFileSummaries(
+          index,
+          novelKey,
+          query,
+          offset,
+          limit
+        )
+      }
+    }
+  )
 
   handleValidatedResultIpc(
     'library:novel-files',
@@ -4038,7 +4202,7 @@ function registerIpcHandlers(): void {
           )
         }
         await writeLibraryIndex(dataDirectory(), backup)
-        return { ok: true, value: summarizeLibraryIndex(backup) }
+        return { ok: true, value: summarizeLibraryIndexOverview(backup) }
       } catch (error) {
         console.error('Library index backup restore failed:', error)
         return { ok: false, error: errorMessage(error) }
@@ -4105,7 +4269,7 @@ function registerIpcHandlers(): void {
         const index = await readLibraryIndex(dataDirectory())
         if (!index)
           throw new Error('The library scan completed without saving an index.')
-        return { ok: true, value: summarizeLibraryIndex(index) }
+        return { ok: true, value: summarizeLibraryIndexOverview(index) }
       } catch (error) {
         if (!scan.cancelRequested) console.error('Library scan failed:', error)
         return { ok: false, error: errorMessage(error) }
@@ -4176,7 +4340,18 @@ function registerIpcHandlers(): void {
           novelTitle,
           chapterNumbers
         } satisfies LibraryFileCorrection)
-        return { ok: true, value: summarizeLibraryIndex(index) }
+        const novel = summarizeLibraryIndex(index).novels.find((group) =>
+          group.files.some((file) => file.id === rawFileId)
+        )
+        if (!novel)
+          throw new Error('The corrected file could not be found in the library index.')
+        return {
+          ok: true,
+          value: {
+            index: summarizeLibraryIndexOverview(index),
+            novel
+          }
+        }
       } catch (error) {
         return { ok: false, error: errorMessage(error) }
       } finally {

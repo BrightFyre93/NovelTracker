@@ -20,12 +20,21 @@ function normalizedTitleAliases(value: string): string[] {
   return [...new Set([normalized, withoutVolume].filter((title) => title.length > 0))]
 }
 
-function fileMatchesChapter(file: LibraryFileRecord, number: number | null, title: string): boolean {
-  const titleKey = normalizeNovelTitleForMatching(title)
-  const titleMatch = titleKey.length > 0 && file.chapterTitles.some((candidate) => normalizeNovelTitleForMatching(candidate) === titleKey)
+interface IndexedNovelFile {
+  file: LibraryFileRecord
+  chapterTitleKeys: Set<string>
+  chapterNumbers: Set<number>
+}
+
+function fileMatchesChapter(
+  file: IndexedNovelFile,
+  number: number | null,
+  titleKey: string
+): boolean {
+  const titleMatch = titleKey.length > 0 && file.chapterTitleKeys.has(titleKey)
   if (titleMatch) return true
   if (number === null) return false
-  return file.chapterNumbers.includes(number)
+  return file.chapterNumbers.has(number)
 }
 
 export function recommendArchiveCoverage(
@@ -42,24 +51,38 @@ export function recommendArchiveCoverage(
   const novelFiles = files.filter((file) =>
     normalizedTitleAliases(file.novelTitle).some((title) => titleKeys.has(title))
   )
+  const indexedNovelFiles = novelFiles.map((file) => ({
+    file,
+    chapterTitleKeys: new Set(
+      file.chapterTitles.map(normalizeNovelTitleForMatching)
+    ),
+    chapterNumbers: new Set(file.chapterNumbers)
+  }))
   const chapters = item.chapters.map((chapter) => {
     const number = parseChapterNumber(chapter.title) ?? parseChapterNumber(chapter.url, 'url')
-    const matches = novelFiles.filter((file) => fileMatchesChapter(file, number, chapter.title))
-    const verified = matches.filter((file) => VERIFIED_COVERAGE.has(file.coverageConfidence))
+    const titleKey = normalizeNovelTitleForMatching(chapter.title)
+    const matches = indexedNovelFiles.filter((file) =>
+      fileMatchesChapter(file, number, titleKey)
+    )
+    const matchingFiles = new Set(matches.map(({ file }) => file))
+    const matchingLibraryFiles = matches.map(({ file }) => file)
+    const verified = matchingLibraryFiles.filter((file) => VERIFIED_COVERAGE.has(file.coverageConfidence))
     const rangeMatches = (file: LibraryFileRecord): boolean =>
       number !== null &&
       file.filenameRange !== null &&
       number >= file.filenameRange.start &&
       number <= file.filenameRange.end
-    const probable = novelFiles.filter(
-      (file) =>
-        (matches.includes(file) && file.coverageConfidence === 'filename') ||
-        (rangeMatches(file) && file.coverageConfidence !== 'unknown')
-    )
-    const uncertain = novelFiles.some(
-      (file) =>
+    const probable = indexedNovelFiles
+      .filter(
+        ({ file }) =>
+          (matchingFiles.has(file) && file.coverageConfidence === 'filename') ||
+          (rangeMatches(file) && file.coverageConfidence !== 'unknown')
+      )
+      .map(({ file }) => file)
+    const uncertain = indexedNovelFiles.some(
+      ({ file }) =>
         file.coverageConfidence === 'unknown' &&
-        (matches.includes(file) || rangeMatches(file))
+        (matchingFiles.has(file) || rangeMatches(file))
     )
     const archiveStatus: QueueChapter['archiveStatus'] = verified.length > 0
       ? 'confirmed'

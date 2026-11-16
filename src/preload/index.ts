@@ -1,8 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DiscoveryQueueInput,
-  DiscoveryQueueItemSummary,
+  DiscoveryQueueUpdate,
+  ChapterSelectionUpdate,
   DomainRequestDelayPreference,
+  DownloadHistoryEntry,
   EpubMergeProgress,
   GenerateEpubInput,
   LibraryFileCorrection,
@@ -76,7 +78,10 @@ const api: NovelTrackerApi = {
   chooseTrackerCsv: () => invokeIpc('dialog:choose-tracker-csv'),
   getTrackerNovels: () => invokeIpc('tracker:list'),
   getDownloadHistory: () => invokeIpc('download-history:list'),
+  onDownloadHistoryUpdate: (listener: (history: DownloadHistoryEntry[]) => void) =>
+    onIpcEvent('download-history:update', listener),
   getDiscoveryQueue: () => invokeIpc('discovery-queue:list'),
+  getDiscoveryQueueSnapshot: () => invokeIpc('discovery-queue:snapshot'),
   getDiscoveryQueueItem: (id: string) => invokeIpc('discovery-queue:item', id),
   addDiscoveryQueueItems: (items: DiscoveryQueueInput[]) =>
     invokeIpc('discovery-queue:add', items),
@@ -108,12 +113,40 @@ const api: NovelTrackerApi = {
   clearDiscoveryQueue: () => invokeIpc('discovery-queue:clear'),
   clearCompletedDiscoveryQueueItems: () =>
     invokeIpc('discovery-queue:clear-completed'),
-  updateDiscoveryQueueSelection: (id: string, selectedChapterUrls: string[]) =>
-    invokeIpc('discovery-queue:update-selection', id, selectedChapterUrls),
+  updateDiscoveryQueueSelection: (id: string, selection: ChapterSelectionUpdate) =>
+    invokeIpc('discovery-queue:update-selection', id, selection),
   onDiscoveryQueueUpdate: (
-    listener: (items: DiscoveryQueueItemSummary[]) => void
+    listener: (update: DiscoveryQueueUpdate) => void
   ) => onIpcEvent('discovery-queue:update', listener),
   getLibraryIndexSummary: () => invokeIpc('library:index-summary'),
+  searchLibraryNovels: (
+    query: string,
+    multipleFilesOnly: boolean,
+    offset: number,
+    limit: number,
+    selectedNovelKey?: string
+  ) =>
+    invokeIpc(
+      'library:search-novels',
+      query,
+      multipleFilesOnly,
+      offset,
+      limit,
+      selectedNovelKey
+    ),
+  searchLibraryNovelFiles: (
+    novelKey: string,
+    query: string,
+    offset: number,
+    limit: number
+  ) =>
+    invokeIpc(
+      'library:search-novel-files',
+      novelKey,
+      query,
+      offset,
+      limit
+    ),
   getLibraryNovelFiles: (novelKey: string) =>
     invokeIpc('library:novel-files', novelKey),
   getLibraryIndexBackupDate: () => invokeIpc('library:index-backup-date'),

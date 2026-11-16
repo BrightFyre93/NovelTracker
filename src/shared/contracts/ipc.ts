@@ -12,12 +12,18 @@ import type {
   QueuedEpubJob,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
+  DiscoveryQueueSnapshot,
+  DiscoveryQueueUpdate,
+  ChapterSelectionUpdate,
   DiscoveryQueueInput
 } from './queue'
 import type {
   LibraryFileCorrection,
+  LibraryFileCorrectionResult,
+  LibraryFileSearchPage,
   LibraryFileRecord,
-  LibraryIndexSummary,
+  LibraryIndexOverview,
+  LibraryNovelSearchPage,
   LibraryProgress,
   EpubMergeProgress,
   LibraryEpubMergeResponse,
@@ -41,7 +47,11 @@ export interface NovelTrackerApi {
   chooseTrackerCsv(): Promise<string | null>
   getTrackerNovels(): Promise<Result<TrackerNovel[]>>
   getDownloadHistory(): Promise<DownloadHistoryEntry[]>
+  onDownloadHistoryUpdate(
+    listener: (history: DownloadHistoryEntry[]) => void
+  ): () => void
   getDiscoveryQueue(): Promise<DiscoveryQueueItemSummary[]>
+  getDiscoveryQueueSnapshot(): Promise<DiscoveryQueueSnapshot>
   getDiscoveryQueueItem(id: string): Promise<Result<DiscoveryQueueItem>>
   addDiscoveryQueueItems(
     items: DiscoveryQueueInput[]
@@ -70,7 +80,7 @@ export interface NovelTrackerApi {
   clearCompletedDiscoveryQueueItems(): Promise<Result<void>>
   updateDiscoveryQueueSelection(
     id: string,
-    selectedChapterUrls: string[]
+    selection: ChapterSelectionUpdate
   ): Promise<Result<void>>
   updateDownloadConcurrency(
     maxSimultaneousDownloads: number
@@ -94,18 +104,31 @@ export interface NovelTrackerApi {
   repackageEpub(id: string): Promise<Result<void>>
   saveAvailableChaptersEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(
-    listener: (items: DiscoveryQueueItemSummary[]) => void
+    listener: (update: DiscoveryQueueUpdate) => void
   ): () => void
-  getLibraryIndexSummary(): Promise<LibraryIndexSummary | null>
+  getLibraryIndexSummary(): Promise<LibraryIndexOverview | null>
+  searchLibraryNovels(
+    query: string,
+    multipleFilesOnly: boolean,
+    offset: number,
+    limit: number,
+    selectedNovelKey?: string
+  ): Promise<Result<LibraryNovelSearchPage>>
+  searchLibraryNovelFiles(
+    novelKey: string,
+    query: string,
+    offset: number,
+    limit: number
+  ): Promise<Result<LibraryFileSearchPage>>
   getLibraryNovelFiles(novelKey: string): Promise<Result<LibraryFileRecord[]>>
   getLibraryIndexBackupDate(): Promise<string | null>
-  restoreLibraryIndexBackup(): Promise<Result<LibraryIndexSummary>>
-  scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndexSummary>>
+  restoreLibraryIndexBackup(): Promise<Result<LibraryIndexOverview>>
+  scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndexOverview>>
   cancelLibraryScan(): Promise<void>
   correctLibraryFile(
     fileId: string,
     correction: LibraryFileCorrection
-  ): Promise<Result<LibraryIndexSummary>>
+  ): Promise<Result<LibraryFileCorrectionResult>>
   mergeLibraryEpubs(
     fileIds: string[],
     filename: string

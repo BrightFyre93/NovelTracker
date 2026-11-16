@@ -64,13 +64,42 @@ export interface LibraryNovelSummary {
   }
 }
 
-export interface LibraryIndexSummary {
+export interface LibraryNovelSearchPage {
+  total: number
+  offset: number
+  items: LibraryNovelSummary[]
+  selectedNovel: LibraryNovelSummary | null
+}
+
+export interface LibraryFileListItem {
+  id: string
+  filename: string
+  folderState: LibraryFolderState
+  format: LibraryFileFormat
+  coverage: string
+}
+
+export interface LibraryFileSearchPage {
+  total: number
+  offset: number
+  items: LibraryFileListItem[]
+}
+
+export interface LibraryIndexOverview {
   libraryRoot: string
   scannedAt: string
   fileCount: number
   scanErrors: number
   scanSummary?: LibraryIndex['scanSummary']
+}
+
+export interface LibraryIndexSummary extends LibraryIndexOverview {
   novels: LibraryNovelSummary[]
+}
+
+export interface LibraryFileCorrectionResult {
+  index: LibraryIndexOverview
+  novel: LibraryNovelSummary
 }
 
 export interface LibraryProgress {

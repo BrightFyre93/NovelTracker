@@ -2,18 +2,20 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import Button from 'primevue/button'
-import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
+import VirtualScroller from 'primevue/virtualscroller'
 import type {
   DiscoveryQueueItem,
+  ChapterSelectionUpdate,
   DownloadHistoryEntry,
   LibraryOperation,
   TrackerNovel
 } from '../../shared/contracts'
 import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
-import { toMessage } from '../../shared/errors'
+import { toMessage, unwrapResult } from '../../shared/errors'
+import { encodeChapterSelection } from '../../shared/chapterSelection'
 import { MAX_EPUB_FILENAME_BASENAME_LENGTH, suggestEpubFilename } from '../../shared/epubFilename'
 import ConfigurationView from './components/ConfigurationView.vue'
 import LibraryView from './components/LibraryView.vue'
@@ -46,6 +48,7 @@ const { trackerSearch, filteredTrackerNovels } = useTrackerNovelSearch(
 const trackerSources = ref<Record<string, string>>({})
 const trackerCsvPath = ref('')
 const chapterSearch = ref('')
+const queueSelectionError = ref('')
 const downloadHistory = ref<DownloadHistoryEntry[]>([])
 const libraryOperations = ref<LibraryOperation[]>([])
 const {
@@ -61,6 +64,7 @@ const {
   language,
   filename,
   chapters,
+  chapterSelection,
   sourceUrl,
   parserName,
   outputDirectory,
@@ -71,7 +75,9 @@ const {
 } = storeToRefs(store)
 const hasCurrentDiscovery = computed(() => Boolean(sourceUrl.value) && url.value.trim() === sourceUrl.value)
 const filenamePreview = computed(() => {
-  const selected = chapters.value.filter((chapter) => chapter.selected)
+  const selected = chapters.value.filter((chapter) =>
+    chapterSelection.value.has(chapter.id)
+  )
   const suggestion =
     selected.length === 0
       ? suggestEpubFilename(title.value, '', '')
@@ -108,13 +114,14 @@ const libraryScanCountLabel = computed(() => {
   return `${currentProgress.indexedFiles.toLocaleString()} of ${currentProgress.totalFiles.toLocaleString()} indexed · ${currentProgress.discoveredFiles.toLocaleString()} found`
 })
 
-watch(url, (value) => {
+watch(url, async (value) => {
   if (browserAssistUrl.value && value.trim() !== browserAssistUrl.value) {
     browserAssistOpen.value = false
     browserPageTitle.value = ''
     browserAssistUrl.value = ''
   }
   if (sourceUrl.value && value.trim() !== sourceUrl.value) {
+    if (!(await flushQueueSelectionSave())) return
     resetDiscoverySourceState()
     resetDiscoveryMetadata()
     store.success = ''
@@ -125,10 +132,15 @@ watch(url, (value) => {
   }
 })
 
-let removeQueueListener: (() => void) | undefined
+let removeHistoryListener: (() => void) | undefined
 let removeLibraryOperationsListener: (() => void) | undefined
+let downloadHistoryRevision = 0
 
 onMounted(() => {
+  removeHistoryListener = window.novelTracker.onDownloadHistoryUpdate((history) => {
+    downloadHistoryRevision += 1
+    downloadHistory.value = history
+  })
   removeLibraryOperationsListener = window.novelTracker.onLibraryOperationsUpdate((operations) => {
     libraryOperations.value = operations
   })
@@ -137,13 +149,6 @@ onMounted(() => {
   }).catch((error: unknown) => {
     store.error = toMessage(error)
   })
-  removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate(() => {
-    void window.novelTracker.getDownloadHistory().then((history) => {
-      downloadHistory.value = history
-    }).catch((reason: unknown) => {
-      store.error = toMessage(reason)
-    })
-  })
   void window.novelTracker.getSettings().then((settings) => {
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
     trackerCsvPath.value = settings.trackerCsvPath
@@ -151,15 +156,17 @@ onMounted(() => {
   }).catch((error: unknown) => {
     store.error = toMessage(error)
   })
+  const initialHistoryRevision = downloadHistoryRevision
   void window.novelTracker.getDownloadHistory().then((history) => {
-    downloadHistory.value = history
+    if (downloadHistoryRevision === initialHistoryRevision)
+      downloadHistory.value = history
   }).catch((error: unknown) => {
     store.error = toMessage(error)
   })
 })
 
 onUnmounted(() => {
-  removeQueueListener?.()
+  removeHistoryListener?.()
   removeLibraryOperationsListener?.()
 })
 
@@ -330,6 +337,7 @@ async function openCreateView(): Promise<void> {
       const queue = await window.novelTracker.getDiscoveryQueue()
       const currentItem = queue.find((item) => item.id === store.queueItemId)
       if (!currentItem || (currentItem.status !== 'needs-review' && currentItem.status !== 'ready')) {
+        if (!(await flushQueueSelectionSave())) return
         resetDiscoveryForm()
       }
     }
@@ -349,10 +357,6 @@ function applyAppTheme(theme: 'light' | 'dark'): void {
 }
 
 function resetDiscoveryForm(): void {
-  if (queueSelectionTimer) {
-    clearTimeout(queueSelectionTimer)
-    queueSelectionTimer = undefined
-  }
   resetDiscoverySourceState()
   resetDiscoveryMetadata()
   store.url = ''
@@ -363,10 +367,12 @@ function resetDiscoveryForm(): void {
 }
 
 function resetDiscoverySourceState(): void {
+  queueSelectionError.value = ''
   store.queueItemId = ''
   separateJob.value = false
   store.sourceUrl = ''
   store.chapters = []
+  store.chapterSelection = new Set()
   store.parserName = ''
   store.filename = ''
 }
@@ -382,7 +388,7 @@ function resetDiscoveryMetadata(): void {
   novelStatus.value = ''
 }
 
-function useTrackerNovel(novel: TrackerNovel): void {
+async function useTrackerNovel(novel: TrackerNovel): Promise<void> {
   const sourceUrl = trackerSources.value[novel.stableId] ?? ''
   const source = novel.sources.find((candidate) => candidate.url === sourceUrl)
   if (source && !source.valid) {
@@ -390,6 +396,7 @@ function useTrackerNovel(novel: TrackerNovel): void {
     return
   }
 
+  if (!(await flushQueueSelectionSave())) return
   resetDiscoverySourceState()
   store.title = novel.siteTitle || novel.title
   store.author = novel.author
@@ -406,7 +413,8 @@ function useTrackerNovel(novel: TrackerNovel): void {
   trackerVisible.value = false
 }
 
-function openQueueItem(item: DiscoveryQueueItem): void {
+async function openQueueItem(item: DiscoveryQueueItem): Promise<void> {
+  if (!(await flushQueueSelectionSave())) return
   resetDiscoveryForm()
   store.url = item.sourceUrl
   store.sourceUrl = item.sourceUrl
@@ -419,7 +427,10 @@ function openQueueItem(item: DiscoveryQueueItem): void {
   store.source = item.source
   store.novelStatus = item.novelStatus
   store.parserName = item.parserName
-  store.chapters = item.chapters.map((chapter) => ({ ...chapter }))
+  store.chapters = item.chapters.map(({ selected: _selected, ...chapter }) => chapter)
+  store.chapterSelection = new Set(
+    item.chapters.filter((chapter) => chapter.selected).map((chapter) => chapter.id)
+  )
   store.queueItemId = item.id
   separateJob.value = item.separateJob ?? false
   store.filename = ''
@@ -432,39 +443,59 @@ function openQueueItem(item: DiscoveryQueueItem): void {
 
 async function persistQueueSelection(
   id = store.queueItemId,
-  selectedUrls = store.chapters.filter((chapter) => chapter.selected).map((chapter) => chapter.url)
+  selection: ChapterSelectionUpdate = encodeChapterSelection(
+    store.chapters,
+    store.chapterSelection
+  )
 ): Promise<boolean> {
   if (!id || id !== store.queueItemId) return true
   try {
-    const result = await window.novelTracker.updateDiscoveryQueueSelection(id, selectedUrls)
-    if (!result.ok) throw new Error(result.error)
+    unwrapResult(
+      await window.novelTracker.updateDiscoveryQueueSelection(id, selection)
+    )
+    queueSelectionError.value = ''
     return true
   } catch (reason) {
-    store.error = toMessage(reason)
+    queueSelectionError.value = toMessage(reason)
     return false
   }
 }
 
 let queueSelectionTimer: ReturnType<typeof setTimeout> | undefined
-watch(chapters, (updatedChapters) => {
-  const id = store.queueItemId
-  if (!id) return
-  const selectedUrls = updatedChapters.filter((chapter) => chapter.selected).map((chapter) => chapter.url)
-  if (queueSelectionTimer) clearTimeout(queueSelectionTimer)
-  queueSelectionTimer = setTimeout(() => {
-    queueSelectionTimer = undefined
-    if (store.queueItemId !== id || activeView.value !== 'create') return
-    void persistQueueSelection(id, selectedUrls)
-  }, QUEUE_SELECTION_SAVE_DEBOUNCE_MS)
-}, { deep: true })
-
-async function createEpub(): Promise<void> {
-  store.error = ''
-  store.success = ''
+async function flushQueueSelectionSave(): Promise<boolean> {
   if (queueSelectionTimer) {
     clearTimeout(queueSelectionTimer)
     queueSelectionTimer = undefined
   }
+  if (!store.queueItemId) return true
+  return persistQueueSelection(
+    store.queueItemId,
+    encodeChapterSelection(store.chapters, store.chapterSelection)
+  )
+}
+
+watch([chapters, chapterSelection], ([updatedChapters, selectedIds]) => {
+  const id = store.queueItemId
+  if (!id) return
+  const selection = encodeChapterSelection(updatedChapters, selectedIds)
+  if (queueSelectionTimer) clearTimeout(queueSelectionTimer)
+  queueSelectionTimer = setTimeout(() => {
+    queueSelectionTimer = undefined
+    if (store.queueItemId !== id) return
+    void persistQueueSelection(id, selection)
+  }, QUEUE_SELECTION_SAVE_DEBOUNCE_MS)
+})
+
+watch(activeView, (view) => {
+  if (view !== 'create' && queueSelectionTimer) {
+    void flushQueueSelectionSave()
+  }
+})
+
+async function createEpub(): Promise<void> {
+  store.error = ''
+  store.success = ''
+  if (!(await flushQueueSelectionSave())) return
   if (!(await persistQueueSelection())) return
   store.busy = true
   const queuedTitle = store.title
@@ -483,7 +514,7 @@ async function createEpub(): Promise<void> {
       sourceUrl: store.sourceUrl,
       outputDirectory: store.outputDirectory,
       chapters: store.chapters
-        .filter((chapter) => chapter.selected)
+        .filter((chapter) => store.chapterSelection.has(chapter.id))
         .map(({ id, title, url }) => ({ id, title, url })),
       trackerRow: store.trackerRow ? { ...store.trackerRow } : undefined
     }, store.queueItemId || undefined)
@@ -497,24 +528,26 @@ async function createEpub(): Promise<void> {
   } catch (error) {
     store.error = toMessage(error)
   } finally {
-    try {
-      downloadHistory.value = await window.novelTracker.getDownloadHistory()
-    } catch (error) {
-      if (!store.error) store.error = toMessage(error)
-    }
     store.busy = false
   }
 }
 
 function toggleAll(selected: boolean): void {
-  for (const chapter of store.chapters) chapter.selected = selected
+  store.selectAllChapters(selected)
 }
 
 function selectBoundaryChapter(boundary: 'first' | 'last'): void {
-  const selectedIndex = boundary === 'first' ? 0 : store.chapters.length - 1
-  for (const [index, chapter] of store.chapters.entries()) {
-    chapter.selected = index === selectedIndex
-  }
+  store.selectBoundaryChapter(boundary)
+}
+
+function isChapterSelected(id: string): boolean {
+  return store.chapterSelection.has(id)
+}
+
+function updateChapterSelection(id: string, event: Event): void {
+  const input = event.currentTarget
+  if (!(input instanceof HTMLInputElement)) return
+  store.setChapterSelected(id, input.checked)
 }
 </script>
 
@@ -603,6 +636,15 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
         </div>
       </details>
     </section>
+
+    <Message
+      v-if="queueSelectionError"
+      severity="error"
+      :closable="false"
+      class="feedback"
+    >
+      {{ queueSelectionError }}
+    </Message>
 
     <template v-if="activeView === 'create'">
     <section class="intro">
@@ -764,23 +806,37 @@ function selectBoundaryChapter(boundary: 'first' | 'last'): void {
           />
           <span class="help-text">Showing {{ filteredChapters.length.toLocaleString() }} of {{ chapters.length.toLocaleString() }}</span>
         </div>
-        <div class="chapter-list" role="group" aria-label="Select chapters to include">
-          <label v-for="{ chapter, index } in filteredChapters" :key="chapter.id" class="chapter-row">
-            <Checkbox v-model="chapter.selected" :binary="true" :input-id="`chapter-${index}`" :disabled="busy" />
-            <span class="chapter-order">{{ String(index + 1).padStart(2, '0') }}</span>
-            <span class="chapter-detail">
-              <span class="chapter-title">{{ chapter.title }}</span>
-              <span class="chapter-url">{{ chapter.url }}</span>
-              <span v-if="chapter.archiveStatus" class="chapter-archive-status">
-                {{ chapter.archiveStatus }} archive coverage
-                <template v-if="chapter.chapterNumber !== null && chapter.chapterNumber !== undefined"> · chapter {{ chapter.chapterNumber }}</template>
-                <template v-if="chapter.archiveGap"> · unresolved earlier gap</template>
-                <template v-if="chapter.archiveSources?.length"> · {{ chapter.archiveSources.join(', ') }}</template>
+        <VirtualScroller
+          :items="filteredChapters"
+          :itemSize="80"
+          class="chapter-list"
+          aria-label="Select chapters to include"
+        >
+          <template #item="{ item: entry }">
+            <label class="chapter-row">
+              <input
+                type="checkbox"
+                class="chapter-checkbox"
+                :checked="isChapterSelected(entry.chapter.id)"
+                :aria-label="`Include ${entry.chapter.title}`"
+                :disabled="busy"
+                @change="updateChapterSelection(entry.chapter.id, $event)"
+              />
+              <span class="chapter-order">{{ String(entry.index + 1).padStart(2, '0') }}</span>
+              <span class="chapter-detail">
+                <span class="chapter-title">{{ entry.chapter.title }}</span>
+                <span class="chapter-url">{{ entry.chapter.url }}</span>
+                <span v-if="entry.chapter.archiveStatus" class="chapter-archive-status">
+                  {{ entry.chapter.archiveStatus }} archive coverage
+                  <template v-if="entry.chapter.chapterNumber !== null && entry.chapter.chapterNumber !== undefined"> · chapter {{ entry.chapter.chapterNumber }}</template>
+                  <template v-if="entry.chapter.archiveGap"> · unresolved earlier gap</template>
+                  <template v-if="entry.chapter.archiveSources?.length"> · {{ entry.chapter.archiveSources.join(', ') }}</template>
+                </span>
+                <span v-else-if="entry.chapter.recommended === false" class="chapter-archive-status">Not recommended</span>
               </span>
-              <span v-else-if="chapter.recommended === false" class="chapter-archive-status">Not recommended</span>
-            </span>
-          </label>
-        </div>
+            </label>
+          </template>
+        </VirtualScroller>
       </section>
 
       <section class="card output-card" aria-labelledby="output-heading">

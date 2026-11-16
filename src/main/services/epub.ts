@@ -339,7 +339,9 @@ export async function buildEpubBuffer(
       packagedImages.coverHref
     )
   )
-  for (const image of packagedImages.images) zip.file(image.href, image.data)
+  for (const image of packagedImages.images) {
+    zip.file(image.href, image.data, { compression: 'STORE' })
+  }
 
   chapters.forEach((chapter, index) => {
     const filename = `text/chapter-${String(index + 1).padStart(4, '0')}.xhtml`

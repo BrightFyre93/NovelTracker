@@ -146,6 +146,27 @@ export type DiscoveryQueueItemSummary = Omit<
   failedChapterCount: number
 }
 
+export interface DiscoveryQueueSnapshot {
+  revision: number
+  items: DiscoveryQueueItemSummary[]
+}
+
+export interface DiscoveryQueueUpdate {
+  revision: number
+  upserted: DiscoveryQueueItemSummary[]
+  removedIds: string[]
+  order: string[]
+}
+
+export interface ChapterSelectionRange {
+  start: number
+  end: number
+}
+
+export type ChapterSelectionUpdate =
+  | { mode: 'ids'; ids: string[] }
+  | { mode: 'ranges'; ranges: ChapterSelectionRange[] }
+
 export interface DiscoveryQueueInput {
   title: string
   author: string
