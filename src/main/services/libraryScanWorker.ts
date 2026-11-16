@@ -1,7 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads'
 import type { LibraryProgress } from '../../shared/contracts'
 import { OperationCancelledError, toMessage } from '../../shared/errors'
-import { readLibraryIndex, writeLibraryIndex } from './localStore'
+import { createJsonLibraryIndexRepository } from './library/libraryIndexRepository'
 import { scanLibrary } from './libraryScanner'
 import type { WorkerMessage } from './workerRunner'
 
@@ -23,6 +23,9 @@ function getWorkerPort(): NonNullable<typeof parentPort> {
 
 const port = getWorkerPort()
 const input = workerData as LibraryScanWorkerInput
+const libraryIndexRepository = createJsonLibraryIndexRepository(
+  () => input.dataDirectory
+)
 const controller = new AbortController()
 port.on('message', (message: { type?: string }) => {
   if (message?.type === 'cancel') controller.abort()
@@ -31,7 +34,7 @@ port.on('message', (message: { type?: string }) => {
 async function run(): Promise<void> {
   const previousIndex = input.forceRebuild
     ? null
-    : await readLibraryIndex(input.dataDirectory)
+    : await libraryIndexRepository.read()
   const index = await scanLibrary(
     input.libraryRoot,
     previousIndex,
@@ -60,8 +63,7 @@ async function run(): Promise<void> {
       message: 'Saving library index…'
     }
   } satisfies LibraryScanWorkerMessage)
-  await writeLibraryIndex(
-    input.dataDirectory,
+  await libraryIndexRepository.write(
     index,
     input.forceRebuild ? undefined : previousIndex
   )

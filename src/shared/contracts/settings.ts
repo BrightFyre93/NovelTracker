@@ -14,6 +14,22 @@ export interface AppSettings {
   appTheme: 'light' | 'dark'
 }
 
+export type SettingsUpdatePatch = Partial<
+  Pick<
+    AppSettings,
+    | 'scanOldFolder'
+    | 'scanOldCompletedFolder'
+    | 'maxSimultaneousDownloads'
+    | 'maxSimultaneousDiscoveries'
+    | 'maxSimultaneousChaptersPerNovel'
+    | 'domainRequestDelays'
+    | 'discoveryFreshnessHours'
+    | 'siteExtractionPreferences'
+    | 'epubCss'
+    | 'appTheme'
+  >
+>
+
 export type SiteExtractionMode = 'automatic' | 'generic-html'
 
 export interface SiteExtractionPreference {

@@ -1,15 +1,15 @@
 import type { Result } from './common'
-import type { DiscoveryResult, GenerateEpubInput } from './epub'
+import type { DiscoveryResult } from './epub'
 import type {
   AppSettings,
-  SiteExtractionPreference,
-  DomainRequestDelayPreference,
+  SettingsUpdatePatch,
   BrowserSessionInfo
 } from './settings'
 import type {
   DownloadHistoryEntry,
   TrackerNovel,
   QueuedEpubJob,
+  QueueEpubOverrides,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
   DiscoveryQueueSnapshot,
@@ -40,9 +40,7 @@ export interface NovelTrackerApi {
   clearBrowserSession(): Promise<Result<void>>
   chooseOutputDirectory(): Promise<string | null>
   getSettings(): Promise<AppSettings>
-  updateEpubCss(css: string): Promise<Result<AppSettings>>
-  updateAppTheme(theme: AppSettings['appTheme']): Promise<Result<AppSettings>>
-  updateDiscoveryFreshnessHours(hours: number): Promise<Result<AppSettings>>
+  updateSettings(patch: SettingsUpdatePatch): Promise<Result<AppSettings>>
   chooseLibraryRoot(): Promise<string | null>
   chooseTrackerCsv(): Promise<string | null>
   getTrackerNovels(): Promise<Result<TrackerNovel[]>>
@@ -62,9 +60,9 @@ export interface NovelTrackerApi {
   retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
   refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
   acceptQueueRecommendations(id: string): Promise<Result<void>>
-  enqueueEpub(
-    input: GenerateEpubInput,
-    queueItemId?: string
+  enqueueEpubFromSnapshot(
+    queueItemId: string,
+    overrides: QueueEpubOverrides
   ): Promise<Result<QueuedEpubJob>>
   retryEpub(id: string): Promise<Result<void>>
   recoverEpubQueueItem(id: string): Promise<Result<void>>
@@ -82,25 +80,6 @@ export interface NovelTrackerApi {
     id: string,
     selection: ChapterSelectionUpdate
   ): Promise<Result<void>>
-  updateDownloadConcurrency(
-    maxSimultaneousDownloads: number
-  ): Promise<Result<AppSettings>>
-  updateDiscoveryConcurrency(
-    maxSimultaneousDiscoveries: number
-  ): Promise<Result<AppSettings>>
-  updateChapterConcurrency(
-    maxSimultaneousChaptersPerNovel: number
-  ): Promise<Result<AppSettings>>
-  updateDomainRequestDelays(
-    preferences: DomainRequestDelayPreference[]
-  ): Promise<Result<AppSettings>>
-  updateSiteExtractionPreferences(
-    preferences: SiteExtractionPreference[]
-  ): Promise<Result<AppSettings>>
-  updateLibraryScanOptions(
-    scanOldFolder: boolean,
-    scanOldCompletedFolder: boolean
-  ): Promise<Result<AppSettings>>
   repackageEpub(id: string): Promise<Result<void>>
   saveAvailableChaptersEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(

@@ -15,6 +15,7 @@ export function createQueueItem(input: NewQueueItem): DiscoveryQueueItem {
 
   return {
     id: input.id ?? randomUUID(),
+    sequence: input.sequence ?? 0,
     title: input.title,
     author: input.author,
     description: input.description ?? '',
@@ -49,6 +50,7 @@ export function createQueueItem(input: NewQueueItem): DiscoveryQueueItem {
       ? {}
       : { saveAvailableChaptersOnly: input.saveAvailableChaptersOnly }),
     downloadOptions: input.downloadOptions ?? null,
+    downloadStartedAt: input.downloadStartedAt ?? '',
     queuedAt: input.queuedAt ?? '',
     completedChapterUrls: input.completedChapterUrls ?? [],
     failedChapters: input.failedChapters ?? [],
@@ -112,6 +114,20 @@ export function copyQueueItemSummary(
   return {
     ...copyQueueItemFields(item, 20),
     failedChapterCount: item.failedChapters.length
+  }
+}
+
+export function updateQueueChapterSummary(item: DiscoveryQueueItem): void {
+  item.chapterSummary = {
+    total: item.chapters.length,
+    selected: item.chapters.filter((chapter) => chapter.selected).length,
+    recommended: item.chapters.filter((chapter) => chapter.recommended).length,
+    hasUncertainArchiveChapters: item.chapters.some(
+      (chapter) =>
+        chapter.archiveStatus === 'uncertain' ||
+        chapter.archiveStatus === 'probable'
+    ),
+    latestTitle: item.chapters[item.chapters.length - 1]?.title ?? ''
   }
 }
 

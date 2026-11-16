@@ -3,14 +3,11 @@ import type {
   DiscoveryQueueInput,
   DiscoveryQueueUpdate,
   ChapterSelectionUpdate,
-  DomainRequestDelayPreference,
   DownloadHistoryEntry,
   EpubMergeProgress,
-  GenerateEpubInput,
   LibraryFileCorrection,
   LibraryOperation,
   LibraryProgress,
-  SiteExtractionPreference,
   NovelTrackerApi
 } from '../shared/contracts'
 import type {
@@ -51,29 +48,7 @@ const api: NovelTrackerApi = {
   clearBrowserSession: () => invokeIpc('browser:clear-session'),
   chooseOutputDirectory: () => invokeIpc('dialog:choose-output-directory'),
   getSettings: () => invokeIpc('settings:get'),
-  updateEpubCss: (css) => invokeIpc('settings:epub-css', css),
-  updateAppTheme: (theme) => invokeIpc('settings:app-theme', theme),
-  updateDiscoveryFreshnessHours: (hours) =>
-    invokeIpc('settings:discovery-freshness', hours),
-  updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
-    invokeIpc('settings:download-concurrency', maxSimultaneousDownloads),
-  updateDiscoveryConcurrency: (maxSimultaneousDiscoveries: number) =>
-    invokeIpc('settings:discovery-concurrency', maxSimultaneousDiscoveries),
-  updateChapterConcurrency: (maxSimultaneousChaptersPerNovel: number) =>
-    invokeIpc('settings:chapter-concurrency', maxSimultaneousChaptersPerNovel),
-  updateDomainRequestDelays: (preferences: DomainRequestDelayPreference[]) =>
-    invokeIpc('settings:domain-request-delays', preferences),
-  updateSiteExtractionPreferences: (preferences: SiteExtractionPreference[]) =>
-    invokeIpc('settings:site-extraction-preferences', preferences),
-  updateLibraryScanOptions: (
-    scanOldFolder: boolean,
-    scanOldCompletedFolder: boolean
-  ) =>
-    invokeIpc(
-      'settings:library-scan-options',
-      scanOldFolder,
-      scanOldCompletedFolder
-    ),
+  updateSettings: (patch) => invokeIpc('settings:update', patch),
   chooseLibraryRoot: () => invokeIpc('dialog:choose-library-root'),
   chooseTrackerCsv: () => invokeIpc('dialog:choose-tracker-csv'),
   getTrackerNovels: () => invokeIpc('tracker:list'),
@@ -96,8 +71,8 @@ const api: NovelTrackerApi = {
     invokeIpc('discovery-queue:refresh', id),
   acceptQueueRecommendations: (id: string) =>
     invokeIpc('discovery-queue:accept-recommendations', id),
-  enqueueEpub: (input: GenerateEpubInput, queueItemId?: string) =>
-    invokeIpc('download-queue:enqueue', input, queueItemId),
+  enqueueEpubFromSnapshot: (queueItemId, overrides) =>
+    invokeIpc('download-queue:enqueue-from-snapshot', queueItemId, overrides),
   retryEpub: (id: string) => invokeIpc('download-queue:retry', id),
   recoverEpubQueueItem: (id: string) => invokeIpc('download-queue:recover', id),
   repackageEpub: (id: string) => invokeIpc('download-queue:repackage', id),

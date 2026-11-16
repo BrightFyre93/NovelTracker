@@ -406,7 +406,7 @@ function copyDownloadHistory(
   }))
 }
 
-export async function readDownloadHistory(
+export async function readArchivedDownloadHistory(
   dataDirectory: string
 ): Promise<DownloadHistoryEntry[]> {
   const path = join(dataDirectory, 'download-history.json')
@@ -680,50 +680,25 @@ export async function removeChapterArtifacts(dataDirectory: string, queueItemId:
   await rm(join(dataDirectory, 'download-artifacts', queueItemId), { recursive: true, force: true })
 }
 
-export async function saveDownloadHistoryEntry(
+export async function archiveDownloadJobs(
   dataDirectory: string,
-  entry: DownloadHistoryEntry,
-  queueReferencedIds: readonly string[]
+  entries: readonly DownloadHistoryEntry[]
 ): Promise<DownloadHistoryEntry[]> {
   return serializeDownloadHistoryWrite(async () => {
-    const history = await readDownloadHistory(dataDirectory)
-    const existingIndex = history.findIndex((item) => item.id === entry.id)
-    if (existingIndex >= 0) history[existingIndex] = entry
-    else history.push(entry)
+    const history = await readArchivedDownloadHistory(dataDirectory)
+    for (const entry of entries) {
+      const existingIndex = history.findIndex((item) => item.id === entry.id)
+      if (existingIndex >= 0) history[existingIndex] = entry
+      else history.push(entry)
+    }
     history.sort((left, right) =>
       (right.startedAt || right.updatedAt).localeCompare(left.startedAt || left.updatedAt)
     )
-    const referencedHistoryIds = new Set(
-      queueReferencedIds.filter((id) => id.length > 0)
-    )
-    const recentHistoryIds = new Set(history.slice(0, 50).map((item) => item.id))
-    const retained = history.filter(
-      (item) => referencedHistoryIds.has(item.id) || recentHistoryIds.has(item.id)
-    )
+    const retained = history.slice(0, 50)
     await writeJson(join(dataDirectory, 'download-history.json'), retained)
     downloadHistoryCachePath = join(dataDirectory, 'download-history.json')
     downloadHistoryCache = copyDownloadHistory(retained)
     return copyDownloadHistory(retained)
-  })
-}
-
-export async function markInterruptedDownloadJobs(dataDirectory: string): Promise<void> {
-  await serializeDownloadHistoryWrite(async () => {
-    const history = await readDownloadHistory(dataDirectory)
-    let changed = false
-    for (const entry of history) {
-      if (entry.status === 'running') {
-        entry.status = 'interrupted'
-        entry.error = 'The app closed before this job finished.'
-        entry.updatedAt = new Date().toISOString()
-        changed = true
-      }
-    }
-    if (changed) {
-      await writeJson(join(dataDirectory, 'download-history.json'), history)
-      downloadHistoryCachePath = join(dataDirectory, 'download-history.json')
-      downloadHistoryCache = copyDownloadHistory(history)
-    }
   })
 }
 

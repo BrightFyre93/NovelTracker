@@ -8,11 +8,10 @@ import type {
   DiscoveryQueueUpdate,
   ChapterSelectionUpdate,
   AppSettings,
+  SettingsUpdatePatch,
   DownloadHistoryEntry,
-  DomainRequestDelayPreference,
   EpubMergeProgress,
   EpubRepairResponse,
-  GenerateEpubInput,
   LibraryEpubMergeResponse,
   LibraryFileCorrection,
   LibraryFileCorrectionResult,
@@ -23,8 +22,8 @@ import type {
   LibraryOperation,
   LibraryProgress,
   QueuedEpubJob,
+  QueueEpubOverrides,
   Result,
-  SiteExtractionPreference,
   TrackerNovel
 } from './contracts'
 
@@ -115,8 +114,8 @@ export interface IpcMap {
     args: []
     result: DownloadHistoryEntry[]
   }
-  'download-queue:enqueue': {
-    args: [input: GenerateEpubInput, queueItemId?: string]
+  'download-queue:enqueue-from-snapshot': {
+    args: [queueItemId: string, overrides: QueueEpubOverrides]
     result: Result<QueuedEpubJob>
   }
   'download-queue:retry': {
@@ -167,40 +166,8 @@ export interface IpcMap {
     args: []
     result: AppSettings
   }
-  'settings:epub-css': {
-    args: [css: string]
-    result: Result<AppSettings>
-  }
-  'settings:app-theme': {
-    args: [theme: AppSettings['appTheme']]
-    result: Result<AppSettings>
-  }
-  'settings:discovery-freshness': {
-    args: [hours: number]
-    result: Result<AppSettings>
-  }
-  'settings:download-concurrency': {
-    args: [maxSimultaneousDownloads: number]
-    result: Result<AppSettings>
-  }
-  'settings:discovery-concurrency': {
-    args: [maxSimultaneousDiscoveries: number]
-    result: Result<AppSettings>
-  }
-  'settings:chapter-concurrency': {
-    args: [maxSimultaneousChaptersPerNovel: number]
-    result: Result<AppSettings>
-  }
-  'settings:domain-request-delays': {
-    args: [preferences: DomainRequestDelayPreference[]]
-    result: Result<AppSettings>
-  }
-  'settings:site-extraction-preferences': {
-    args: [preferences: SiteExtractionPreference[]]
-    result: Result<AppSettings>
-  }
-  'settings:library-scan-options': {
-    args: [scanOldFolder: boolean, scanOldCompletedFolder: boolean]
+  'settings:update': {
+    args: [patch: SettingsUpdatePatch]
     result: Result<AppSettings>
   }
   'discovery-queue:list': {

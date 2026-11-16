@@ -11,6 +11,7 @@ import type {
   ChapterSelectionUpdate,
   DownloadHistoryEntry,
   LibraryOperation,
+  QueueEpubOverrides,
   TrackerNovel
 } from '../../shared/contracts'
 import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
@@ -500,7 +501,11 @@ async function createEpub(): Promise<void> {
   store.busy = true
   const queuedTitle = store.title
   try {
-    const result = await window.novelTracker.enqueueEpub({
+    if (!store.queueItemId) {
+      store.error = 'Select a saved discovery before queueing an EPUB.'
+      return
+    }
+    const overrides: QueueEpubOverrides = {
       title: store.title,
       author: store.author,
       description: store.description,
@@ -511,13 +516,12 @@ async function createEpub(): Promise<void> {
       novelStatus: store.novelStatus,
       language: store.language,
       filename: store.filename.trim() || filenamePreview.value,
-      sourceUrl: store.sourceUrl,
-      outputDirectory: store.outputDirectory,
-      chapters: store.chapters
-        .filter((chapter) => store.chapterSelection.has(chapter.id))
-        .map(({ id, title, url }) => ({ id, title, url })),
-      trackerRow: store.trackerRow ? { ...store.trackerRow } : undefined
-    }, store.queueItemId || undefined)
+      outputDirectory: store.outputDirectory
+    }
+    const result = await window.novelTracker.enqueueEpubFromSnapshot(
+      store.queueItemId,
+      overrides
+    )
     if (!result.ok) {
       store.error = result.error
       return

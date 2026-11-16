@@ -179,7 +179,9 @@ async function saveFreshnessHours(): Promise<void> {
   success.value = ''
   savingFreshness.value = true
   try {
-    const result = await window.novelTracker.updateDiscoveryFreshnessHours(freshnessHoursDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      discoveryFreshnessHours: freshnessHoursDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -199,7 +201,9 @@ async function saveConcurrency(): Promise<void> {
   success.value = ''
   savingConcurrency.value = true
   try {
-    const result = await window.novelTracker.updateDownloadConcurrency(concurrencyDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      maxSimultaneousDownloads: concurrencyDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -219,7 +223,9 @@ async function saveChapterConcurrency(): Promise<void> {
   success.value = ''
   savingChapterConcurrency.value = true
   try {
-    const result = await window.novelTracker.updateChapterConcurrency(chapterConcurrencyDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      maxSimultaneousChaptersPerNovel: chapterConcurrencyDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -259,7 +265,9 @@ async function saveDomainRequestDelays(): Promise<void> {
   success.value = ''
   savingDomainRequestDelays.value = true
   try {
-    const result = await window.novelTracker.updateDomainRequestDelays(domainRequestDelaysDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      domainRequestDelays: domainRequestDelaysDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -279,7 +287,9 @@ async function saveDiscoveryConcurrency(): Promise<void> {
   success.value = ''
   savingDiscoveryConcurrency.value = true
   try {
-    const result = await window.novelTracker.updateDiscoveryConcurrency(discoveryConcurrencyDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      maxSimultaneousDiscoveries: discoveryConcurrencyDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -319,7 +329,9 @@ async function saveSiteExtractionPreferences(): Promise<void> {
   success.value = ''
   savingSiteExtractionPreferences.value = true
   try {
-    const result = await window.novelTracker.updateSiteExtractionPreferences(siteExtractionPreferencesDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      siteExtractionPreferences: siteExtractionPreferencesDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -339,10 +351,10 @@ async function saveLibraryScanOptions(): Promise<void> {
   success.value = ''
   savingLibraryScanOptions.value = true
   try {
-    const result = await window.novelTracker.updateLibraryScanOptions(
-      scanOldFolderDraft.value,
-      scanOldCompletedFolderDraft.value
-    )
+    const result = await window.novelTracker.updateSettings({
+      scanOldFolder: scanOldFolderDraft.value,
+      scanOldCompletedFolder: scanOldCompletedFolderDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -363,7 +375,9 @@ async function saveTheme(): Promise<void> {
   success.value = ''
   savingTheme.value = true
   try {
-    const result = await window.novelTracker.updateAppTheme(themeDraft.value)
+    const result = await window.novelTracker.updateSettings({
+      appTheme: themeDraft.value
+    })
     if (!result.ok) {
       error.value = result.error
       return
@@ -384,7 +398,7 @@ async function saveEpubCss(css = epubCssDraft.value): Promise<void> {
   success.value = ''
   savingEpubCss.value = true
   try {
-    const result = await window.novelTracker.updateEpubCss(css)
+    const result = await window.novelTracker.updateSettings({ epubCss: css })
     if (!result.ok) {
       error.value = result.error
       return

@@ -52,6 +52,7 @@ export type DiscoveryQueueStatus =
   | 'paused'
   | 'completed'
   | 'partially-completed'
+  | 'packaging-failed'
   | 'failed'
   | 'cancelled'
 
@@ -88,6 +89,20 @@ export interface QueuedEpubJob {
   historyId: string
 }
 
+export interface QueueEpubOverrides {
+  title?: string
+  author?: string
+  description?: string
+  coverUrl?: string
+  alternativeNames?: string[]
+  genres?: string[]
+  source?: string
+  novelStatus?: string
+  language?: string
+  filename?: string
+  outputDirectory: string
+}
+
 export interface FailedQueueChapter {
   url: string
   title: string
@@ -104,6 +119,7 @@ export interface QueueChapterSummary {
 
 export interface DiscoveryQueueItem {
   id: string
+  sequence: number
   title: string
   author: string
   description: string
@@ -127,6 +143,7 @@ export interface DiscoveryQueueItem {
   repackageOnly: boolean
   saveAvailableChaptersOnly?: boolean
   downloadOptions: QueueDownloadOptions | null
+  downloadStartedAt: string
   queuedAt: string
   completedChapterUrls: string[]
   failedChapters: FailedQueueChapter[]

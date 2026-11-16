@@ -15,7 +15,7 @@ import type {
   DiscoveryQueueStatus,
   DiscoveryQueueUpdate,
   DiscoveryQueueSnapshot,
-  GenerateEpubInput,
+  QueueEpubOverrides,
   TrackerNovel
 } from '../../../shared/contracts'
 import { toMessage } from '../../../shared/errors'
@@ -46,6 +46,7 @@ const queueStatusOptions: QueueStatusOption[] = [
   { value: 'paused', label: 'Paused' },
   { value: 'completed', label: 'Completed / downloaded' },
   { value: 'partially-completed', label: 'Partially completed' },
+  { value: 'packaging-failed', label: 'Packaging failed — retry packaging' },
   { value: 'failed', label: 'Failed' },
   { value: 'cancelled', label: 'Cancelled' }
 ]
@@ -266,7 +267,7 @@ watch([selectedQueueStatuses, collapsedQueueStatuses], () => {
 }, { deep: true, flush: 'sync' })
 
 function compareQueuedItems(left: DiscoveryQueueItemSummary, right: DiscoveryQueueItemSummary): number {
-  return left.queuedAt.localeCompare(right.queuedAt) || left.id.localeCompare(right.id)
+  return left.sequence - right.sequence || left.id.localeCompare(right.id)
 }
 
 function compareQueueItemsByTitle(left: DiscoveryQueueItemSummary, right: DiscoveryQueueItemSummary): number {
@@ -759,40 +760,28 @@ async function saveAvailableChapters(item: DiscoveryQueueItemSummary): Promise<v
   }
 }
 
-function selectedChapters(item: DiscoveryQueueItem) {
-  return item.chapters
-    .filter((chapter) => chapter.selected)
-    .map(({ id, title, url }) => ({ id, title, url }))
-}
-
 async function queueRecommendedEpub(item: DiscoveryQueueItemSummary): Promise<string | null> {
   if (item.status === 'needs-review') {
     const accepted = await window.novelTracker.acceptQueueRecommendations(item.id)
     if (!accepted.ok) return `${item.title}: ${accepted.error}`
   }
 
-  const detail = await window.novelTracker.getDiscoveryQueueItem(item.id)
-  if (!detail.ok) return `${item.title}: ${detail.error}`
-  const currentItem = detail.value
-  const chapters = selectedChapters(currentItem)
-  if (chapters.length === 0) return `${item.title}: select at least one chapter before queueing.`
-
-  const input: GenerateEpubInput = {
-    title: currentItem.title,
-    author: currentItem.author,
-    description: currentItem.description,
-    coverUrl: currentItem.coverUrl,
-    alternativeNames: [...currentItem.alternativeNames],
-    genres: [...currentItem.genres],
-    source: currentItem.source,
-    novelStatus: currentItem.novelStatus,
+  const overrides: QueueEpubOverrides = {
+    title: item.title,
+    author: item.author,
+    description: item.description,
+    coverUrl: item.coverUrl,
+    alternativeNames: [...item.alternativeNames],
+    genres: [...item.genres],
+    source: item.source,
+    novelStatus: item.novelStatus,
     language: 'en',
-    sourceUrl: currentItem.sourceUrl,
-    outputDirectory: outputDirectory.value,
-    chapters,
-    trackerRow: currentItem.trackerRow ? { ...currentItem.trackerRow } : undefined
+    outputDirectory: outputDirectory.value
   }
-  const result = await window.novelTracker.enqueueEpub(input, currentItem.id)
+  const result = await window.novelTracker.enqueueEpubFromSnapshot(
+    item.id,
+    overrides
+  )
   return result.ok ? null : `${item.title}: ${result.error}`
 }
 
@@ -1462,6 +1451,17 @@ async function clearCompletedQueueItems(): Promise<void> {
             :loading="cancelingDiscoveryId === item.id"
             :disabled="Boolean(cancelingDiscoveryId) || Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="cancelQueueDiscovery(item)"
+          />
+          <Button
+            v-if="item.status === 'packaging-failed'"
+            label="Retry packaging"
+            icon="pi pi-box"
+            size="small"
+            severity="warning"
+            outlined
+            :loading="downloadActionId === item.id"
+            :disabled="Boolean(downloadActionId)"
+            @click="repackageOffline(item)"
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
