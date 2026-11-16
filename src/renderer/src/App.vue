@@ -13,10 +13,12 @@ import type {
   TrackerNovel
 } from '../../shared/contracts'
 import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
+import { toMessage } from '../../shared/errors'
 import { MAX_EPUB_FILENAME_BASENAME_LENGTH, suggestEpubFilename } from '../../shared/epubFilename'
 import ConfigurationView from './components/ConfigurationView.vue'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
+import { useTrackerNovelSearch } from './composables/useTrackerNovelSearch'
 import { useDownloadStore } from './stores/download'
 import { useLibraryStore } from './stores/library'
 
@@ -38,7 +40,9 @@ const separateJob = ref(false)
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
-const trackerSearch = ref('')
+const { trackerSearch, filteredTrackerNovels } = useTrackerNovelSearch(
+  () => trackerNovels.value
+)
 const trackerSources = ref<Record<string, string>>({})
 const trackerCsvPath = ref('')
 const chapterSearch = ref('')
@@ -80,17 +84,6 @@ const filenamePreview = computed(() => {
     .replace(/[. ]+$/g, '')
   return `${prefix}${suffix}.epub`
 })
-const filteredTrackerNovels = computed(() => {
-  const query = trackerSearch.value.trim().toLocaleLowerCase()
-  if (!query) return trackerNovels.value.slice(0, 100)
-  return trackerNovels.value
-    .filter((novel) =>
-      `${novel.title} ${novel.siteTitle} ${novel.author} ${novel.alternativeNames}`
-        .toLocaleLowerCase()
-        .includes(query)
-    )
-    .slice(0, 100)
-})
 const filteredChapters = computed(() => {
   const query = chapterSearch.value.trim().toLocaleLowerCase()
   return chapters.value
@@ -122,20 +115,8 @@ watch(url, (value) => {
     browserAssistUrl.value = ''
   }
   if (sourceUrl.value && value.trim() !== sourceUrl.value) {
-    store.queueItemId = ''
-    separateJob.value = false
-    sourceUrl.value = ''
-    chapters.value = []
-    title.value = ''
-    author.value = ''
-    description.value = ''
-    coverUrl.value = ''
-    alternativeNames.value = []
-    genres.value = []
-    source.value = ''
-    novelStatus.value = ''
-    filename.value = ''
-    parserName.value = ''
+    resetDiscoverySourceState()
+    resetDiscoveryMetadata()
     store.success = ''
   }
   if (store.trackerRow && value.trim() !== store.trackerSourceUrl) {
@@ -154,13 +135,13 @@ onMounted(() => {
   void window.novelTracker.getLibraryOperations().then((operations) => {
     libraryOperations.value = operations
   }).catch((error: unknown) => {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   })
   removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate(() => {
     void window.novelTracker.getDownloadHistory().then((history) => {
       downloadHistory.value = history
     }).catch((reason: unknown) => {
-      store.error = reason instanceof Error ? reason.message : String(reason)
+      store.error = toMessage(reason)
     })
   })
   void window.novelTracker.getSettings().then((settings) => {
@@ -168,12 +149,12 @@ onMounted(() => {
     trackerCsvPath.value = settings.trackerCsvPath
     applyAppTheme(settings.appTheme)
   }).catch((error: unknown) => {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   })
   void window.novelTracker.getDownloadHistory().then((history) => {
     downloadHistory.value = history
   }).catch((error: unknown) => {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   })
 })
 
@@ -203,7 +184,7 @@ async function discover(): Promise<void> {
     chapterSearch.value = ''
     store.applyDiscovery(result.value)
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   } finally {
     store.busy = false
   }
@@ -224,7 +205,7 @@ async function openBrowserForVerification(): Promise<void> {
     browserPageTitle.value = result.value.title
     browserAssistUrl.value = store.url.trim()
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   } finally {
     browserBusy.value = false
   }
@@ -268,7 +249,7 @@ async function discoverWithBrowser(): Promise<void> {
     })
     store.success = 'Browser-assisted discovery completed. Browser cookies are used only for browser-assisted requests.'
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   } finally {
     store.busy = false
     browserBusy.value = false
@@ -280,7 +261,7 @@ async function cancelBrowserDiscovery(): Promise<void> {
   try {
     await window.novelTracker.cancelBrowserDiscovery()
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   }
 }
 
@@ -300,7 +281,7 @@ async function clearBrowserData(): Promise<void> {
     browserAssistUrl.value = ''
     store.success = 'Saved browser session data was cleared.'
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   } finally {
     browserBusy.value = false
   }
@@ -313,7 +294,7 @@ async function cancelLibraryScan(): Promise<void> {
   try {
     await window.novelTracker.cancelLibraryScan()
   } catch (error) {
-    libraryState.cancelError = error instanceof Error ? error.message : String(error)
+    libraryState.cancelError = toMessage(error)
     libraryState.cancelling = false
   }
 }
@@ -337,7 +318,7 @@ async function openTrackerPicker(): Promise<void> {
       ])
     )
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   } finally {
     trackerLoading.value = false
   }
@@ -359,7 +340,7 @@ async function openCreateView(): Promise<void> {
     applyAppTheme(settings.appTheme)
   } catch (error) {
     activeView.value = 'create'
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   }
 }
 
@@ -372,25 +353,33 @@ function resetDiscoveryForm(): void {
     clearTimeout(queueSelectionTimer)
     queueSelectionTimer = undefined
   }
+  resetDiscoverySourceState()
+  resetDiscoveryMetadata()
+  store.url = ''
+  store.trackerRow = null
+  store.trackerSourceUrl = ''
+  chapterSearch.value = ''
+  trackerVisible.value = false
+}
+
+function resetDiscoverySourceState(): void {
   store.queueItemId = ''
   separateJob.value = false
   store.sourceUrl = ''
-  store.url = ''
-  store.title = ''
-  store.author = ''
-  store.description = ''
-  store.coverUrl = ''
-  store.alternativeNames = []
-  store.genres = []
-  store.source = ''
-  store.novelStatus = ''
-  store.filename = ''
-  store.trackerRow = null
-  store.trackerSourceUrl = ''
-  store.parserName = ''
   store.chapters = []
-  chapterSearch.value = ''
-  trackerVisible.value = false
+  store.parserName = ''
+  store.filename = ''
+}
+
+function resetDiscoveryMetadata(): void {
+  title.value = ''
+  author.value = ''
+  description.value = ''
+  coverUrl.value = ''
+  alternativeNames.value = []
+  genres.value = []
+  source.value = ''
+  novelStatus.value = ''
 }
 
 function useTrackerNovel(novel: TrackerNovel): void {
@@ -401,12 +390,7 @@ function useTrackerNovel(novel: TrackerNovel): void {
     return
   }
 
-  store.queueItemId = ''
-  separateJob.value = false
-  store.sourceUrl = ''
-  store.chapters = []
-  store.parserName = ''
-  store.filename = ''
+  resetDiscoverySourceState()
   store.title = novel.siteTitle || novel.title
   store.author = novel.author
   store.url = sourceUrl
@@ -423,8 +407,7 @@ function useTrackerNovel(novel: TrackerNovel): void {
 }
 
 function openQueueItem(item: DiscoveryQueueItem): void {
-  chapterSearch.value = ''
-  store.queueItemId = ''
+  resetDiscoveryForm()
   store.url = item.sourceUrl
   store.sourceUrl = item.sourceUrl
   store.title = item.title
@@ -457,7 +440,7 @@ async function persistQueueSelection(
     if (!result.ok) throw new Error(result.error)
     return true
   } catch (reason) {
-    store.error = reason instanceof Error ? reason.message : String(reason)
+    store.error = toMessage(reason)
     return false
   }
 }
@@ -512,12 +495,12 @@ async function createEpub(): Promise<void> {
     store.success = `EPUB job queued for ${queuedTitle}. Track progress and controls in the Queue.`
     activeView.value = 'queue'
   } catch (error) {
-    store.error = error instanceof Error ? error.message : String(error)
+    store.error = toMessage(error)
   } finally {
     try {
       downloadHistory.value = await window.novelTracker.getDownloadHistory()
     } catch (error) {
-      if (!store.error) store.error = error instanceof Error ? error.message : String(error)
+      if (!store.error) store.error = toMessage(error)
     }
     store.busy = false
   }

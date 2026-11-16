@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises'
 import { extname, posix } from 'node:path'
 import { load } from 'cheerio'
 import JSZip from 'jszip'
-import { XMLParser } from 'fast-xml-parser'
 import type {
   ChapterContent,
   ChapterContentBlock,
@@ -11,6 +10,17 @@ import type {
   EpubMergeProgress,
   EpubNovelMetadata
 } from '../../shared/contracts'
+import { parseChapterNumber } from '../../shared/chapterNumber'
+import { NoReadableContentError } from '../../shared/errors'
+import {
+  createXmlParser,
+  entries,
+  object,
+  readEntry,
+  resolveArchivePath as resolveEpubArchivePath,
+  text,
+  type XmlObject
+} from './epubArchiveUtils'
 import {
   MAX_EPUB_INPUT_BYTES,
   MAX_EPUB_MERGE_ENTRY_BYTES,
@@ -23,11 +33,7 @@ import {
 } from '../../shared/constants'
 import { writeEpub } from './epub'
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  removeNSPrefix: true
-})
+const xmlParser = createXmlParser()
 
 export interface EpubMergeSource {
   path: string
@@ -54,10 +60,6 @@ export interface EpubMergeResult {
   lastChapter: number | null
 }
 
-interface XmlObject {
-  [key: string]: unknown
-}
-
 interface ParsedChapter {
   content: ChapterContent
   number: number | null
@@ -70,60 +72,11 @@ interface ParsedEpub {
   metadata: EpubNovelMetadata
 }
 
-function object(value: unknown): XmlObject {
-  return typeof value === 'object' && value !== null ? value as XmlObject : {}
-}
-
-function entries(value: unknown): unknown[] {
-  if (value === undefined || value === null) return []
-  return Array.isArray(value) ? value : [value]
-}
-
-function text(value: unknown): string {
-  if (typeof value === 'string' || typeof value === 'number') return String(value).trim()
-  return typeof value === 'object' && value !== null ? text(object(value)['#text']) : ''
-}
-
 function resolveArchivePath(base: string, href: string): string | null {
-  const pathPart = href.split(/[?#]/, 1)[0]
-  if (!pathPart || pathPart.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(pathPart)) return null
-  let decoded: string
-  try {
-    decoded = decodeURIComponent(pathPart)
-  } catch {
-    throw new Error('An EPUB contains a malformed internal path.')
-  }
-  const path = posix.normalize(posix.join(posix.dirname(base), decoded.replace(/\\/g, '/')))
-  if (path === '..' || path.startsWith('../')) throw new Error('An EPUB contains an unsafe internal path.')
-  return path
-}
-
-async function readEntry(entry: JSZip.JSZipObject, limit: number): Promise<Buffer> {
-  const stream = entry.nodeStream('nodebuffer') as NodeJS.ReadableStream & {
-    destroy(error?: Error): void
-  }
-  return new Promise<Buffer>((resolveEntry, rejectEntry) => {
-    const chunks: Buffer[] = []
-    let length = 0
-    stream.on('data', (value: Buffer | Uint8Array) => {
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-      length += chunk.byteLength
-      if (length > limit) {
-        stream.destroy(new Error(`An EPUB resource exceeds the ${limit.toLocaleString()} byte safety limit.`))
-        return
-      }
-      chunks.push(chunk)
-    })
-    stream.once('error', rejectEntry)
-    stream.once('end', () => resolveEntry(Buffer.concat(chunks, length)))
+  return resolveEpubArchivePath(base, href, {
+    malformedPath: 'An EPUB contains a malformed internal path.',
+    unsafePath: 'An EPUB contains an unsafe internal path.'
   })
-}
-
-function parseChapterNumber(value: string): number | null {
-  const match =
-    value.match(/\b(?:chapter|ch\.?|episode|part)\s*[-:#]?\s*(\d+(?:\.\d+)?)/i) ??
-    value.match(/^\s*#?\s*(\d+(?:\.\d+)?)(?=\s|$|[:.-])/)
-  return match ? Number(match[1]) : null
 }
 
 function collectNcx(value: unknown, base: string, labels: Map<string, string>): void {
@@ -447,7 +400,11 @@ export async function mergeEpubFiles(
   }
 
   const merged = [...chaptersByIdentity.values()]
-  if (!primary || merged.length === 0) throw new Error('No readable chapter content was found in the selected EPUBs.')
+  if (!primary || merged.length === 0) {
+    throw new NoReadableContentError(
+      'No readable chapter content was found in the selected EPUBs.'
+    )
+  }
   if (merged.every((chapter) => chapter.number !== null)) {
     merged.sort((left, right) => (left.number ?? 0) - (right.number ?? 0))
   }

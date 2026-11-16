@@ -8,6 +8,7 @@ import type {
   SiteExtractionMode,
   SiteExtractionPreference
 } from '../../../shared/contracts'
+import { toMessage } from '../../../shared/errors'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   DEFAULT_DOMAIN_REQUEST_DELAY_MS,
@@ -130,7 +131,7 @@ onMounted(async () => {
     themeDraft.value = settings.value.appTheme
     epubCssDraft.value = settings.value.epubCss
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 })
 
@@ -143,7 +144,7 @@ async function chooseLibraryRoot(): Promise<void> {
     settings.value = await window.novelTracker.getSettings()
     success.value = 'Historical library root saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 
@@ -156,7 +157,7 @@ async function chooseTrackerCsv(): Promise<void> {
     settings.value = await window.novelTracker.getSettings()
     success.value = 'Tracker CSV saved. It will only be read by the app.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 
@@ -169,7 +170,7 @@ async function chooseOutputDirectory(): Promise<void> {
     settings.value = await window.novelTracker.getSettings()
     success.value = 'EPUB output folder saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 
@@ -187,7 +188,7 @@ async function saveFreshnessHours(): Promise<void> {
     freshnessHoursDraft.value = result.value.discoveryFreshnessHours
     success.value = 'Chapter-list refresh interval saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingFreshness.value = false
   }
@@ -207,7 +208,7 @@ async function saveConcurrency(): Promise<void> {
     concurrencyDraft.value = result.value.maxSimultaneousDownloads
     success.value = 'Download concurrency saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingConcurrency.value = false
   }
@@ -227,7 +228,7 @@ async function saveChapterConcurrency(): Promise<void> {
     chapterConcurrencyDraft.value = result.value.maxSimultaneousChaptersPerNovel
     success.value = 'Per-novel chapter concurrency saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingChapterConcurrency.value = false
   }
@@ -243,7 +244,7 @@ function addDomainRequestDelay(): void {
     ])
     domainPreferenceHostnameDraft.value = ''
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 
@@ -267,7 +268,7 @@ async function saveDomainRequestDelays(): Promise<void> {
     domainRequestDelaysDraft.value = result.value.domainRequestDelays.map((preference) => ({ ...preference }))
     success.value = 'Per-domain request delays saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingDomainRequestDelays.value = false
   }
@@ -287,7 +288,7 @@ async function saveDiscoveryConcurrency(): Promise<void> {
     discoveryConcurrencyDraft.value = result.value.maxSimultaneousDiscoveries
     success.value = 'Discovery concurrency saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingDiscoveryConcurrency.value = false
   }
@@ -303,7 +304,7 @@ function addSiteExtractionPreference(): void {
     ])
     sitePreferenceHostnameDraft.value = ''
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 
@@ -327,7 +328,7 @@ async function saveSiteExtractionPreferences(): Promise<void> {
     siteExtractionPreferencesDraft.value = result.value.siteExtractionPreferences.map((preference) => ({ ...preference }))
     success.value = 'Site extraction preferences saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingSiteExtractionPreferences.value = false
   }
@@ -351,7 +352,7 @@ async function saveLibraryScanOptions(): Promise<void> {
     scanOldCompletedFolderDraft.value = result.value.scanOldCompletedFolder
     success.value = 'Library scan options saved. Rescan the library to apply them.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingLibraryScanOptions.value = false
   }
@@ -372,7 +373,7 @@ async function saveTheme(): Promise<void> {
     emit('themeChanged', result.value.appTheme)
     success.value = 'App theme saved.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingTheme.value = false
   }
@@ -392,7 +393,7 @@ async function saveEpubCss(css = epubCssDraft.value): Promise<void> {
     epubCssDraft.value = result.value.epubCss
     success.value = 'EPUB stylesheet saved. Existing queued jobs keep their saved stylesheet.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     savingEpubCss.value = false
   }

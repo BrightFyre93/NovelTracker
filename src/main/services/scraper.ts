@@ -13,13 +13,22 @@ import type {
   SiteExtractionMode
 } from '../../shared/contracts'
 import {
+  HttpStatusError,
+  NoReadableContentError,
+  OperationCancelledError,
+  TransientNetworkError,
+  VerificationRequiredError,
+  isNodeError,
+  toMessage
+} from '../../shared/errors'
+import { getDomainRequestDelayMs } from '../../shared/domainRequestPreferences'
+import { normalizeHostname } from '../../shared/siteExtractionPreferences'
+import {
   APP_USER_AGENT,
   BLOCKED_PAGE_PATTERN,
   CHAPTER_LABEL_PATTERN,
   CHAPTER_URL_PATTERN,
   DEFAULT_HTTP_429_RETRY_DELAY_MS,
-  DEFAULT_DOMAIN_REQUEST_DELAY_MS,
-  DOMAIN_REQUEST_DELAYS_MS,
   EPUB_IMAGE_TYPES,
   HTTP_IMAGE_ACCEPT_HEADER,
   HTTP_MAX_RESPONSE_BYTES,
@@ -43,16 +52,6 @@ let domainRequestDelays = new Map<string, number>()
 
 export function setDomainRequestDelays(preferences: DomainRequestDelayPreference[]): void {
   domainRequestDelays = new Map(preferences.map(({ hostname, delayMs }) => [hostname, delayMs]))
-}
-
-export class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    readonly retryAfterMs: number | null
-  ) {
-    super(`The page returned HTTP ${status}.`)
-    this.name = 'HttpStatusError'
-  }
 }
 
 export function validateHttpUrl(value: unknown): string {
@@ -87,17 +86,14 @@ function releaseDomainRequest(hostname: string): void {
 
 function recordDomainRetryAfter(url: string, retryAfterMs: number | null): void {
   if (retryAfterMs === null) return
-  const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
+  const hostname = normalizeHostname(new URL(url).hostname)
   const retryAt = Date.now() + retryAfterMs
   domainNextRequestAt.set(hostname, Math.max(domainNextRequestAt.get(hostname) ?? 0, retryAt))
 }
 
 async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() => void> {
-  const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
-  const requestDelayMs =
-    domainRequestDelays.get(hostname) ??
-    DOMAIN_REQUEST_DELAYS_MS[hostname] ??
-    DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  const hostname = normalizeHostname(new URL(url).hostname)
+  const requestDelayMs = getDomainRequestDelayMs(hostname, domainRequestDelays)
   const previous = domainTails.get(hostname) ?? Promise.resolve()
   let release!: () => void
   const hold = new Promise<void>((resolveHold) => {
@@ -115,7 +111,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
       await new Promise<void>((resolveTurn, rejectTurn) => {
         const abort = (): void => {
           signal.removeEventListener('abort', abort)
-          rejectTurn(new Error('EPUB creation was cancelled.'))
+          rejectTurn(new OperationCancelledError('EPUB creation was cancelled.'))
         }
         signal.addEventListener('abort', abort, { once: true })
         previous.then(() => {
@@ -148,7 +144,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
         }
         const abort = (): void => {
           cleanup()
-          rejectWait(new Error('EPUB creation was cancelled.'))
+          rejectWait(new OperationCancelledError('EPUB creation was cancelled.'))
         }
         waiters.add(onAvailable)
         signal?.addEventListener('abort', abort, { once: true })
@@ -161,7 +157,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
         const abort = (): void => {
           clearTimeout(timer)
           signal?.removeEventListener('abort', abort)
-          rejectWait(new Error('EPUB creation was cancelled.'))
+          rejectWait(new OperationCancelledError('EPUB creation was cancelled.'))
         }
         const timer = setTimeout(() => {
           signal?.removeEventListener('abort', abort)
@@ -172,7 +168,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
       })
       wait = Math.max(0, (domainNextRequestAt.get(hostname) ?? 0) - Date.now())
     }
-    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
     domainActiveRequests.set(hostname, (domainActiveRequests.get(hostname) ?? 0) + 1)
     domainNextRequestAt.set(hostname, Date.now() + requestDelayMs)
     release()
@@ -191,7 +187,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
   operationSignal?.addEventListener('abort', abortOperation, { once: true })
 
   try {
-    if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
+    if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
     const response = await fetch(url, {
       headers: {
         Accept: 'text/html,application/xhtml+xml',
@@ -221,7 +217,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     }
 
     if (!response.body) {
-      throw new Error('The page response had no readable content.')
+      throw new NoReadableContentError('The page response had no readable content.')
     }
 
     const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
@@ -248,10 +244,11 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
 
     return { html: new TextDecoder().decode(bytes), finalUrl }
   } catch (error) {
-    if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('The page request timed out.')
-    }
+    if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
+    if (error instanceof Error && error.name === 'AbortError')
+      throw new TransientNetworkError('The page request timed out.')
+    if (error instanceof TypeError)
+      throw new TransientNetworkError(toMessage(error))
     throw error
   } finally {
     clearTimeout(timeout)
@@ -341,7 +338,11 @@ async function validateImageHost(value: string, pageOrigin: string): Promise<voi
       ? [{ address: hostname }]
       : await lookup(hostname, { all: true, verbatim: true })
   } catch (error) {
-    throw new Error(`The image host could not be verified: ${error instanceof Error ? error.message : String(error)}.`)
+    const message = `The image host could not be verified: ${toMessage(error)}.`
+    if (isNodeError(error) && ['EAI_AGAIN', 'ETIMEOUT'].includes(error.code)) {
+      throw new TransientNetworkError(message)
+    }
+    throw new Error(message)
   }
   if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) {
     throw new Error('An image URL points to a non-public host.')
@@ -364,7 +365,7 @@ export async function fetchImageResource(
     const abortOperation = () => controller.abort()
     operationSignal?.addEventListener('abort', abortOperation, { once: true })
     try {
-      if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
+      if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
       const response = await fetch(url, {
         headers: { Accept: HTTP_IMAGE_ACCEPT_HEADER, 'User-Agent': APP_USER_AGENT },
         redirect: 'manual',
@@ -392,7 +393,9 @@ export async function fetchImageResource(
       if (declaredLength > MAX_IMAGE_BYTES) {
         throw new Error(`An image exceeds the ${MAX_IMAGE_BYTES / (1024 * 1024)} MB size limit.`)
       }
-      if (!response.body) throw new Error('The image response had no readable content.')
+      if (!response.body) {
+        throw new NoReadableContentError('The image response had no readable content.')
+      }
 
       const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
       const chunks: Uint8Array[] = []
@@ -415,8 +418,13 @@ export async function fetchImageResource(
       }
       return { sourceUrl: finalUrl, mediaType, dataBase64: data.toString('base64') }
     } catch (error) {
-      if (operationSignal?.aborted) throw new Error('EPUB creation was cancelled.')
-      if (error instanceof Error && error.name === 'AbortError') throw new Error('The image request timed out.')
+      if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new TransientNetworkError('The image request timed out.')
+      }
+      if (error instanceof TypeError) {
+        throw new TransientNetworkError(toMessage(error))
+      }
       throw error
     } finally {
       clearTimeout(timeout)
@@ -438,7 +446,7 @@ function documentTitle($: ReturnType<typeof load>): string {
 
 function isNovelFullUrl(value: string): boolean {
   try {
-    const hostname = new URL(value).hostname.toLowerCase().replace(/^www\./, '')
+    const hostname = normalizeHostname(new URL(value).hostname)
     return NOVELFULL_HOSTS.has(hostname)
   } catch {
     return false
@@ -646,7 +654,9 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
   const $ = load(html)
   const pageText = $('body').text().replace(/\s+/g, ' ').trim()
   if (BLOCKED_PAGE_PATTERN.test(`${documentTitle($)} ${pageText.slice(0, 1000)}`)) {
-    throw new Error('The source requires manual verification; discovery was not continued.')
+    throw new VerificationRequiredError(
+      'The source requires manual verification; discovery was not continued.'
+    )
   }
   const title =
     $('.books .desc h3.title, .m-desc h1.tit').first().text().replace(/\s+/g, ' ').trim() ||
@@ -754,7 +764,9 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
   const title = $('h1').first().text().trim() || documentTitle($)
   const pageText = $('body').text().replace(/\s+/g, ' ').trim()
   if (BLOCKED_PAGE_PATTERN.test(`${title} ${pageText.slice(0, 1000)}`)) {
-    throw new Error('The source requires manual verification; discovery was not continued.')
+    throw new VerificationRequiredError(
+      'The source requires manual verification; discovery was not continued.'
+    )
   }
   const chapters = chapterLinksFromHtml(html, url)
 
@@ -915,7 +927,7 @@ async function discoverNovelFullChapters(
   })
 
   for (let pageNumber = 2; pageNumber <= firstPage.pageCount; pageNumber += 1) {
-    if (signal?.aborted) throw new Error('Browser-assisted discovery was cancelled.')
+    if (signal?.aborted) throw new OperationCancelledError('Browser-assisted discovery was cancelled.')
     const pageUrl = new URL(catalogUrl)
     pageUrl.searchParams.set('page', String(pageNumber))
     const response = await loadPage(pageUrl.href, signal)
@@ -990,7 +1002,7 @@ async function discoverGenericHtmlChapters(
   while (true) {
     const target = nextGenericPaginationTarget(paginationTargets, currentPage, visitedUrls)
     if (!target) break
-    if (signal?.aborted) throw new Error('Browser-assisted discovery was cancelled.')
+    if (signal?.aborted) throw new OperationCancelledError('Browser-assisted discovery was cancelled.')
     if (pagesRead >= MAX_GENERIC_DISCOVERY_PAGES) {
       throw new Error(`Generic chapter discovery exceeded the ${MAX_GENERIC_DISCOVERY_PAGES}-page limit.`)
     }
@@ -1144,10 +1156,12 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
   const text = root.text().replace(/\s+/g, ' ').trim()
   const pageTitle = documentTitle($)
   if (BLOCKED_PAGE_PATTERN.test(`${pageTitle} ${text.slice(0, 1000)}`)) {
-    throw new Error('The source requires manual verification; this page was not saved as chapter content.')
+    throw new VerificationRequiredError(
+      'The source requires manual verification; this page was not saved as chapter content.'
+    )
   }
   if (text.length < 40) {
-    throw new Error('No readable chapter content was found on this page.')
+    throw new NoReadableContentError('No readable chapter content was found on this page.')
   }
 
   const paragraphs: string[] = []

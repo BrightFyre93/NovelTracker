@@ -6,13 +6,14 @@ import type {
   LibraryNovelSummary
 } from './contracts'
 import { analyzeLibraryCoverage } from './libraryCoverage'
+import { normalizeNovelTitleForGrouping } from './novelTitle'
 
 const folderStates: LibraryFolderState[] = ['Completed', 'Downloaded', 'Sent', 'Old', 'Old Completed']
 
 export function summarizeLibraryIndex(index: LibraryIndex): LibraryIndexSummary {
   const groups = new Map<string, LibraryFileRecord[]>()
   for (const file of index.files) {
-    const key = file.novelTitle.trim().toLocaleLowerCase()
+    const key = normalizeNovelTitleForGrouping(file.novelTitle)
     const group = groups.get(key) ?? []
     group.push(file)
     groups.set(key, group)

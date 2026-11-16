@@ -3,6 +3,11 @@ import { resolve, sep } from 'node:path'
 import type { BrowserContext, Page } from 'playwright'
 import type { BrowserSessionInfo } from '../../shared/contracts'
 import { BROWSER_NAVIGATION_TIMEOUT_MS, BROWSER_PROFILE_DIRECTORY_NAME } from '../../shared/constants'
+import {
+  OperationCancelledError,
+  TransientNetworkError,
+  VerificationRequiredError
+} from '../../shared/errors'
 import { validateHttpUrl } from './scraper'
 
 let browserContext: BrowserContext | null = null
@@ -61,9 +66,11 @@ async function navigate(page: Page, url: string): Promise<void> {
     await page.waitForTimeout(750)
   } catch (error) {
     if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error('The browser timed out while loading the page.')
+      throw new TransientNetworkError('The browser timed out while loading the page.')
     }
-    throw new Error('The browser could not load the requested page. Check the URL and connection.')
+    throw new TransientNetworkError(
+      'The browser could not load the requested page. Check the URL and connection.'
+    )
   }
 }
 
@@ -87,9 +94,11 @@ export async function readBrowserPage(
   const url = validateHttpUrl(value)
   const context = browserContext ?? (browserContextPromise ? await browserContextPromise : null)
   if (!context) {
-    throw new Error('Open the visible browser and complete any required manual verification first.')
+    throw new VerificationRequiredError(
+      'Open the visible browser and complete any required manual verification first.'
+    )
   }
-  if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+  if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
 
   const visibleVerificationPage =
     verificationPage && !verificationPage.isClosed() ? verificationPage : null
@@ -101,7 +110,7 @@ export async function readBrowserPage(
   ) {
     await visibleVerificationPage.locator('body').waitFor({ state: 'attached', timeout: BROWSER_NAVIGATION_TIMEOUT_MS })
     await visibleVerificationPage.waitForTimeout(750)
-    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
     return {
       html: await visibleVerificationPage.content(),
       finalUrl: validateHttpUrl(visibleVerificationPage.url())
@@ -115,10 +124,12 @@ export async function readBrowserPage(
   signal?.addEventListener('abort', abort, { once: true })
   try {
     await navigate(page, url)
-    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
     return { html: await page.content(), finalUrl: validateHttpUrl(page.url()) }
   } catch (error) {
-    if (signal?.aborted) throw new Error('Browser-assisted page retrieval was cancelled.')
+    if (signal?.aborted) {
+      throw new OperationCancelledError('Browser-assisted page retrieval was cancelled.')
+    }
     throw error
   } finally {
     signal?.removeEventListener('abort', abort)

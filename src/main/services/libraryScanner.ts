@@ -9,6 +9,12 @@ import type {
   LibraryFolderState
 } from '../../shared/contracts'
 import { LIBRARY_FOLDERS, MAX_EPUB_INPUT_BYTES } from '../../shared/constants'
+import { isNodeError, OperationCancelledError, toMessage } from '../../shared/errors'
+import {
+  parseFilenameRange,
+  stripTrailingFilenameRange
+} from '../../shared/filenameRange'
+import { samePath } from './pathUtils'
 import { inspectEpub } from './epubInspector'
 
 interface ScannableFile {
@@ -27,7 +33,7 @@ export interface LibraryScanOptions {
 }
 
 function checkCancelled(signal: AbortSignal): void {
-  if (signal.aborted) throw new Error('Library scan cancelled.')
+  if (signal.aborted) throw new OperationCancelledError('Library scan cancelled.')
 }
 
 function fileId(relativePath: string): string {
@@ -50,13 +56,30 @@ async function matchesLibraryRoot(previousIndex: LibraryIndex | null, root: stri
   try {
     const previousRoot = await realpath(previousIndex.libraryRoot)
     return process.platform === 'win32'
-      ? previousRoot.toLocaleLowerCase() === root.toLocaleLowerCase()
+      ? samePath(previousRoot, root)
       : previousRoot === root
   } catch {
     const previousRoot = resolve(previousIndex.libraryRoot)
     return process.platform === 'win32'
-      ? previousRoot.toLocaleLowerCase() === root.toLocaleLowerCase()
+      ? samePath(previousRoot, root)
       : previousRoot === root
+  }
+}
+
+type LibraryFileIdentity = Pick<
+  LibraryFileRecord,
+  'id' | 'path' | 'relativePath' | 'format' | 'folderState' | 'size' | 'modifiedAt'
+>
+
+function libraryFileIdentity(file: ScannableFile): LibraryFileIdentity {
+  return {
+    id: file.id,
+    path: file.path,
+    relativePath: file.relativePath,
+    format: file.format,
+    folderState: file.folderState,
+    size: file.size,
+    modifiedAt: file.modifiedAt
   }
 }
 
@@ -74,14 +97,8 @@ function cachedFile(
     return undefined
   }
   return {
-    id: file.id,
-    path: file.path,
-    relativePath: file.relativePath,
+    ...libraryFileIdentity(file),
     filename: cached.filename,
-    format: file.format,
-    folderState: file.folderState,
-    size: file.size,
-    modifiedAt: file.modifiedAt,
     novelTitle: cached.novelTitle,
     author: cached.author,
     language: cached.language,
@@ -94,24 +111,13 @@ function cachedFile(
   }
 }
 
-function parseFilenameRange(value: string): { start: number; end: number } | null {
-  const match = value.match(/(?:^|[\s_-])(\d{1,7})\s*[-–]\s*(\d{1,7})(?:\D|$)/)
-  return match ? { start: Number(match[1]), end: Number(match[2]) } : null
-}
-
 function emptyFile(file: ScannableFile, error: unknown): LibraryFileRecord {
   const parts = file.relativePath.split(/[\\/]/)
   const filename = parts[parts.length - 1]
   const title = parts.length > 2 ? parts[1] : filename
   return {
-    id: file.id,
-    path: file.path,
-    relativePath: file.relativePath,
+    ...libraryFileIdentity(file),
     filename,
-    format: file.format,
-    folderState: file.folderState,
-    size: file.size,
-    modifiedAt: file.modifiedAt,
     novelTitle: title,
     author: '',
     language: '',
@@ -120,7 +126,7 @@ function emptyFile(file: ScannableFile, error: unknown): LibraryFileRecord {
     filenameRange: parseFilenameRange(filename ?? ''),
     coverageConfidence: 'unknown',
     coverPath: null,
-    inspectionError: error instanceof Error ? error.message : String(error)
+    inspectionError: toMessage(error)
   }
 }
 
@@ -140,7 +146,7 @@ async function enumerateFiles(
   try {
     folderDetails = await lstat(folderPath)
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { files, errors }
+    if (isNodeError(error) && error.code === 'ENOENT') return { files, errors }
     throw error
   }
   if (!folderDetails.isDirectory() || folderDetails.isSymbolicLink()) return { files, errors: 1 }
@@ -194,12 +200,12 @@ async function enumerateFiles(
             discoveredFiles: filesFoundBefore + files.length,
             indexedFiles: 0,
             totalFiles: 0,
-            message: `Skipped an inaccessible entry in ${folder}: ${error instanceof Error ? error.message : String(error)}`
+            message: `Skipped an inaccessible entry in ${folder}: ${toMessage(error)}`
           })
         }
       }
     } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return
+      if (isNodeError(error) && error.code === 'ENOENT') return
       errors += 1
     }
   }
@@ -296,19 +302,12 @@ export async function scanLibrary(
           )
         } else {
           const filename = file.relativePath.split(/[\\/]/).pop() ?? file.relativePath
-          const novelTitle = filename
-            .replace(/\.azw3$/i, '')
-            .replace(/\s+\d+\s*[-–]\s*\d+$/, '')
+          const novelTitle = filename.replace(/\.azw3$/i, '')
+          const normalizedNovelTitle = stripTrailingFilenameRange(novelTitle)
           record = {
-            id: file.id,
-            path: file.path,
-            relativePath: file.relativePath,
+            ...libraryFileIdentity(file),
             filename,
-            format: 'AZW3',
-            folderState: file.folderState,
-            size: file.size,
-            modifiedAt: file.modifiedAt,
-            novelTitle: novelTitle || filename,
+            novelTitle: normalizedNovelTitle || filename,
             author: '',
             language: '',
             chapterTitles: [],

@@ -1,5 +1,6 @@
 import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { isNodeError } from '../../shared/errors'
 
 const LOG_FILENAME = 'novel-tracker.log'
 const MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -64,7 +65,7 @@ function rotateLogs(): Promise<void> {
     try {
       currentSize = (await stat(logPath)).size
     } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+      if (!(isNodeError(error) && error.code === 'ENOENT')) throw error
     }
     if (currentSize < MAX_LOG_BYTES) return
 
@@ -73,7 +74,7 @@ function rotateLogs(): Promise<void> {
       try {
         await rename(`${logPath}.${index}`, `${logPath}.${index + 1}`)
       } catch (error) {
-        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+        if (!(isNodeError(error) && error.code === 'ENOENT')) throw error
       }
     }
     await rename(logPath, `${logPath}.1`)

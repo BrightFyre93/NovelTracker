@@ -11,6 +11,7 @@ import type {
   EpubMergeProgress,
   EpubNovelMetadata
 } from '../../shared/contracts'
+import { isNodeError, OperationCancelledError, toMessage } from '../../shared/errors'
 import {
   EPUB_IMAGE_TYPES,
   DEFAULT_EPUB_CSS,
@@ -87,7 +88,7 @@ async function normalizeKindleImage(
     if (jpeg.length === 0) throw new Error('The converted image is empty.')
     return { mediaType: 'image/jpeg', data: jpeg }
   } catch (error) {
-    const details = error instanceof Error ? error.message : String(error)
+    const details = toMessage(error)
     throw new Error(
       isCover
         ? `A Kindle cover could not be normalized: ${details}`
@@ -308,14 +309,7 @@ export async function buildEpubBuffer(
   language: string,
   chapters: ChapterContent[],
   css = DEFAULT_EPUB_CSS,
-  metadata: EpubNovelMetadata = {
-    description: '',
-    alternativeNames: [],
-    genres: [],
-    source: '',
-    novelStatus: '',
-    sourceUrl: ''
-  },
+  metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata(),
   onProgress?: (progress: EpubMergeProgress) => void
 ): Promise<Buffer> {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
@@ -474,7 +468,7 @@ async function targetFileExists(path: string): Promise<boolean> {
     }
     return true
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false
+    if (isNodeError(error) && error.code === 'ENOENT') return false
     throw error
   }
 }
@@ -486,12 +480,23 @@ async function publishEpub(
   signal?: AbortSignal
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   const outputPath = join(directory, filename)
-  if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+  if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
   const overwroteExistingFile = await targetFileExists(outputPath)
   await atomicWriteFile(outputPath, contents, () => {
-    if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+    if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
   })
   return { outputPath, overwroteExistingFile }
+}
+
+function createDefaultEpubNovelMetadata(): EpubNovelMetadata {
+  return {
+    description: '',
+    alternativeNames: [],
+    genres: [],
+    source: '',
+    novelStatus: '',
+    sourceUrl: ''
+  }
 }
 
 export async function writeEpub(
@@ -503,18 +508,11 @@ export async function writeEpub(
   requestedFilename?: string,
   signal?: AbortSignal,
   css = DEFAULT_EPUB_CSS,
-  metadata: EpubNovelMetadata = {
-    description: '',
-    alternativeNames: [],
-    genres: [],
-    source: '',
-    novelStatus: '',
-    sourceUrl: ''
-  },
+  metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata(),
   onProgress?: (progress: EpubMergeProgress) => void
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   const buffer = await buildEpubBuffer(title, author, language, chapters, css, metadata, onProgress)
-  if (signal?.aborted) throw new Error('EPUB creation was cancelled.')
+  if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
   const filename = createEpubFilename(title, chapters, requestedFilename)
   onProgress?.({ stage: 'saving', percentage: 0, message: `Writing ${filename}…` })
   const result = await publishEpub(outputDirectory, filename, buffer, signal)

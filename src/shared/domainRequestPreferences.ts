@@ -1,10 +1,30 @@
 import {
+  DEFAULT_DOMAIN_REQUEST_DELAY_MS,
+  DOMAIN_REQUEST_DELAYS_MS,
   MAX_DOMAIN_REQUEST_DELAY_MS,
   MAX_DOMAIN_REQUEST_PREFERENCES,
   MIN_DOMAIN_REQUEST_DELAY_MS
 } from './constants'
 import type { DomainRequestDelayPreference } from './contracts'
 import { normalizeSiteHostname } from './siteExtractionPreferences'
+
+export function getDomainRequestDelayMs(
+  hostname: string,
+  preferences:
+    | readonly DomainRequestDelayPreference[]
+    | ReadonlyMap<string, number>
+): number {
+  const configuredDelay =
+    'get' in preferences
+      ? preferences.get(hostname)
+      : preferences.find((preference) => preference.hostname === hostname)
+          ?.delayMs
+  return (
+    configuredDelay ??
+    DOMAIN_REQUEST_DELAYS_MS[hostname] ??
+    DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  )
+}
 
 export function normalizeDomainRequestDelays(value: unknown): DomainRequestDelayPreference[] {
   if (!Array.isArray(value) || value.length > MAX_DOMAIN_REQUEST_PREFERENCES) {

@@ -2,37 +2,22 @@ import { readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { load } from 'cheerio'
 import JSZip from 'jszip'
-import { XMLParser } from 'fast-xml-parser'
 import type { CoverageConfidence, LibraryFileRecord } from '../../shared/contracts'
+import { parseChapterNumber } from '../../shared/chapterNumber'
+import { parseFilenameRange } from '../../shared/filenameRange'
+import {
+  createXmlParser,
+  entries,
+  normalizeArchivePath,
+  object,
+  text,
+  type XmlObject
+} from './epubArchiveUtils'
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  removeNSPrefix: true
-})
-
-type XmlObject = Record<string, unknown>
-
-function object(value: unknown): XmlObject {
-  return typeof value === 'object' && value !== null ? value as XmlObject : {}
-}
-
-function entries(value: unknown): unknown[] {
-  if (value === undefined || value === null) return []
-  return Array.isArray(value) ? value : [value]
-}
-
-function text(value: unknown): string {
-  if (value === undefined || value === null) return ''
-  if (typeof value === 'string' || typeof value === 'number') return String(value).trim()
-  const nestedText = object(value)['#text']
-  return nestedText === undefined ? '' : text(nestedText)
-}
+const xmlParser = createXmlParser()
 
 function xmlPath(value: string): string {
-  const path = posix.normalize(value.replace(/\\/g, '/').replace(/^\/+/, ''))
-  if (!path || path === '.' || path.startsWith('../')) throw new Error('EPUB contains an invalid internal path.')
-  return path
+  return normalizeArchivePath(value, 'EPUB contains an invalid internal path.')
 }
 
 function internalHref(baseFile: string, href: string): string {
@@ -45,20 +30,6 @@ function internalHref(baseFile: string, href: string): string {
 
 function firstString(value: unknown): string {
   return text(entries(value)[0])
-}
-
-function chapterNumber(value: string): number | undefined {
-  const match =
-    value.match(/\b(?:chapter|ch\.?|episode|part)\s*[-:#]?\s*(\d+(?:\.\d+)?)/i) ??
-    value.match(/^\s*#?\s*(\d+(?:\.\d+)?)(?=\s|$|[:.-])/)
-  if (match) return Number(match[1])
-  if (/\bprologue\b/i.test(value)) return 0
-  return undefined
-}
-
-function filenameRange(filename: string): { start: number; end: number } | null {
-  const match = filename.match(/(?:^|[\s_-])(\d{1,7})\s*[-–]\s*(\d{1,7})(?:\D|$)/)
-  return match ? { start: Number(match[1]), end: Number(match[2]) } : null
 }
 
 function flattenNcx(value: unknown, result: string[]): void {
@@ -90,11 +61,11 @@ function chapterHeadings(html: string): string[] {
   return $('h1, h2, h3, title')
     .toArray()
     .map((element) => $(element).text().replace(/\s+/g, ' ').trim())
-    .filter((heading) => chapterNumber(heading) !== undefined || /\b(?:prologue|epilogue|interlude)\b/i.test(heading))
+    .filter((heading) => parseChapterNumber(heading) !== null || /\b(?:prologue|epilogue|interlude)\b/i.test(heading))
 }
 
 function keepChapterTitle(value: string): boolean {
-  return chapterNumber(value) !== undefined || /\b(?:prologue|epilogue|interlude)\b/i.test(value)
+  return parseChapterNumber(value) !== null || /\b(?:prologue|epilogue|interlude)\b/i.test(value)
 }
 
 function firstMetadataValue(metadata: XmlObject, name: string): string {
@@ -160,7 +131,9 @@ export async function inspectEpub(
   }
 
   const uniqueTitles = [...new Set(titles)]
-  const chapterNumbers = [...new Set(uniqueTitles.map(chapterNumber).filter((value): value is number => value !== undefined))]
+  const chapterNumbers = [...new Set(uniqueTitles
+    .map((title) => parseChapterNumber(title))
+    .filter((value): value is number => value !== null))]
     .sort((left, right) => left - right)
   const relativeParts = relativePath.split(/[\\/]/)
   const folderTitle = relativeParts.length > 2 ? relativeParts[1] : ''
@@ -175,7 +148,7 @@ export async function inspectEpub(
   const author = /^(?:unknown|<unknown>)$/i.test(creator) ? '' : creator
   const language = firstMetadataValue(metadata, 'language')
   const confidence: CoverageConfidence =
-    chapterNumbers.length > 0 ? 'extracted-toc' : filenameRange(relativePath) ? 'filename' : 'unknown'
+    chapterNumbers.length > 0 ? 'extracted-toc' : parseFilenameRange(relativePath) ? 'filename' : 'unknown'
 
   return {
     id,
@@ -191,7 +164,7 @@ export async function inspectEpub(
     language,
     chapterTitles: uniqueTitles,
     chapterNumbers,
-    filenameRange: filenameRange(relativePath),
+    filenameRange: parseFilenameRange(relativePath),
     coverageConfidence: confidence,
     coverPath,
     inspectionError: ''

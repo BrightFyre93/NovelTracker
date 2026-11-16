@@ -9,6 +9,7 @@ import type {
   LibraryFileRecord,
   LibraryIndexSummary
 } from '../../../shared/contracts'
+import { toMessage } from '../../../shared/errors'
 import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
 
@@ -107,7 +108,7 @@ onMounted(async () => {
     libraryRoot.value = configuredRoot
     outputDirectory.value = settings.outputDirectory
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
   try {
     const savedIndex = await window.novelTracker.getLibraryIndexSummary()
@@ -119,12 +120,12 @@ onMounted(async () => {
       selectFirstNovel()
     }
   } catch (reason) {
-    if (!error.value) error.value = reason instanceof Error ? reason.message : String(reason)
+    if (!error.value) error.value = toMessage(reason)
   }
   try {
     backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
   } catch (reason) {
-    if (!error.value) error.value = reason instanceof Error ? reason.message : String(reason)
+    if (!error.value) error.value = toMessage(reason)
   }
 })
 
@@ -180,7 +181,7 @@ async function selectNovel(key: string): Promise<void> {
     }
     if (selectedNovel.value === key) selectedFiles.value = result.value
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     if (selectedNovel.value === key) loadingNovelFiles.value = false
   }
@@ -215,7 +216,7 @@ async function scan(forceRebuild = false): Promise<void> {
       : ''
     success.value = `${forceRebuild ? 'Rebuilt' : 'Indexed'} ${result.value.fileCount.toLocaleString()} files.${cacheMessage}${errorMessage}`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     libraryState.scanning = false
     libraryState.cancelling = false
@@ -248,7 +249,7 @@ async function restoreBackup(): Promise<void> {
     backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
     success.value = 'Library index backup restored.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     restoringBackup.value = false
   }
@@ -331,7 +332,7 @@ async function mergeSelectedEpubs(): Promise<void> {
     success.value = `Created ${result.value.chapterCount.toLocaleString()} chapters at ${result.value.outputPath}.${duplicates}${conflicts}`
     mergeFileIds.value = []
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
     mergeProgress.value = {
       stage: 'failed',
       percentage: mergeProgress.value?.percentage ?? 0,
@@ -363,7 +364,7 @@ async function repairExistingEpub(fileId: string): Promise<void> {
       : ''
     success.value = `Checked and repaired EPUB copy at ${result.value.outputPath}.${imageSummary}${coverSummary}${mimetypeSummary} Review it in Kindle Previewer.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     repairing.value = false
   }
@@ -414,7 +415,7 @@ async function saveCorrection(): Promise<void> {
     if (correctedGroup) await selectNovel(correctedGroup.key)
     success.value = 'Library correction saved locally.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 

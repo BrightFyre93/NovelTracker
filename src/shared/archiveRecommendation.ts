@@ -1,10 +1,11 @@
 import type {
-  ChapterLink,
   DiscoveryQueueItem,
   LibraryFileRecord,
   QueueChapter
 } from './contracts'
 import { VERIFIED_COVERAGE } from './constants'
+import { parseChapterNumber } from './chapterNumber'
+import { normalizeNovelTitleForMatching } from './novelTitle'
 
 export interface ArchiveRecommendation {
   chapters: QueueChapter[]
@@ -13,39 +14,15 @@ export interface ArchiveRecommendation {
   summary: string
 }
 
-function normalizedTitle(value: string): string {
-  return value
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLocaleLowerCase()
-    .replace(/[^a-z0-9]/g, '')
-}
-
 function normalizedTitleAliases(value: string): string[] {
-  const normalized = normalizedTitle(value)
+  const normalized = normalizeNovelTitleForMatching(value)
   const withoutVolume = normalized.replace(/(?:vol(?:ume)?|book|part)(?:\d+|[ivxlcdm]+)$/, '')
   return [...new Set([normalized, withoutVolume].filter((title) => title.length > 0))]
 }
 
-function chapterNumber(chapter: ChapterLink): number | null {
-  const titleMatch = chapter.title.match(/\b(?:chapter|ch\.?|episode|part)\s*[-:#]?\s*(\d+(?:\.\d+)?)/i)
-    ?? chapter.title.match(/^\s*#?\s*(\d+(?:\.\d+)?)(?=\s|$|[:.-])/)
-  if (titleMatch) return Number(titleMatch[1])
-  if (/\bprologue\b/i.test(chapter.title)) return 0
-
-  let path = chapter.url
-  try {
-    path = decodeURIComponent(new URL(chapter.url).pathname)
-  } catch {
-    path = chapter.url
-  }
-  const urlMatch = path.match(/(?:chapter|ch|episode|part)[-_/ ]*(\d+(?:\.\d+)?)/i)
-  return urlMatch ? Number(urlMatch[1]) : null
-}
-
 function fileMatchesChapter(file: LibraryFileRecord, number: number | null, title: string): boolean {
-  const titleKey = normalizedTitle(title)
-  const titleMatch = titleKey.length > 0 && file.chapterTitles.some((candidate) => normalizedTitle(candidate) === titleKey)
+  const titleKey = normalizeNovelTitleForMatching(title)
+  const titleMatch = titleKey.length > 0 && file.chapterTitles.some((candidate) => normalizeNovelTitleForMatching(candidate) === titleKey)
   if (titleMatch) return true
   if (number === null) return false
   return file.chapterNumbers.includes(number)
@@ -66,7 +43,7 @@ export function recommendArchiveCoverage(
     normalizedTitleAliases(file.novelTitle).some((title) => titleKeys.has(title))
   )
   const chapters = item.chapters.map((chapter) => {
-    const number = chapterNumber(chapter)
+    const number = parseChapterNumber(chapter.title) ?? parseChapterNumber(chapter.url, 'url')
     const matches = novelFiles.filter((file) => fileMatchesChapter(file, number, chapter.title))
     const verified = matches.filter((file) => VERIFIED_COVERAGE.has(file.coverageConfidence))
     const rangeMatches = (file: LibraryFileRecord): boolean =>

@@ -1,0 +1,123 @@
+import type { Result } from './common'
+import type { DiscoveryResult, GenerateEpubInput } from './epub'
+import type {
+  AppSettings,
+  SiteExtractionPreference,
+  DomainRequestDelayPreference,
+  BrowserSessionInfo
+} from './settings'
+import type {
+  DownloadHistoryEntry,
+  TrackerNovel,
+  QueuedEpubJob,
+  DiscoveryQueueItem,
+  DiscoveryQueueItemSummary,
+  DiscoveryQueueInput
+} from './queue'
+import type {
+  LibraryFileCorrection,
+  LibraryFileRecord,
+  LibraryIndexSummary,
+  LibraryProgress,
+  EpubMergeProgress,
+  LibraryEpubMergeResponse,
+  LibraryOperation,
+  EpubRepairResponse
+} from './library'
+
+export interface NovelTrackerApi {
+  discover(url: string): Promise<Result<DiscoveryResult>>
+  openVerificationBrowser(url: string): Promise<Result<BrowserSessionInfo>>
+  discoverWithBrowser(url: string): Promise<Result<DiscoveryResult>>
+  cancelBrowserDiscovery(queueItemId?: string): Promise<void>
+  cancelDiscoveryQueueItem(id: string): Promise<Result<void>>
+  clearBrowserSession(): Promise<Result<void>>
+  chooseOutputDirectory(): Promise<string | null>
+  getSettings(): Promise<AppSettings>
+  updateEpubCss(css: string): Promise<Result<AppSettings>>
+  updateAppTheme(theme: AppSettings['appTheme']): Promise<Result<AppSettings>>
+  updateDiscoveryFreshnessHours(hours: number): Promise<Result<AppSettings>>
+  chooseLibraryRoot(): Promise<string | null>
+  chooseTrackerCsv(): Promise<string | null>
+  getTrackerNovels(): Promise<Result<TrackerNovel[]>>
+  getDownloadHistory(): Promise<DownloadHistoryEntry[]>
+  getDiscoveryQueue(): Promise<DiscoveryQueueItemSummary[]>
+  getDiscoveryQueueItem(id: string): Promise<Result<DiscoveryQueueItem>>
+  addDiscoveryQueueItems(
+    items: DiscoveryQueueInput[]
+  ): Promise<Result<DiscoveryQueueItem[]>>
+  retryDiscoveryQueueItem(id: string): Promise<Result<void>>
+  retryAllFailedDiscoveries(): Promise<Result<number>>
+  forceRetryDiscoveryQueueItem(id: string): Promise<Result<void>>
+  retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
+  refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
+  acceptQueueRecommendations(id: string): Promise<Result<void>>
+  enqueueEpub(
+    input: GenerateEpubInput,
+    queueItemId?: string
+  ): Promise<Result<QueuedEpubJob>>
+  retryEpub(id: string): Promise<Result<void>>
+  recoverEpubQueueItem(id: string): Promise<Result<void>>
+  pauseEpub(id: string): Promise<Result<void>>
+  resumeEpub(id: string): Promise<Result<void>>
+  cancelEpub(id: string): Promise<Result<void>>
+  moveQueuedEpub(
+    id: string,
+    direction: 'up' | 'down' | 'top' | 'bottom'
+  ): Promise<Result<void>>
+  removeDiscoveryQueueItem(id: string): Promise<Result<void>>
+  clearDiscoveryQueue(): Promise<Result<void>>
+  clearCompletedDiscoveryQueueItems(): Promise<Result<void>>
+  updateDiscoveryQueueSelection(
+    id: string,
+    selectedChapterUrls: string[]
+  ): Promise<Result<void>>
+  updateDownloadConcurrency(
+    maxSimultaneousDownloads: number
+  ): Promise<Result<AppSettings>>
+  updateDiscoveryConcurrency(
+    maxSimultaneousDiscoveries: number
+  ): Promise<Result<AppSettings>>
+  updateChapterConcurrency(
+    maxSimultaneousChaptersPerNovel: number
+  ): Promise<Result<AppSettings>>
+  updateDomainRequestDelays(
+    preferences: DomainRequestDelayPreference[]
+  ): Promise<Result<AppSettings>>
+  updateSiteExtractionPreferences(
+    preferences: SiteExtractionPreference[]
+  ): Promise<Result<AppSettings>>
+  updateLibraryScanOptions(
+    scanOldFolder: boolean,
+    scanOldCompletedFolder: boolean
+  ): Promise<Result<AppSettings>>
+  repackageEpub(id: string): Promise<Result<void>>
+  saveAvailableChaptersEpub(id: string): Promise<Result<void>>
+  onDiscoveryQueueUpdate(
+    listener: (items: DiscoveryQueueItemSummary[]) => void
+  ): () => void
+  getLibraryIndexSummary(): Promise<LibraryIndexSummary | null>
+  getLibraryNovelFiles(novelKey: string): Promise<Result<LibraryFileRecord[]>>
+  getLibraryIndexBackupDate(): Promise<string | null>
+  restoreLibraryIndexBackup(): Promise<Result<LibraryIndexSummary>>
+  scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndexSummary>>
+  cancelLibraryScan(): Promise<void>
+  correctLibraryFile(
+    fileId: string,
+    correction: LibraryFileCorrection
+  ): Promise<Result<LibraryIndexSummary>>
+  mergeLibraryEpubs(
+    fileIds: string[],
+    filename: string
+  ): Promise<LibraryEpubMergeResponse>
+  repairEpub(fileId: string): Promise<EpubRepairResponse>
+  getLibraryOperations(): Promise<LibraryOperation[]>
+  onLibraryOperationsUpdate(
+    listener: (operations: LibraryOperation[]) => void
+  ): () => void
+  onLibraryEpubMergeProgress(
+    listener: (progress: EpubMergeProgress) => void
+  ): () => void
+  openLibraryPath(path: string, reveal: boolean): Promise<Result<void>>
+  onLibraryProgress(listener: (progress: LibraryProgress) => void): () => void
+}

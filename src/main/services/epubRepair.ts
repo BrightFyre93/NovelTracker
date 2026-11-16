@@ -2,7 +2,7 @@ import { lstat, readFile, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
 import JSZip from 'jszip'
 import sharp from 'sharp'
-import { XMLParser, XMLValidator } from 'fast-xml-parser'
+import { XMLValidator } from 'fast-xml-parser'
 import type { EpubRepairProgress, EpubRepairResult } from '../../shared/contracts'
 import {
   EPUB_MIMETYPE,
@@ -14,48 +14,30 @@ import {
 } from '../../shared/constants'
 import { resizeSmallKindleCover } from './kindleCover'
 import { atomicWriteFile } from './atomicFile'
-
-interface XmlObject {
-  [key: string]: unknown
-}
+import { toMessage } from '../../shared/errors'
+import {
+  createXmlParser,
+  object,
+  readEntry as readArchiveEntry,
+  resolveArchivePath as resolveEpubArchivePath,
+  text,
+  xmlObjects
+} from './epubArchiveUtils'
 
 const MAX_REPAIR_ENTRY_BYTES = 128 * 1024 * 1024
 const MAX_REPAIR_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  removeNSPrefix: true
-})
-
-function object(value: unknown): XmlObject {
-  return typeof value === 'object' && value !== null ? value as XmlObject : {}
-}
-
-function text(value: unknown): string {
-  if (typeof value === 'string') return value.trim()
-  return typeof value === 'object' && value !== null ? text(object(value)['#text']) : ''
-}
-
-function xmlObjects(value: unknown): XmlObject[] {
-  if (value === undefined || value === null) return []
-  return (Array.isArray(value) ? value : [value]).map(object)
-}
+const xmlParser = createXmlParser()
 
 function resolveArchivePath(documentPath: string, href: string): string | null {
-  const pathPart = href.split(/[?#]/, 1)[0]
-  if (!pathPart || pathPart.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(pathPart)) return null
-  let decodedPath: string
-  try {
-    decodedPath = decodeURIComponent(pathPart)
-  } catch {
-    throw new Error('The EPUB contains a malformed internal resource path.')
-  }
-  const resolvedPath = posix.normalize(posix.join(posix.dirname(documentPath), decodedPath.replace(/\\/g, '/')))
-  if (resolvedPath === '..' || resolvedPath.startsWith('../')) {
-    throw new Error('The EPUB contains an unsafe internal resource path.')
-  }
-  return resolvedPath
+  return resolveEpubArchivePath(documentPath, href, {
+    malformedPath: 'The EPUB contains a malformed internal resource path.',
+    unsafePath: 'The EPUB contains an unsafe internal resource path.'
+  })
+}
+
+function readEntry(entry: JSZip.JSZipObject, limit: number): Promise<Buffer> {
+  return readArchiveEntry(entry, limit, 'repair limit')
 }
 
 function findCoverImagePath(packageXml: string, packagePath: string): string | null {
@@ -166,27 +148,6 @@ function validateXml(contents: string, path: string): void {
   if (result !== true) throw new Error(`EPUB repair cannot continue: ${path} is not valid XML.`)
 }
 
-async function readEntry(entry: JSZip.JSZipObject, limit: number): Promise<Buffer> {
-  const stream = entry.nodeStream('nodebuffer') as NodeJS.ReadableStream & {
-    destroy(error?: Error): void
-  }
-  return new Promise<Buffer>((resolveEntry, rejectEntry) => {
-    const chunks: Buffer[] = []
-    let length = 0
-    stream.on('data', (value: Buffer | Uint8Array) => {
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-      length += chunk.byteLength
-      if (length > limit) {
-        stream.destroy(new Error(`An EPUB resource exceeds the ${limit.toLocaleString()} byte repair limit.`))
-        return
-      }
-      chunks.push(chunk)
-    })
-    stream.once('error', rejectEntry)
-    stream.once('end', () => resolveEntry(Buffer.concat(chunks, length)))
-  })
-}
-
 export async function repairEpubFile(
   inputPath: string,
   outputPath: string,
@@ -252,7 +213,7 @@ export async function repairEpubFile(
       resizedCover = await resizeSmallKindleCover(data)
     } catch (error) {
       throw new Error(
-        `Could not normalize cover ${coverImagePath}: ${error instanceof Error ? error.message : String(error)}`
+        `Could not normalize cover ${coverImagePath}: ${toMessage(error)}`
       )
     }
     if (resizedCover) {
@@ -296,7 +257,7 @@ export async function repairEpubFile(
       if (resizedCover) upscaledCover = true
     } catch (error) {
       throw new Error(
-        `Could not convert ${entry.name} to a Kindle-compatible JPEG: ${error instanceof Error ? error.message : String(error)}`
+        `Could not convert ${entry.name} to a Kindle-compatible JPEG: ${toMessage(error)}`
       )
     }
     totalImageBytes += jpeg.length

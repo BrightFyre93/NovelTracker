@@ -24,6 +24,7 @@ import {
 } from '../../shared/constants'
 import { normalizeSiteExtractionPreferences } from '../../shared/siteExtractionPreferences'
 import { normalizeDomainRequestDelays } from '../../shared/domainRequestPreferences'
+import { isNodeError } from '../../shared/errors'
 import { atomicWriteFile, renameWithRetry } from './atomicFile'
 import type {
   AppSettings,
@@ -62,7 +63,7 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
   try {
     return JSON.parse(await readFile(path, 'utf8')) as T
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return fallback
+    if (isNodeError(error) && error.code === 'ENOENT') return fallback
     throw error
   }
 }
@@ -94,6 +95,7 @@ function isDiscoveryQueueArray(value: unknown): value is DiscoveryQueueItem[] {
       isRecord(item) &&
       typeof item.id === 'string' &&
       typeof item.title === 'string' &&
+      (item.recoveryReason === undefined || item.recoveryReason === 'missing-history') &&
       (item.chapterSummary === undefined || isRecord(item.chapterSummary)) &&
       (item.chapters === undefined || (Array.isArray(item.chapters) && item.chapters.every(isRecord)))
     )
@@ -126,7 +128,7 @@ async function readJsonWithQuarantine<T>(
   try {
     value = JSON.parse(await readFile(path, 'utf8'))
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return fallback
+    if (isNodeError(error) && error.code === 'ENOENT') return fallback
     if (!(error instanceof SyntaxError)) throw error
     const quarantinedPath = await quarantineInvalidJsonFile(path)
     recordStorageRecoveryWarning(
@@ -320,7 +322,7 @@ export async function readLibraryIndexBackupDate(dataDirectory: string): Promise
     const details = await stat(join(dataDirectory, 'library-index.backup.json'))
     return details.isFile() ? details.mtime.toISOString() : null
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null
+    if (isNodeError(error) && error.code === 'ENOENT') return null
     throw error
   }
 }

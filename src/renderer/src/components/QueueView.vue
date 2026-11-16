@@ -4,11 +4,9 @@ import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
-import {
-  DEFAULT_DOMAIN_REQUEST_DELAY_MS,
-  DOMAIN_REQUEST_DELAYS_MS
-} from '../../../shared/constants'
+import { getDomainRequestDelayMs } from '../../../shared/domainRequestPreferences'
 import { normalizeSiteHostname } from '../../../shared/siteExtractionPreferences'
+import { useTrackerNovelSearch } from '../composables/useTrackerNovelSearch'
 import type {
   DomainRequestDelayPreference,
   DiscoveryQueueInput,
@@ -18,6 +16,7 @@ import type {
   GenerateEpubInput,
   TrackerNovel
 } from '../../../shared/contracts'
+import { toMessage } from '../../../shared/errors'
 
 const emit = defineEmits<{
   openItem: [item: DiscoveryQueueItem]
@@ -57,7 +56,9 @@ const selectedQueueItemIds = ref<string[]>([])
 const trackerNovels = ref<TrackerNovel[]>([])
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
-const trackerSearch = ref('')
+const { trackerSearch, filteredTrackerNovels } = useTrackerNovelSearch(
+  () => trackerNovels.value
+)
 const trackerSources = ref<Record<string, string>>({})
 const selectedTrackerIds = ref<string[]>([])
 const trackerCsvPath = ref('')
@@ -73,6 +74,7 @@ const retryingAllDiscoveries = ref(false)
 const browserOpeningId = ref('')
 const browserRetryingId = ref('')
 const browserReadyId = ref('')
+const cancelingDiscoveryId = ref('')
 const refreshingId = ref('')
 const removingId = ref('')
 const downloadActionId = ref('')
@@ -84,17 +86,6 @@ const notice = ref('')
 let removeQueueListener: (() => void) | undefined
 loadQueueViewPreferences()
 
-const filteredTrackerNovels = computed(() => {
-  const query = trackerSearch.value.trim().toLocaleLowerCase()
-  const matches = query
-    ? trackerNovels.value.filter((novel) =>
-        `${novel.title} ${novel.siteTitle} ${novel.author} ${novel.alternativeNames}`
-          .toLocaleLowerCase()
-          .includes(query)
-      )
-    : trackerNovels.value
-  return matches.slice(0, 100)
-})
 const activeDownloadCount = computed(() => items.value.filter((item) => item.status === 'downloading').length)
 const failedDiscoveryCount = computed(() =>
   items.value.filter((item) => item.status === 'failed' && !item.downloadOptions).length
@@ -229,7 +220,7 @@ function loadQueueViewPreferences(): void {
       ? [...new Set(preferences.collapsedStatuses.filter(isQueueStatus))]
       : []
   } catch (reason) {
-    error.value = `Queue display settings could not be loaded: ${reason instanceof Error ? reason.message : String(reason)}`
+    error.value = `Queue display settings could not be loaded: ${toMessage(reason)}`
   }
 }
 
@@ -240,7 +231,7 @@ watch([selectedQueueStatuses, collapsedQueueStatuses], () => {
       collapsedStatuses: collapsedQueueStatuses.value
     }))
   } catch (reason) {
-    error.value = `Queue display settings could not be saved: ${reason instanceof Error ? reason.message : String(reason)}`
+    error.value = `Queue display settings could not be saved: ${toMessage(reason)}`
   }
 }, { deep: true, flush: 'sync' })
 
@@ -275,10 +266,7 @@ function estimatedTimeRemaining(item: DiscoveryQueueItemSummary): string | null 
     return null
   }
 
-  const requestDelayMs =
-    domainRequestDelays.value.find((preference) => preference.hostname === hostname)?.delayMs ??
-    DOMAIN_REQUEST_DELAYS_MS[hostname] ??
-    DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  const requestDelayMs = getDomainRequestDelayMs(hostname, domainRequestDelays.value)
   const totalSeconds = Math.ceil((remaining * (requestDelayMs + 1000)) / 1000)
   if (totalSeconds < 60) return `~${totalSeconds} sec`
 
@@ -292,9 +280,16 @@ function estimatedTimeRemaining(item: DiscoveryQueueItemSummary): string | null 
 async function refreshQueue(): Promise<void> {
   loading.value = true
   try {
-    items.value = await window.novelTracker.getDiscoveryQueue()
+    const updatedItems = await window.novelTracker.getDiscoveryQueue()
+    items.value = updatedItems
+    if (
+      cancelingDiscoveryId.value &&
+      !updatedItems.some((item) => item.id === cancelingDiscoveryId.value && item.status === 'discovering')
+    ) {
+      cancelingDiscoveryId.value = ''
+    }
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     loading.value = false
   }
@@ -304,6 +299,12 @@ onMounted(() => {
   document.addEventListener('pointerdown', closeQueueStatusFilterOnOutsideClick)
   removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate((updatedItems) => {
     items.value = updatedItems
+    if (
+      cancelingDiscoveryId.value &&
+      !updatedItems.some((item) => item.id === cancelingDiscoveryId.value && item.status === 'discovering')
+    ) {
+      cancelingDiscoveryId.value = ''
+    }
   })
   void refreshQueue()
   void window.novelTracker.getSettings().then((settings) => {
@@ -311,7 +312,7 @@ onMounted(() => {
     outputDirectory.value = settings.outputDirectory
     domainRequestDelays.value = settings.domainRequestDelays
   }).catch((reason: unknown) => {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   })
 })
 
@@ -349,7 +350,7 @@ async function toggleTrackerPicker(): Promise<void> {
       ])
     )
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     trackerLoading.value = false
   }
@@ -465,7 +466,7 @@ async function addToQueue(): Promise<void> {
     selectedTrackerIds.value = []
     trackerVisible.value = false
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     adding.value = false
   }
@@ -478,7 +479,7 @@ async function retryItem(item: DiscoveryQueueItemSummary): Promise<void> {
     const result = await window.novelTracker.retryDiscoveryQueueItem(item.id)
     if (!result.ok) error.value = result.error
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     retryingId.value = ''
   }
@@ -499,7 +500,7 @@ async function retryAllFailedScans(): Promise<void> {
       : 'There are no failed scans to retry.'
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     retryingAllDiscoveries.value = false
   }
@@ -517,7 +518,7 @@ async function forceRetryItem(item: DiscoveryQueueItemSummary): Promise<void> {
     }
     notice.value = `Restarted chapter discovery for ${item.title}.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     retryingId.value = ''
   }
@@ -541,7 +542,7 @@ async function openItemInBrowser(item: DiscoveryQueueItemSummary): Promise<void>
       ? `Opened failed chapter "${failedChapter.title}" in Chromium. Complete any verification there, then retry the EPUB job.`
       : `Opened ${item.title} in Chromium. Complete any sign-in or verification manually, then retry using the browser.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     browserOpeningId.value = ''
   }
@@ -559,19 +560,29 @@ async function retryItemWithBrowser(item: DiscoveryQueueItemSummary): Promise<vo
     }
     notice.value = `Retried discovery for ${item.title} using the browser session.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     browserRetryingId.value = ''
   }
 }
 
-async function cancelBrowserDiscovery(item: DiscoveryQueueItemSummary): Promise<void> {
+async function cancelQueueDiscovery(item: DiscoveryQueueItemSummary): Promise<void> {
   error.value = ''
+  notice.value = ''
+  cancelingDiscoveryId.value = item.id
+  let cancellationRequested = false
   try {
-    await window.novelTracker.cancelBrowserDiscovery(item.id)
-    notice.value = `Cancelled browser-assisted discovery for ${item.title}.`
+    const result = await window.novelTracker.cancelDiscoveryQueueItem(item.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    cancellationRequested = true
+    notice.value = `Stopping discovery for ${item.title}.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
+  } finally {
+    if (!cancellationRequested) cancelingDiscoveryId.value = ''
   }
 }
 
@@ -601,7 +612,7 @@ async function runDownloadAction(
     else notice.value = `Queued ${item.title} for retry.`
     shouldRefresh = true
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     downloadActionId.value = ''
   }
@@ -623,7 +634,7 @@ async function recoverQueueItem(item: DiscoveryQueueItemSummary): Promise<void> 
       : `Restarted chapter discovery for ${item.title} using its saved source URL.`
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     downloadActionId.value = ''
   }
@@ -642,7 +653,7 @@ async function repackageOffline(item: DiscoveryQueueItemSummary): Promise<void> 
     notice.value = `Queued ${item.title} for offline repackaging from saved content.`
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     downloadActionId.value = ''
   }
@@ -661,7 +672,7 @@ async function saveAvailableChapters(item: DiscoveryQueueItemSummary): Promise<v
     notice.value = `Queued ${item.title} to package its available saved chapters.`
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     downloadActionId.value = ''
   }
@@ -717,7 +728,7 @@ async function queueOneRecommendedEpub(item: DiscoveryQueueItemSummary): Promise
     notice.value = `Queued EPUB for ${item.title}.`
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     downloadActionId.value = ''
   }
@@ -746,14 +757,14 @@ async function queueAllRecommendedEpubs(): Promise<void> {
         if (failure) failures.push(failure)
         else queued += 1
       } catch (reason) {
-        failures.push(`${item.title}: ${reason instanceof Error ? reason.message : String(reason)}`)
+        failures.push(`${item.title}: ${toMessage(reason)}`)
       }
     }
     notice.value = `Queued ${queued} safe EPUB job${queued === 1 ? '' : 's'}.`
     if (failures.length) error.value = failures.join(' ')
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     batchQueueing.value = false
   }
@@ -774,7 +785,7 @@ async function queueSelectedEpubs(): Promise<void> {
         if (failure) failures.push(failure)
         else queued += 1
       } catch (reason) {
-        failures.push(`${item.title}: ${reason instanceof Error ? reason.message : String(reason)}`)
+        failures.push(`${item.title}: ${toMessage(reason)}`)
       }
     }
     selectedQueueItemIds.value = []
@@ -782,7 +793,7 @@ async function queueSelectedEpubs(): Promise<void> {
     if (failures.length) error.value = failures.join(' ')
     await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     batchQueueing.value = false
   }
@@ -796,7 +807,7 @@ async function moveQueuedJob(item: DiscoveryQueueItemSummary, direction: 'up' | 
     if (!result.ok) error.value = result.error
     else await refreshQueue()
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     downloadActionId.value = ''
   }
@@ -813,7 +824,7 @@ async function acceptRecommendations(item: DiscoveryQueueItemSummary): Promise<v
     }
     notice.value = `Applied archive-aware suggestions for ${item.title}. Review the selected chapters before queueing the EPUB.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   }
 }
 
@@ -835,7 +846,7 @@ async function acceptSafeSuggestions(): Promise<void> {
       ? `Applied suggestions to ${applied} item${applied === 1 ? '' : 's'}. Review chapters and manual selections before queueing EPUBs.`
       : 'No items currently meet the confidence requirement for batch acceptance.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     batchAccepting.value = false
   }
@@ -849,7 +860,7 @@ async function refreshItem(item: DiscoveryQueueItemSummary): Promise<void> {
     const result = await window.novelTracker.refreshDiscoveryQueueItem(item.id)
     if (!result.ok) error.value = result.error
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     refreshingId.value = ''
   }
@@ -868,7 +879,7 @@ async function removeItem(item: DiscoveryQueueItemSummary): Promise<void> {
     }
     notice.value = `Removed ${item.title} from the queue.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     removingId.value = ''
   }
@@ -891,7 +902,7 @@ async function clearQueue(): Promise<void> {
     }
     notice.value = 'Cleared the discovery queue.'
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     clearing.value = false
   }
@@ -912,7 +923,7 @@ async function clearCompletedQueueItems(): Promise<void> {
     }
     notice.value = `Removed ${completedCount} completed queue entries. EPUB files and job history were kept.`
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
+    error.value = toMessage(reason)
   } finally {
     clearingCompleted.value = false
   }
@@ -1316,13 +1327,13 @@ async function clearCompletedQueueItems(): Promise<void> {
             @click="refreshItem(item)"
           />
           <Button
-            v-else-if="item.status === 'failed' && !item.downloadOptions"
+            v-else-if="['failed', 'cancelled'].includes(item.status) && !item.downloadOptions"
             label="Retry scan"
             size="small"
             severity="secondary"
             outlined
             :loading="retryingId === item.id"
-            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
+            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || Boolean(cancelingDiscoveryId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="retryItem(item)"
           />
           <Button
@@ -1333,10 +1344,10 @@ async function clearCompletedQueueItems(): Promise<void> {
             severity="secondary"
             outlined
             :loading="retryingId === item.id"
-            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
+            :disabled="Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || Boolean(cancelingDiscoveryId) || clearing || batchQueueing || Boolean(downloadActionId)"
             @click="forceRetryItem(item)"
           />
-          <template v-if="item.status === 'failed' && !item.downloadOptions">
+          <template v-if="['failed', 'cancelled'].includes(item.status) && !item.downloadOptions">
             <Button
               label="Open verification browser"
               icon="pi pi-external-link"
@@ -1359,13 +1370,15 @@ async function clearCompletedQueueItems(): Promise<void> {
             />
           </template>
           <Button
-            v-if="item.status === 'discovering' && browserReadyId === item.id"
-            label="Cancel browser discovery"
+            v-if="item.status === 'discovering'"
+            label="Cancel discovery"
             icon="pi pi-times"
             size="small"
             severity="danger"
             text
-            @click="cancelBrowserDiscovery(item)"
+            :loading="cancelingDiscoveryId === item.id"
+            :disabled="Boolean(cancelingDiscoveryId) || Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
+            @click="cancelQueueDiscovery(item)"
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
@@ -1379,7 +1392,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             @click="runDownloadAction(item, 'retry')"
           />
           <Button
-            v-if="item.status === 'failed' && /history entry is missing/i.test(item.error)"
+            v-if="item.status === 'failed' && item.recoveryReason === 'missing-history'"
             label="Restore & retry"
             icon="pi pi-refresh"
             size="small"

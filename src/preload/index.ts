@@ -1,135 +1,142 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
-  DiscoveryResult,
-  AppSettings,
   DiscoveryQueueInput,
-  DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
   DomainRequestDelayPreference,
-  DownloadHistoryEntry,
   EpubMergeProgress,
-  BrowserSessionInfo,
   GenerateEpubInput,
-  QueuedEpubJob,
   LibraryFileCorrection,
-  LibraryFileRecord,
-  LibraryEpubMergeResponse,
-  LibraryIndexSummary,
   LibraryOperation,
   LibraryProgress,
   SiteExtractionPreference,
-  EpubRepairResponse,
-  NovelTrackerApi,
-  Result,
-  TrackerNovel
+  NovelTrackerApi
 } from '../shared/contracts'
+import type {
+  IpcChannel,
+  IpcEventChannel,
+  IpcEventMap,
+  IpcMap
+} from '../shared/ipc'
+
+function invokeIpc<Channel extends IpcChannel>(
+  channel: Channel,
+  ...args: IpcMap[Channel]['args']
+): Promise<IpcMap[Channel]['result']> {
+  return ipcRenderer.invoke(channel, ...args) as Promise<
+    IpcMap[Channel]['result']
+  >
+}
+
+function onIpcEvent<Channel extends IpcEventChannel>(
+  channel: Channel,
+  listener: (value: IpcEventMap[Channel]) => void
+): () => void {
+  const handler = (
+    _event: Electron.IpcRendererEvent,
+    value: IpcEventMap[Channel]
+  ): void => listener(value)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
+}
 
 const api: NovelTrackerApi = {
-  discover: (url) => ipcRenderer.invoke('chapter:discover', url) as Promise<Result<DiscoveryResult>>,
-  openVerificationBrowser: (url) =>
-    ipcRenderer.invoke('browser:open-verification', url) as Promise<Result<BrowserSessionInfo>>,
-  discoverWithBrowser: (url) =>
-    ipcRenderer.invoke('browser:discover', url) as Promise<Result<DiscoveryResult>>,
+  discover: (url) => invokeIpc('chapter:discover', url),
+  openVerificationBrowser: (url) => invokeIpc('browser:open-verification', url),
+  discoverWithBrowser: (url) => invokeIpc('browser:discover', url),
   cancelBrowserDiscovery: (queueItemId?: string) =>
-    ipcRenderer.invoke('browser:cancel-discovery', queueItemId) as Promise<void>,
-  clearBrowserSession: () => ipcRenderer.invoke('browser:clear-session') as Promise<Result<void>>,
-  chooseOutputDirectory: () => ipcRenderer.invoke('dialog:choose-output-directory') as Promise<string | null>,
-  getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
-  updateEpubCss: (css) => ipcRenderer.invoke('settings:epub-css', css) as Promise<Result<AppSettings>>,
-  updateAppTheme: (theme) => ipcRenderer.invoke('settings:app-theme', theme) as Promise<Result<AppSettings>>,
+    invokeIpc('browser:cancel-discovery', queueItemId),
+  cancelDiscoveryQueueItem: (id) => invokeIpc('discovery-queue:cancel', id),
+  clearBrowserSession: () => invokeIpc('browser:clear-session'),
+  chooseOutputDirectory: () => invokeIpc('dialog:choose-output-directory'),
+  getSettings: () => invokeIpc('settings:get'),
+  updateEpubCss: (css) => invokeIpc('settings:epub-css', css),
+  updateAppTheme: (theme) => invokeIpc('settings:app-theme', theme),
   updateDiscoveryFreshnessHours: (hours) =>
-    ipcRenderer.invoke('settings:discovery-freshness', hours) as Promise<Result<AppSettings>>,
+    invokeIpc('settings:discovery-freshness', hours),
   updateDownloadConcurrency: (maxSimultaneousDownloads: number) =>
-    ipcRenderer.invoke('settings:download-concurrency', maxSimultaneousDownloads) as Promise<Result<AppSettings>>,
+    invokeIpc('settings:download-concurrency', maxSimultaneousDownloads),
   updateDiscoveryConcurrency: (maxSimultaneousDiscoveries: number) =>
-    ipcRenderer.invoke('settings:discovery-concurrency', maxSimultaneousDiscoveries) as Promise<Result<AppSettings>>,
+    invokeIpc('settings:discovery-concurrency', maxSimultaneousDiscoveries),
   updateChapterConcurrency: (maxSimultaneousChaptersPerNovel: number) =>
-    ipcRenderer.invoke('settings:chapter-concurrency', maxSimultaneousChaptersPerNovel) as Promise<Result<AppSettings>>,
+    invokeIpc('settings:chapter-concurrency', maxSimultaneousChaptersPerNovel),
   updateDomainRequestDelays: (preferences: DomainRequestDelayPreference[]) =>
-    ipcRenderer.invoke('settings:domain-request-delays', preferences) as Promise<Result<AppSettings>>,
+    invokeIpc('settings:domain-request-delays', preferences),
   updateSiteExtractionPreferences: (preferences: SiteExtractionPreference[]) =>
-    ipcRenderer.invoke('settings:site-extraction-preferences', preferences) as Promise<Result<AppSettings>>,
-  updateLibraryScanOptions: (scanOldFolder: boolean, scanOldCompletedFolder: boolean) =>
-    ipcRenderer.invoke('settings:library-scan-options', scanOldFolder, scanOldCompletedFolder) as Promise<Result<AppSettings>>,
-  chooseLibraryRoot: () => ipcRenderer.invoke('dialog:choose-library-root') as Promise<string | null>,
-  chooseTrackerCsv: () => ipcRenderer.invoke('dialog:choose-tracker-csv') as Promise<string | null>,
-  getTrackerNovels: () => ipcRenderer.invoke('tracker:list') as Promise<Result<TrackerNovel[]>>,
-  getDownloadHistory: () => ipcRenderer.invoke('download-history:list') as Promise<DownloadHistoryEntry[]>,
-  getDiscoveryQueue: () => ipcRenderer.invoke('discovery-queue:list') as Promise<DiscoveryQueueItemSummary[]>,
-  getDiscoveryQueueItem: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:item', id) as Promise<Result<DiscoveryQueueItem>>,
+    invokeIpc('settings:site-extraction-preferences', preferences),
+  updateLibraryScanOptions: (
+    scanOldFolder: boolean,
+    scanOldCompletedFolder: boolean
+  ) =>
+    invokeIpc(
+      'settings:library-scan-options',
+      scanOldFolder,
+      scanOldCompletedFolder
+    ),
+  chooseLibraryRoot: () => invokeIpc('dialog:choose-library-root'),
+  chooseTrackerCsv: () => invokeIpc('dialog:choose-tracker-csv'),
+  getTrackerNovels: () => invokeIpc('tracker:list'),
+  getDownloadHistory: () => invokeIpc('download-history:list'),
+  getDiscoveryQueue: () => invokeIpc('discovery-queue:list'),
+  getDiscoveryQueueItem: (id: string) => invokeIpc('discovery-queue:item', id),
   addDiscoveryQueueItems: (items: DiscoveryQueueInput[]) =>
-    ipcRenderer.invoke('discovery-queue:add', items) as Promise<Result<DiscoveryQueueItem[]>>,
+    invokeIpc('discovery-queue:add', items),
   retryDiscoveryQueueItem: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:retry', id) as Promise<Result<void>>,
-  retryAllFailedDiscoveries: () =>
-    ipcRenderer.invoke('discovery-queue:retry-failed') as Promise<Result<number>>,
+    invokeIpc('discovery-queue:retry', id),
+  retryAllFailedDiscoveries: () => invokeIpc('discovery-queue:retry-failed'),
   forceRetryDiscoveryQueueItem: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:force-retry', id) as Promise<Result<void>>,
+    invokeIpc('discovery-queue:force-retry', id),
   retryDiscoveryQueueItemWithBrowser: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:retry-browser', id) as Promise<Result<void>>,
+    invokeIpc('discovery-queue:retry-browser', id),
   refreshDiscoveryQueueItem: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:refresh', id) as Promise<Result<void>>,
+    invokeIpc('discovery-queue:refresh', id),
   acceptQueueRecommendations: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:accept-recommendations', id) as Promise<Result<void>>,
+    invokeIpc('discovery-queue:accept-recommendations', id),
   enqueueEpub: (input: GenerateEpubInput, queueItemId?: string) =>
-    ipcRenderer.invoke('download-queue:enqueue', input, queueItemId) as Promise<Result<QueuedEpubJob>>,
-  retryEpub: (id: string) => ipcRenderer.invoke('download-queue:retry', id) as Promise<Result<void>>,
-  recoverEpubQueueItem: (id: string) => ipcRenderer.invoke('download-queue:recover', id) as Promise<Result<void>>,
-  repackageEpub: (id: string) => ipcRenderer.invoke('download-queue:repackage', id) as Promise<Result<void>>,
+    invokeIpc('download-queue:enqueue', input, queueItemId),
+  retryEpub: (id: string) => invokeIpc('download-queue:retry', id),
+  recoverEpubQueueItem: (id: string) => invokeIpc('download-queue:recover', id),
+  repackageEpub: (id: string) => invokeIpc('download-queue:repackage', id),
   saveAvailableChaptersEpub: (id: string) =>
-    ipcRenderer.invoke('download-queue:save-available', id) as Promise<Result<void>>,
-  pauseEpub: (id: string) => ipcRenderer.invoke('download-queue:pause', id) as Promise<Result<void>>,
-  resumeEpub: (id: string) => ipcRenderer.invoke('download-queue:resume', id) as Promise<Result<void>>,
-  cancelEpub: (id: string) => ipcRenderer.invoke('download-queue:cancel', id) as Promise<Result<void>>,
+    invokeIpc('download-queue:save-available', id),
+  pauseEpub: (id: string) => invokeIpc('download-queue:pause', id),
+  resumeEpub: (id: string) => invokeIpc('download-queue:resume', id),
+  cancelEpub: (id: string) => invokeIpc('download-queue:cancel', id),
   moveQueuedEpub: (id: string, direction: 'up' | 'down' | 'top' | 'bottom') =>
-    ipcRenderer.invoke('download-queue:move', id, direction) as Promise<Result<void>>,
+    invokeIpc('download-queue:move', id, direction),
   removeDiscoveryQueueItem: (id: string) =>
-    ipcRenderer.invoke('discovery-queue:remove', id) as Promise<Result<void>>,
-  clearDiscoveryQueue: () =>
-    ipcRenderer.invoke('discovery-queue:clear') as Promise<Result<void>>,
+    invokeIpc('discovery-queue:remove', id),
+  clearDiscoveryQueue: () => invokeIpc('discovery-queue:clear'),
   clearCompletedDiscoveryQueueItems: () =>
-    ipcRenderer.invoke('discovery-queue:clear-completed') as Promise<Result<void>>,
+    invokeIpc('discovery-queue:clear-completed'),
   updateDiscoveryQueueSelection: (id: string, selectedChapterUrls: string[]) =>
-    ipcRenderer.invoke('discovery-queue:update-selection', id, selectedChapterUrls) as Promise<Result<void>>,
-  onDiscoveryQueueUpdate: (listener: (items: DiscoveryQueueItemSummary[]) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, items: DiscoveryQueueItemSummary[]) => listener(items)
-    ipcRenderer.on('discovery-queue:update', handler)
-    return () => ipcRenderer.removeListener('discovery-queue:update', handler)
-  },
-  getLibraryIndexSummary: () => ipcRenderer.invoke('library:index-summary') as Promise<LibraryIndexSummary | null>,
+    invokeIpc('discovery-queue:update-selection', id, selectedChapterUrls),
+  onDiscoveryQueueUpdate: (
+    listener: (items: DiscoveryQueueItemSummary[]) => void
+  ) => onIpcEvent('discovery-queue:update', listener),
+  getLibraryIndexSummary: () => invokeIpc('library:index-summary'),
   getLibraryNovelFiles: (novelKey: string) =>
-    ipcRenderer.invoke('library:novel-files', novelKey) as Promise<Result<LibraryFileRecord[]>>,
-  getLibraryIndexBackupDate: () => ipcRenderer.invoke('library:index-backup-date') as Promise<string | null>,
-  restoreLibraryIndexBackup: () =>
-    ipcRenderer.invoke('library:restore-index-backup') as Promise<Result<LibraryIndexSummary>>,
-  repairEpub: (fileId: string) =>
-    ipcRenderer.invoke('library:repair-epub', fileId) as Promise<EpubRepairResponse>,
-  getLibraryOperations: () =>
-    ipcRenderer.invoke('library:operations') as Promise<LibraryOperation[]>,
-  onLibraryOperationsUpdate: (listener: (operations: LibraryOperation[]) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, operations: LibraryOperation[]) => listener(operations)
-    ipcRenderer.on('library:operations:update', handler)
-    return () => ipcRenderer.removeListener('library:operations:update', handler)
-  },
+    invokeIpc('library:novel-files', novelKey),
+  getLibraryIndexBackupDate: () => invokeIpc('library:index-backup-date'),
+  restoreLibraryIndexBackup: () => invokeIpc('library:restore-index-backup'),
+  repairEpub: (fileId: string) => invokeIpc('library:repair-epub', fileId),
+  getLibraryOperations: () => invokeIpc('library:operations'),
+  onLibraryOperationsUpdate: (
+    listener: (operations: LibraryOperation[]) => void
+  ) => onIpcEvent('library:operations:update', listener),
   scanLibrary: (forceRebuild = false) =>
-    ipcRenderer.invoke('library:scan', forceRebuild) as Promise<Result<LibraryIndexSummary>>,
-  cancelLibraryScan: () => ipcRenderer.invoke('library:cancel-scan') as Promise<void>,
+    invokeIpc('library:scan', forceRebuild),
+  cancelLibraryScan: () => invokeIpc('library:cancel-scan'),
   correctLibraryFile: (fileId: string, correction: LibraryFileCorrection) =>
-    ipcRenderer.invoke('library:correct-file', fileId, correction) as Promise<Result<LibraryIndexSummary>>,
+    invokeIpc('library:correct-file', fileId, correction),
   mergeLibraryEpubs: (fileIds: string[], filename: string) =>
-    ipcRenderer.invoke('library:merge-epubs', fileIds, filename) as Promise<LibraryEpubMergeResponse>,
-  onLibraryEpubMergeProgress: (listener: (progress: EpubMergeProgress) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, progress: EpubMergeProgress) => listener(progress)
-    ipcRenderer.on('library:merge-progress', handler)
-    return () => ipcRenderer.removeListener('library:merge-progress', handler)
-  },
-  openLibraryPath: (path, reveal) => ipcRenderer.invoke('library:open-path', path, reveal),
-  onLibraryProgress: (listener: (progress: LibraryProgress) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, progress: LibraryProgress) => listener(progress)
-    ipcRenderer.on('library:progress', handler)
-    return () => ipcRenderer.removeListener('library:progress', handler)
-  },
+    invokeIpc('library:merge-epubs', fileIds, filename),
+  onLibraryEpubMergeProgress: (
+    listener: (progress: EpubMergeProgress) => void
+  ) => onIpcEvent('library:merge-progress', listener),
+  openLibraryPath: (path, reveal) =>
+    invokeIpc('library:open-path', path, reveal),
+  onLibraryProgress: (listener: (progress: LibraryProgress) => void) =>
+    onIpcEvent('library:progress', listener)
 }
 
 contextBridge.exposeInMainWorld('novelTracker', api)
