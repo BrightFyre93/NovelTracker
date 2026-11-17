@@ -4,7 +4,10 @@ import { readFile, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
+  DEFAULT_DOWNLOAD_RETRY_ATTEMPTS,
   DEFAULT_EPUB_CSS,
+  DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
+  DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS,
   DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
@@ -13,12 +16,18 @@ import {
   MAX_CHAPTER_IMAGE_BYTES,
   MAX_CHAPTER_IMAGES,
   MAX_DISCOVERY_FRESHNESS_HOURS,
+  MAX_DOWNLOAD_RETRY_ATTEMPTS,
+  MAX_HTTP_CONNECT_TIMEOUT_MS,
+  MAX_HTTP_RESPONSE_READ_TIMEOUT_MS,
   MAX_EPUB_CSS_LENGTH,
   MAX_IMAGE_BYTES,
   MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MAX_SIMULTANEOUS_DOWNLOADS,
   MAX_SIMULTANEOUS_DISCOVERIES,
   MIN_DISCOVERY_FRESHNESS_HOURS,
+  MIN_DOWNLOAD_RETRY_ATTEMPTS,
+  MIN_HTTP_CONNECT_TIMEOUT_MS,
+  MIN_HTTP_RESPONSE_READ_TIMEOUT_MS,
   MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MIN_SIMULTANEOUS_DOWNLOADS,
   MIN_SIMULTANEOUS_DISCOVERIES
@@ -47,6 +56,9 @@ const EMPTY_SETTINGS: AppSettings = {
   scanOldFolder: false,
   scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  maxDownloadRetryAttempts: DEFAULT_DOWNLOAD_RETRY_ATTEMPTS,
+  httpConnectTimeoutMs: DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
+  httpResponseReadTimeoutMs: DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS,
   maxSimultaneousDiscoveries: DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   domainRequestDelays: Object.entries(DOMAIN_REQUEST_DELAYS_MS).map(([hostname, delayMs]) => ({
@@ -236,6 +248,24 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       'download concurrency',
       defaults.maxSimultaneousDownloads,
       integerBetween(MIN_SIMULTANEOUS_DOWNLOADS, MAX_SIMULTANEOUS_DOWNLOADS)
+    ),
+    maxDownloadRetryAttempts: setting(
+      'maxDownloadRetryAttempts',
+      'download retry attempts',
+      defaults.maxDownloadRetryAttempts,
+      integerBetween(MIN_DOWNLOAD_RETRY_ATTEMPTS, MAX_DOWNLOAD_RETRY_ATTEMPTS)
+    ),
+    httpConnectTimeoutMs: setting(
+      'httpConnectTimeoutMs',
+      'HTTP connection timeout',
+      defaults.httpConnectTimeoutMs,
+      integerBetween(MIN_HTTP_CONNECT_TIMEOUT_MS, MAX_HTTP_CONNECT_TIMEOUT_MS)
+    ),
+    httpResponseReadTimeoutMs: setting(
+      'httpResponseReadTimeoutMs',
+      'HTTP response timeout',
+      defaults.httpResponseReadTimeoutMs,
+      integerBetween(MIN_HTTP_RESPONSE_READ_TIMEOUT_MS, MAX_HTTP_RESPONSE_READ_TIMEOUT_MS)
     ),
     maxSimultaneousDiscoveries: setting(
       'maxSimultaneousDiscoveries',

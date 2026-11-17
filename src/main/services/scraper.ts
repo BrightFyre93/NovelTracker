@@ -28,11 +28,12 @@ import {
   BLOCKED_PAGE_PATTERN,
   CHAPTER_LABEL_PATTERN,
   CHAPTER_URL_PATTERN,
+  DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
+  DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS,
   DEFAULT_HTTP_429_RETRY_DELAY_MS,
   EPUB_IMAGE_TYPES,
   HTTP_IMAGE_ACCEPT_HEADER,
   HTTP_MAX_RESPONSE_BYTES,
-  HTTP_REQUEST_TIMEOUT_MS,
   MAX_CHAPTER_IMAGE_BYTES,
   MAX_CHAPTER_IMAGES,
   MAX_IMAGE_BYTES,
@@ -49,9 +50,20 @@ const domainNextRequestAt = new Map<string, number>()
 const domainActiveRequests = new Map<string, number>()
 const domainRequestWaiters = new Map<string, Set<() => void>>()
 let domainRequestDelays = new Map<string, number>()
+let httpConnectTimeoutMs = DEFAULT_HTTP_CONNECT_TIMEOUT_MS
+let httpResponseReadTimeoutMs = DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS
 
 export function setDomainRequestDelays(preferences: DomainRequestDelayPreference[]): void {
   domainRequestDelays = new Map(preferences.map(({ hostname, delayMs }) => [hostname, delayMs]))
+}
+
+export function setHttpTimeouts(connectTimeoutMs: number, responseReadTimeoutMs: number): void {
+  if (!Number.isSafeInteger(connectTimeoutMs) || connectTimeoutMs < 1 ||
+    !Number.isSafeInteger(responseReadTimeoutMs) || responseReadTimeoutMs < 1) {
+    throw new RangeError('HTTP timeouts must be positive whole numbers of milliseconds.')
+  }
+  httpConnectTimeoutMs = connectTimeoutMs
+  httpResponseReadTimeoutMs = responseReadTimeoutMs
 }
 
 export function validateHttpUrl(value: unknown): string {
@@ -182,7 +194,7 @@ async function acquireDomainSlot(url: string, signal?: AbortSignal): Promise<() 
 async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ html: string; finalUrl: string }> {
   const releaseDomain = await acquireDomainSlot(url, operationSignal)
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), HTTP_REQUEST_TIMEOUT_MS)
+  const requestTimeout = createRequestTimeout(controller)
   const abortOperation = () => controller.abort()
   operationSignal?.addEventListener('abort', abortOperation, { once: true })
 
@@ -196,6 +208,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
       redirect: 'follow',
       signal: controller.signal
     })
+    requestTimeout.beginResponse()
 
     if (!response.ok) {
       const retryAfterMs =
@@ -225,6 +238,7 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     let totalLength = 0
 
     while (true) {
+      requestTimeout.refreshResponse()
       const { done, value } = await reader.read()
       if (done) break
       totalLength += value.byteLength
@@ -239,15 +253,47 @@ async function fetchHtml(url: string, operationSignal?: AbortSignal): Promise<{ 
     return { html: new TextDecoder().decode(bytes), finalUrl }
   } catch (error) {
     if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
-    if (error instanceof Error && error.name === 'AbortError')
-      throw new TransientNetworkError('The page request timed out.')
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new TransientNetworkError(requestTimeout.timeoutMessage('The page'))
+    }
     if (error instanceof TypeError)
       throw new TransientNetworkError(toMessage(error))
     throw error
   } finally {
-    clearTimeout(timeout)
+    requestTimeout.clear()
     operationSignal?.removeEventListener('abort', abortOperation)
     releaseDomain()
+  }
+}
+
+function createRequestTimeout(controller: AbortController): {
+  beginResponse: () => void
+  refreshResponse: () => void
+  clear: () => void
+  timeoutMessage: (resource: string) => string
+} {
+  let phase: 'connect' | 'response' = 'connect'
+  let timer: ReturnType<typeof setTimeout>
+  const arm = (nextPhase: 'connect' | 'response'): void => {
+    phase = nextPhase
+    clearTimeout(timer)
+    timer = setTimeout(
+      () => controller.abort(),
+      nextPhase === 'connect'
+        ? httpConnectTimeoutMs
+        : httpResponseReadTimeoutMs
+    )
+  }
+  arm('connect')
+  return {
+    beginResponse: () => arm('response'),
+    refreshResponse: () => {
+      if (phase === 'response') arm('response')
+    },
+    clear: () => clearTimeout(timer),
+    timeoutMessage: (resource) => phase === 'connect'
+      ? `${resource} connection timed out.`
+      : `${resource} response timed out.`
   }
 }
 
@@ -355,7 +401,7 @@ export async function fetchImageResource(
     await validateImageHost(url, pageOrigin)
     const releaseDomain = await acquireDomainSlot(url, operationSignal)
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), HTTP_REQUEST_TIMEOUT_MS)
+    const requestTimeout = createRequestTimeout(controller)
     const abortOperation = () => controller.abort()
     operationSignal?.addEventListener('abort', abortOperation, { once: true })
     try {
@@ -365,6 +411,7 @@ export async function fetchImageResource(
         redirect: 'manual',
         signal: controller.signal
       })
+      requestTimeout.beginResponse()
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location')
         if (!location) throw new Error('The image redirect did not include a destination.')
@@ -395,6 +442,7 @@ export async function fetchImageResource(
       const chunks: Uint8Array[] = []
       let totalLength = 0
       while (true) {
+        requestTimeout.refreshResponse()
         const { done, value } = await reader.read()
         if (done) break
         totalLength += value.byteLength
@@ -414,14 +462,14 @@ export async function fetchImageResource(
     } catch (error) {
       if (operationSignal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new TransientNetworkError('The image request timed out.')
+        throw new TransientNetworkError(requestTimeout.timeoutMessage('The image'))
       }
       if (error instanceof TypeError) {
         throw new TransientNetworkError(toMessage(error))
       }
       throw error
     } finally {
-      clearTimeout(timeout)
+      requestTimeout.clear()
       operationSignal?.removeEventListener('abort', abortOperation)
       releaseDomain()
     }

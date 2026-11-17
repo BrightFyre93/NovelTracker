@@ -11,23 +11,32 @@ import type {
 import { toMessage } from '../../../shared/errors'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
+  DEFAULT_DOWNLOAD_RETRY_ATTEMPTS,
   DEFAULT_DOMAIN_REQUEST_DELAY_MS,
   DEFAULT_EPUB_CSS,
+  DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
+  DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS,
   DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  MAX_DOWNLOAD_RETRY_ATTEMPTS,
   MAX_DISCOVERY_FRESHNESS_HOURS,
   MAX_DOMAIN_REQUEST_DELAY_MS,
   MAX_DOMAIN_REQUEST_PREFERENCES,
   MAX_EPUB_CSS_LENGTH,
+  MAX_HTTP_CONNECT_TIMEOUT_MS,
+  MAX_HTTP_RESPONSE_READ_TIMEOUT_MS,
   MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MAX_SIMULTANEOUS_DISCOVERIES,
   MAX_SIMULTANEOUS_DOWNLOADS,
   MIN_DISCOVERY_FRESHNESS_HOURS,
   MIN_DOMAIN_REQUEST_DELAY_MS,
+  MIN_HTTP_CONNECT_TIMEOUT_MS,
+  MIN_HTTP_RESPONSE_READ_TIMEOUT_MS,
   MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MIN_SIMULTANEOUS_DISCOVERIES,
-  MIN_SIMULTANEOUS_DOWNLOADS
+  MIN_SIMULTANEOUS_DOWNLOADS,
+  MIN_DOWNLOAD_RETRY_ATTEMPTS
 } from '../../../shared/constants'
 import {
   normalizeSiteExtractionPreferences,
@@ -46,6 +55,9 @@ const settings = ref<AppSettings>({
   scanOldFolder: false,
   scanOldCompletedFolder: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
+  maxDownloadRetryAttempts: DEFAULT_DOWNLOAD_RETRY_ATTEMPTS,
+  httpConnectTimeoutMs: DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
+  httpResponseReadTimeoutMs: DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS,
   maxSimultaneousDiscoveries: DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   domainRequestDelays: [],
@@ -56,6 +68,9 @@ const settings = ref<AppSettings>({
 })
 const freshnessHoursDraft = ref(DEFAULT_DISCOVERY_FRESHNESS_HOURS)
 const concurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS)
+const retryAttemptsDraft = ref(DEFAULT_DOWNLOAD_RETRY_ATTEMPTS)
+const connectTimeoutSecondsDraft = ref(DEFAULT_HTTP_CONNECT_TIMEOUT_MS / 1000)
+const responseTimeoutSecondsDraft = ref(DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS / 1000)
 const discoveryConcurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES)
 const chapterConcurrencyDraft = ref(DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL)
 const domainRequestDelaysDraft = ref<DomainRequestDelayPreference[]>([])
@@ -80,8 +95,19 @@ const chapterConcurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL - MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL + 1 },
   (_, index) => MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL + index
 )
+const retryAttemptOptions = Array.from(
+  { length: MAX_DOWNLOAD_RETRY_ATTEMPTS - MIN_DOWNLOAD_RETRY_ATTEMPTS + 1 },
+  (_, index) => MIN_DOWNLOAD_RETRY_ATTEMPTS + index
+)
 const freshnessDirty = computed(() => freshnessHoursDraft.value !== settings.value.discoveryFreshnessHours)
 const concurrencyDirty = computed(() => concurrencyDraft.value !== settings.value.maxSimultaneousDownloads)
+const retryAttemptsDirty = computed(() =>
+  retryAttemptsDraft.value !== settings.value.maxDownloadRetryAttempts
+)
+const requestTimeoutsDirty = computed(() =>
+  connectTimeoutSecondsDraft.value * 1000 !== settings.value.httpConnectTimeoutMs ||
+  responseTimeoutSecondsDraft.value * 1000 !== settings.value.httpResponseReadTimeoutMs
+)
 const discoveryConcurrencyDirty = computed(() =>
   discoveryConcurrencyDraft.value !== settings.value.maxSimultaneousDiscoveries
 )
@@ -105,10 +131,20 @@ const freshnessValid = computed(() =>
   freshnessHoursDraft.value >= MIN_DISCOVERY_FRESHNESS_HOURS &&
   freshnessHoursDraft.value <= MAX_DISCOVERY_FRESHNESS_HOURS
 )
+const requestTimeoutsValid = computed(() =>
+  Number.isInteger(connectTimeoutSecondsDraft.value) &&
+  connectTimeoutSecondsDraft.value >= MIN_HTTP_CONNECT_TIMEOUT_MS / 1000 &&
+  connectTimeoutSecondsDraft.value <= MAX_HTTP_CONNECT_TIMEOUT_MS / 1000 &&
+  Number.isInteger(responseTimeoutSecondsDraft.value) &&
+  responseTimeoutSecondsDraft.value >= MIN_HTTP_RESPONSE_READ_TIMEOUT_MS / 1000 &&
+  responseTimeoutSecondsDraft.value <= MAX_HTTP_RESPONSE_READ_TIMEOUT_MS / 1000
+)
 const error = ref('')
 const success = ref('')
 const savingFreshness = ref(false)
 const savingConcurrency = ref(false)
+const savingRetryAttempts = ref(false)
+const savingRequestTimeouts = ref(false)
 const savingDiscoveryConcurrency = ref(false)
 const savingChapterConcurrency = ref(false)
 const savingDomainRequestDelays = ref(false)
@@ -122,6 +158,9 @@ onMounted(async () => {
     settings.value = await window.novelTracker.getSettings()
     freshnessHoursDraft.value = settings.value.discoveryFreshnessHours
     concurrencyDraft.value = settings.value.maxSimultaneousDownloads
+    retryAttemptsDraft.value = settings.value.maxDownloadRetryAttempts
+    connectTimeoutSecondsDraft.value = settings.value.httpConnectTimeoutMs / 1000
+    responseTimeoutSecondsDraft.value = settings.value.httpResponseReadTimeoutMs / 1000
     discoveryConcurrencyDraft.value = settings.value.maxSimultaneousDiscoveries
     chapterConcurrencyDraft.value = settings.value.maxSimultaneousChaptersPerNovel
     domainRequestDelaysDraft.value = settings.value.domainRequestDelays.map((preference) => ({ ...preference }))
@@ -215,6 +254,52 @@ async function saveConcurrency(): Promise<void> {
     error.value = toMessage(reason)
   } finally {
     savingConcurrency.value = false
+  }
+}
+
+async function saveRetryAttempts(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingRetryAttempts.value = true
+  try {
+    const result = await window.novelTracker.updateSettings({
+      maxDownloadRetryAttempts: retryAttemptsDraft.value
+    })
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    retryAttemptsDraft.value = result.value.maxDownloadRetryAttempts
+    success.value = 'Download retry attempts saved.'
+  } catch (reason) {
+    error.value = toMessage(reason)
+  } finally {
+    savingRetryAttempts.value = false
+  }
+}
+
+async function saveRequestTimeouts(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingRequestTimeouts.value = true
+  try {
+    const result = await window.novelTracker.updateSettings({
+      httpConnectTimeoutMs: connectTimeoutSecondsDraft.value * 1000,
+      httpResponseReadTimeoutMs: responseTimeoutSecondsDraft.value * 1000
+    })
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    connectTimeoutSecondsDraft.value = result.value.httpConnectTimeoutMs / 1000
+    responseTimeoutSecondsDraft.value = result.value.httpResponseReadTimeoutMs / 1000
+    success.value = 'HTTP timeouts saved.'
+  } catch (reason) {
+    error.value = toMessage(reason)
+  } finally {
+    savingRequestTimeouts.value = false
   }
 }
 
@@ -503,6 +588,59 @@ async function resetEpubCss(): Promise<void> {
             :loading="savingChapterConcurrency"
             :disabled="savingChapterConcurrency || !chapterConcurrencyDirty"
             @click="saveChapterConcurrency"
+          />
+        </div>
+        <div class="configuration-setting">
+          <label class="field-label" for="download-retry-attempts">Maximum attempts per chapter or cover</label>
+          <select id="download-retry-attempts" v-model.number="retryAttemptsDraft" class="configuration-select">
+            <option v-for="attempts in retryAttemptOptions" :key="attempts" :value="attempts">
+              {{ attempts }} attempt{{ attempts === 1 ? '' : 's' }}
+            </option>
+          </select>
+          <small class="help-text">Includes the initial request. Transient failures are retried up to this total; permanent errors are not retried.</small>
+          <Button
+            label="Save retry attempts"
+            size="small"
+            :loading="savingRetryAttempts"
+            :disabled="savingRetryAttempts || !retryAttemptsDirty"
+            @click="saveRetryAttempts"
+          />
+        </div>
+        <div class="configuration-setting">
+          <span class="field-label">HTTP timeouts</span>
+          <div class="configuration-inline-control">
+            <label for="http-connect-timeout">Connect</label>
+            <input
+              id="http-connect-timeout"
+              v-model.number="connectTimeoutSecondsDraft"
+              class="configuration-number"
+              type="number"
+              :min="MIN_HTTP_CONNECT_TIMEOUT_MS / 1000"
+              :max="MAX_HTTP_CONNECT_TIMEOUT_MS / 1000"
+              step="1"
+            />
+            <span>seconds</span>
+          </div>
+          <div class="configuration-inline-control">
+            <label for="http-response-timeout">Response/read</label>
+            <input
+              id="http-response-timeout"
+              v-model.number="responseTimeoutSecondsDraft"
+              class="configuration-number"
+              type="number"
+              :min="MIN_HTTP_RESPONSE_READ_TIMEOUT_MS / 1000"
+              :max="MAX_HTTP_RESPONSE_READ_TIMEOUT_MS / 1000"
+              step="1"
+            />
+            <span>seconds</span>
+          </div>
+          <small class="help-text">Response/read timeout resets whenever data arrives. Allowed range: 1–120 seconds for each timeout.</small>
+          <Button
+            label="Save HTTP timeouts"
+            size="small"
+            :loading="savingRequestTimeouts"
+            :disabled="savingRequestTimeouts || !requestTimeoutsDirty || !requestTimeoutsValid"
+            @click="saveRequestTimeouts"
           />
         </div>
         <div class="configuration-setting">

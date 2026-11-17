@@ -29,6 +29,9 @@ import type {
 } from '../shared/contracts'
 import {
   MAX_DISCOVERY_FRESHNESS_HOURS,
+  MAX_DOWNLOAD_RETRY_ATTEMPTS,
+  MAX_HTTP_CONNECT_TIMEOUT_MS,
+  MAX_HTTP_RESPONSE_READ_TIMEOUT_MS,
   MAX_DOMAIN_REQUEST_PREFERENCES,
   MAX_EPUB_CSS_LENGTH,
   MAX_EPUB_MERGE_TOTAL_SOURCE_BYTES,
@@ -39,6 +42,9 @@ import {
   MAX_SIMULTANEOUS_DOWNLOADS,
   MAX_SITE_EXTRACTION_PREFERENCES,
   MIN_DISCOVERY_FRESHNESS_HOURS,
+  MIN_DOWNLOAD_RETRY_ATTEMPTS,
+  MIN_HTTP_CONNECT_TIMEOUT_MS,
+  MIN_HTTP_RESPONSE_READ_TIMEOUT_MS,
   MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
   MIN_SIMULTANEOUS_DISCOVERIES,
   MIN_SIMULTANEOUS_DOWNLOADS
@@ -64,6 +70,7 @@ import {
   discoverChapters,
   discoverChaptersUsingPageLoader,
   setDomainRequestDelays,
+  setHttpTimeouts,
   validateHttpUrl
 } from './services/scraper'
 import { SerialQueue } from './services/serialQueue'
@@ -397,6 +404,21 @@ const settingsUpdatePatchSchema: z.ZodType<SettingsUpdatePatch> = z
       MIN_SIMULTANEOUS_DOWNLOADS,
       MAX_SIMULTANEOUS_DOWNLOADS,
       `Maximum simultaneous downloads must be a whole number from ${MIN_SIMULTANEOUS_DOWNLOADS} to ${MAX_SIMULTANEOUS_DOWNLOADS}.`
+    ).optional(),
+    maxDownloadRetryAttempts: integerInRange(
+      MIN_DOWNLOAD_RETRY_ATTEMPTS,
+      MAX_DOWNLOAD_RETRY_ATTEMPTS,
+      `Maximum download attempts must be a whole number from ${MIN_DOWNLOAD_RETRY_ATTEMPTS} to ${MAX_DOWNLOAD_RETRY_ATTEMPTS}.`
+    ).optional(),
+    httpConnectTimeoutMs: integerInRange(
+      MIN_HTTP_CONNECT_TIMEOUT_MS,
+      MAX_HTTP_CONNECT_TIMEOUT_MS,
+      `The connection timeout must be a whole number from ${MIN_HTTP_CONNECT_TIMEOUT_MS} to ${MAX_HTTP_CONNECT_TIMEOUT_MS} milliseconds.`
+    ).optional(),
+    httpResponseReadTimeoutMs: integerInRange(
+      MIN_HTTP_RESPONSE_READ_TIMEOUT_MS,
+      MAX_HTTP_RESPONSE_READ_TIMEOUT_MS,
+      `The response timeout must be a whole number from ${MIN_HTTP_RESPONSE_READ_TIMEOUT_MS} to ${MAX_HTTP_RESPONSE_READ_TIMEOUT_MS} milliseconds.`
     ).optional(),
     maxSimultaneousDiscoveries: integerInRange(
       MIN_SIMULTANEOUS_DISCOVERIES,
@@ -1129,6 +1151,12 @@ app
     settingsService.onDidChange((current, patch) => {
       if ('domainRequestDelays' in patch)
         setDomainRequestDelays(current.domainRequestDelays)
+      if ('httpConnectTimeoutMs' in patch || 'httpResponseReadTimeoutMs' in patch) {
+        setHttpTimeouts(
+          current.httpConnectTimeoutMs,
+          current.httpResponseReadTimeoutMs
+        )
+      }
       if (
         'maxSimultaneousDownloads' in patch ||
         'maxSimultaneousChaptersPerNovel' in patch ||
@@ -1170,6 +1198,7 @@ app
       errorMessage
     })
     setDomainRequestDelays(settings.domainRequestDelays)
+    setHttpTimeouts(settings.httpConnectTimeoutMs, settings.httpResponseReadTimeoutMs)
     await createWindow()
     if (storageRecoveryWarnings.length > 0) {
       await dialog.showMessageBox({

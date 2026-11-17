@@ -620,9 +620,10 @@ async function openItemInBrowser(item: DiscoveryQueueItemSummary): Promise<void>
       return
     }
     browserReadyId.value = item.id
+    const nextAction = item.status === 'paused' ? 'resume' : 'retry'
     notice.value = failedChapter
-      ? `Opened failed chapter "${failedChapter.title}" in Chromium. Complete any verification there, then retry the EPUB job.`
-      : `Opened ${item.title} in Chromium. Complete any sign-in or verification manually, then retry using the browser.`
+      ? `Opened failed chapter "${failedChapter.title}" in Chromium. Complete any verification there, then ${nextAction} the EPUB job.`
+      : `Opened ${item.title} in Chromium. Complete any sign-in or verification manually, then ${nextAction} the EPUB job.`
   } catch (reason) {
     error.value = toMessage(reason)
   } finally {
@@ -1508,7 +1509,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             @click="repackageOffline(item)"
           />
           <Button
-            v-if="item.downloadOptions && ['failed', 'partially-completed'].includes(item.status)"
+            v-if="item.downloadOptions && ['failed', 'partially-completed', 'paused', 'cancelled'].includes(item.status)"
             label="Open verification browser"
             icon="pi pi-external-link"
             size="small"

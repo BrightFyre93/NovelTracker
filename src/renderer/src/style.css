@@ -1067,8 +1067,8 @@ footer {
 
 .configuration-settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .configuration-setting {
@@ -1986,6 +1986,10 @@ html[data-theme='dark'] .p-message {
 
   .library-browser {
     grid-template-columns: 1fr;
+  }
+
+  .configuration-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .site-extraction-preference-form,

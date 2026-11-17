@@ -473,6 +473,7 @@ export function createQueueRuntime(
     const item = discoveryQueue.find((candidate) => candidate.id === itemId)
     if (!item || !item.downloadOptions) return
     const options = item.downloadOptions
+    const retryAttempts = settingsService.current.maxDownloadRetryAttempts
     await withChapters(item, async () => {
     const saveAvailableChaptersOnly = item.saveAvailableChaptersOnly === true
     const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
@@ -612,7 +613,7 @@ export function createQueueRuntime(
                     controller.signal
                   ),
                 {
-                  attempts: 3,
+                  attempts: retryAttempts,
                   shouldRetry: canRetryChapter,
                   signal: controller.signal,
                   cancellationMessage: 'EPUB creation was cancelled.'
@@ -624,6 +625,23 @@ export function createQueueRuntime(
             }
   
             if (controller.signal.aborted) return
+            if (lastError instanceof VerificationRequiredError) {
+              item.failedChapters = [
+                {
+                  url: chapter.url,
+                  title: chapter.title,
+                  error: errorMessage(lastError)
+                },
+                ...item.failedChapters.filter(
+                  (failed) => failed.url !== chapter.url
+                )
+              ]
+              item.error = errorMessage(lastError)
+              const active = activeDownloads.get(itemId)
+              if (active?.requestedAction === 'none')
+                active.requestedAction = 'pause'
+              throw lastError
+            }
             if (savedContent) {
               await writeChapterArtifact(dataDirectory(), itemId, savedContent)
               completedSelectedChapterCount += 1
@@ -827,7 +845,7 @@ export function createQueueRuntime(
                   return fetchedCover
                 },
                 {
-                  attempts: 3,
+                  attempts: retryAttempts,
                   shouldRetry: canRetryChapter,
                   signal: controller.signal,
                   cancellationMessage: 'EPUB creation was cancelled.'
@@ -963,7 +981,11 @@ export function createQueueRuntime(
       } else if (requestedAction === 'pause' || requestedAction === 'cancel') {
         const finalStatus = requestedAction === 'pause' ? 'paused' : 'cancelled'
         transitionQueueItem(item, finalStatus)
-        item.error = ''
+        item.error =
+          requestedAction === 'pause' &&
+          error instanceof VerificationRequiredError
+            ? errorMessage(error)
+            : ''
       } else {
         const packagingFailed =
           packagingStarted &&
@@ -1012,7 +1034,11 @@ export function createQueueRuntime(
         item.progress = {
           current: completedSelectedChapterCount,
           total: selectedChapters.length,
-          message: item.status
+          message:
+            requestedAction === 'pause' &&
+            error instanceof VerificationRequiredError
+              ? 'Waiting for manual verification'
+              : item.status
         }
       }
       try {

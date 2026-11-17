@@ -5,6 +5,9 @@ export interface AppSettings {
   scanOldFolder: boolean
   scanOldCompletedFolder: boolean
   maxSimultaneousDownloads: number
+  maxDownloadRetryAttempts: number
+  httpConnectTimeoutMs: number
+  httpResponseReadTimeoutMs: number
   maxSimultaneousDiscoveries: number
   maxSimultaneousChaptersPerNovel: number
   domainRequestDelays: DomainRequestDelayPreference[]
@@ -20,6 +23,9 @@ export type SettingsUpdatePatch = Partial<
     | 'scanOldFolder'
     | 'scanOldCompletedFolder'
     | 'maxSimultaneousDownloads'
+    | 'maxDownloadRetryAttempts'
+    | 'httpConnectTimeoutMs'
+    | 'httpResponseReadTimeoutMs'
     | 'maxSimultaneousDiscoveries'
     | 'maxSimultaneousChaptersPerNovel'
     | 'domainRequestDelays'

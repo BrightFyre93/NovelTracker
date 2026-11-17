@@ -12,6 +12,7 @@ const allowedTransitions: Record<
   ready: ['needs-review', 'discovering', 'queued', 'failed'],
   queued: ['downloading', 'paused', 'cancelled', 'failed', 'discovering'],
   downloading: [
+    'queued',
     'paused',
     'completed',
     'partially-completed',
