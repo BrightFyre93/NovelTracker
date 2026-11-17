@@ -18,6 +18,9 @@ export interface EpubPackagingInput {
   completedOutputs?: EpubOutputRecord[]
   includeCover: boolean
   metadata: EpubNovelMetadata
+  appVersion?: string
+  volumeIndex?: number
+  volumeCount?: number
 }
 
 export interface EpubPackagingResult {

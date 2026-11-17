@@ -13,6 +13,15 @@ export interface LibraryFileCorrection {
   chapterNumbers?: number[]
 }
 
+export interface LibraryPossibleMove {
+  newFilename: string
+  newFileId: string
+  candidates: Array<{
+    previousFilename: string
+    correction: LibraryFileCorrection
+  }>
+}
+
 export interface LibraryFileRecord {
   id: string
   path: string
@@ -23,6 +32,8 @@ export interface LibraryFileRecord {
   size: number
   modifiedAt: string
   novelTitle: string
+  stableBookId?: string
+  volumeIndex?: number
   author: string
   language: string
   chapterTitles: string[]
@@ -44,6 +55,11 @@ export interface LibraryIndex {
   scanSummary?: {
     reusedFiles: number
     inspectedFiles: number
+    reusedFileIds?: string[]
+    scannedFolders?: LibraryFolderState[]
+    contentChanged?: boolean
+    possibleMoves?: LibraryPossibleMove[]
+    scanStartedAt?: string
   }
 }
 
@@ -92,6 +108,7 @@ export interface LibraryIndexOverview {
   fileCount: number
   scanErrors: number
   scanSummary?: LibraryIndex['scanSummary']
+  possibleMoves?: LibraryPossibleMove[]
 }
 
 export interface LibraryIndexSummary extends LibraryIndexOverview {
@@ -118,6 +135,7 @@ export interface LibraryEpubMergeResult {
   chapterCount: number
   duplicateChapterCount: number
   conflictingChapterCount: number
+  conflictingChapterTitles: string[]
   firstChapter: number | null
   lastChapter: number | null
 }

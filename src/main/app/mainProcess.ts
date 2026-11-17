@@ -131,7 +131,7 @@ function packageEpubInWorker(
   onProgress: (progress: EpubPackagingProgress) => void
 ): Promise<EpubPackagingResult> {
   const worker = new Worker(join(__dirname, 'epubPackageWorker.js'), {
-    workerData: input,
+    workerData: { ...input, appVersion: app.getVersion() },
     resourceLimits: { maxOldGenerationSizeMb: 1024 }
   })
   return runWorker<EpubMergeProgress, EpubPackagingResult>(worker, {

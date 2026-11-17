@@ -496,6 +496,7 @@ export async function validateEpubFile(
         const required = [
           'mimetype',
           'META-INF/container.xml',
+          'META-INF/noveltracker.json',
           'package.opf',
           'nav.xhtml',
           'styles.css',
@@ -544,6 +545,7 @@ export async function validateEpubFile(
           [
             'mimetype',
             'META-INF/container.xml',
+            'META-INF/noveltracker.json',
             'package.opf',
             'nav.xhtml',
             'styles.css',
@@ -784,7 +786,8 @@ export async function writeEpub(
   css = DEFAULT_EPUB_CSS,
   metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata(),
   onProgress?: (progress: EpubMergeProgress) => void,
-  identifierSeed?: string
+  identifierSeed?: string,
+  appVersion?: string
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
   const dataDirectory = await mkdtemp(
@@ -818,6 +821,7 @@ export async function writeEpub(
           language,
           identifierSeed: identifierSeed ?? metadata.sourceUrl
         },
+        appVersion,
         includeCover: Boolean(metadata.cover),
         metadata: metadataWithoutCover
       },
@@ -925,7 +929,14 @@ export async function writeEpubFromArtifactStore(
     if (prior) output = await verifyExistingOutput(prior)
     if (!output) {
       const result = await writeSingleEpubFromArtifactStore(
-        { ...input, chapters, filename, includeCover: Boolean(cover) },
+        {
+          ...input,
+          chapters,
+          filename,
+          includeCover: Boolean(cover),
+          volumeIndex: index + 1,
+          volumeCount: volumes.length
+        },
         signal,
         onProgress
       )
@@ -947,6 +958,42 @@ export async function writeEpubFromArtifactStore(
     outputPath: firstOutput.path,
     outputPaths,
     overwroteExistingFile
+  }
+}
+
+function createNovelTrackerSidecar(
+  input: EpubPackagingInput,
+  title: string,
+  language: string
+): Record<string, unknown> {
+  const sourceUrl = input.metadata.sourceUrl.trim()
+  const sourceUrlHash = sourceUrl
+    ? createHash('sha256').update(sourceUrl).digest('hex')
+    : null
+  const stableSeed = input.outputOptions.identifierSeed || sourceUrlHash || title
+  return {
+    schemaVersion: 1,
+    bookId: createHash('sha256')
+      .update(`noveltracker-book-v1:${stableSeed}`)
+      .digest('hex'),
+    sourceUrlHash,
+    title,
+    author: input.author.trim(),
+    language,
+    volume: {
+      index: input.volumeIndex ?? 1,
+      count: input.volumeCount ?? 1
+    },
+    appVersion: input.appVersion ?? process.env.npm_package_version ?? 'unknown',
+    generatedPages: [
+      ...(input.outputOptions.includeNovelInfoPage ? ['text/novel-info.xhtml'] : []),
+      ...(input.outputOptions.includeChapterListPage ? ['text/chapter-list.xhtml'] : [])
+    ],
+    chapters: input.chapters.map((chapter) => ({
+      number: parseChapterNumber(chapter.title),
+      title: chapter.title,
+      sourceUrl: chapter.url
+    }))
   }
 }
 
@@ -1151,6 +1198,15 @@ async function writeSingleEpubFromArtifactStore(
     })
     zip.file('nav.xhtml', files.nav, { binary: false, compression: 'DEFLATE' })
     zip.file('styles.css', input.outputOptions.css)
+    zip.file(
+      'META-INF/noveltracker.json',
+      JSON.stringify(
+        createNovelTrackerSidecar(input, title, language),
+        null,
+        2
+      ),
+      { binary: false, compression: 'DEFLATE' }
+    )
     for (const image of packagedImages) {
       zip.file(image.href, createReadStream(image.path), {
         binary: true,

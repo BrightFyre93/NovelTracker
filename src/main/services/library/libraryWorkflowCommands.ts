@@ -1,4 +1,4 @@
-import { dialog, shell } from 'electron'
+import { app, dialog, shell } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -13,6 +13,7 @@ import type {
   LibraryFileCorrectionResult,
   LibraryIndex,
   LibraryIndexOverview,
+  LibraryPossibleMove,
   LibraryProgress,
   Result
 } from '../../../shared/contracts'
@@ -164,7 +165,7 @@ export function createLibraryWorkflowCommands(context: LibraryWorkflowContext) {
         )
         scan.worker = worker
         if (scan.cancelRequested) worker.postMessage({ type: 'cancel' })
-        await runWorker<LibraryProgress, void>(worker, {
+        const scanResult = await runWorker<LibraryProgress, { possibleMoves: LibraryPossibleMove[] }>(worker, {
           workerName: 'Library scan',
           missingResultMessage:
             'Library scan worker exited without saving an index.',
@@ -180,7 +181,10 @@ export function createLibraryWorkflowCommands(context: LibraryWorkflowContext) {
         const overview = await libraryIndexRepository.readOverview()
         if (!overview)
           throw new Error('The library scan completed without saving an index.')
-        return { ok: true, value: overview }
+        return {
+          ok: true,
+          value: { ...overview, possibleMoves: scanResult.possibleMoves }
+        }
       } catch (error) {
         if (!scan.cancelRequested) console.error('Library scan failed:', error)
         return { ok: false, error: errorMessage(error) }
@@ -414,6 +418,7 @@ export function createLibraryWorkflowCommands(context: LibraryWorkflowContext) {
           outputDirectory,
           language: sourceFiles[0]?.language ?? 'en',
           epubCss: settings.epubCss,
+          appVersion: app.getVersion(),
           sources: sourceFiles.map((file) => ({
             path: file.path,
             filename: file.filename,

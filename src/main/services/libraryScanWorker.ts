@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads'
-import type { LibraryProgress } from '../../shared/contracts'
+import type { LibraryPossibleMove, LibraryProgress } from '../../shared/contracts'
 import { OperationCancelledError, toMessage } from '../../shared/errors'
 import { SqliteDatabase } from '../infra/sqliteDatabase'
 import { createSqliteLibraryIndexRepository } from './library/sqliteLibraryIndexRepository'
@@ -14,7 +14,10 @@ interface LibraryScanWorkerInput {
   scanOldCompletedFolder: boolean
 }
 
-type LibraryScanWorkerMessage = WorkerMessage<LibraryProgress, void>
+type LibraryScanWorkerMessage = WorkerMessage<
+  LibraryProgress,
+  { possibleMoves: LibraryPossibleMove[] }
+>
 
 function getWorkerPort(): NonNullable<typeof parentPort> {
   if (!parentPort)
@@ -35,9 +38,7 @@ port.on('message', (message: { type?: string }) => {
 })
 
 async function run(): Promise<void> {
-  const previousIndex = input.forceRebuild
-    ? null
-    : await libraryIndexRepository.read()
+  const previousIndex = await libraryIndexRepository.readScanCache()
 
   const index = await scanLibrary(
     input.libraryRoot,
@@ -50,7 +51,8 @@ async function run(): Promise<void> {
       } satisfies LibraryScanWorkerMessage),
     {
       scanOldFolder: input.scanOldFolder,
-      scanOldCompletedFolder: input.scanOldCompletedFolder
+      scanOldCompletedFolder: input.scanOldCompletedFolder,
+      forceRebuild: input.forceRebuild
     }
   )
   if (controller.signal.aborted)
@@ -67,14 +69,11 @@ async function run(): Promise<void> {
       message: 'Saving library index…'
     }
   } satisfies LibraryScanWorkerMessage)
-  await libraryIndexRepository.write(
-    index,
-    input.forceRebuild ? undefined : previousIndex
-  )
+  await libraryIndexRepository.writeScan(index)
 
   port.postMessage({
     type: 'complete',
-    result: undefined
+    result: { possibleMoves: index.scanSummary?.possibleMoves ?? [] }
   } satisfies LibraryScanWorkerMessage)
 }
 

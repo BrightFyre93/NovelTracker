@@ -433,6 +433,41 @@ async function scan(forceRebuild = false): Promise<void> {
     }
     index.value = result.value
     backupDate.value = await window.novelTracker.getLibraryIndexBackupDate()
+    let transferredCorrections = 0
+    let unresolvedMoves = 0
+    for (const move of result.value.possibleMoves ?? []) {
+      const choices = move.candidates.map((candidate, choiceIndex) => {
+        const correctionDetails = [
+          candidate.correction.novelTitle ? `title: ${candidate.correction.novelTitle}` : '',
+          candidate.correction.chapterNumbers
+            ? `chapters: ${candidate.correction.chapterNumbers.join(', ')}`
+            : ''
+        ].filter(Boolean).join('; ')
+        return `${choiceIndex + 1}. ${candidate.previousFilename}${correctionDetails ? ` (${correctionDetails})` : ''}`
+      }).join('\n')
+      const answer = window.prompt(
+        `“${move.newFilename}” matches multiple legacy files. Choose which correction to transfer, or Cancel to leave it unchanged:\n\n${choices}`
+      )
+      const choice = answer === null ? -1 : Number(answer) - 1
+      const candidate = Number.isInteger(choice) && choice >= 0
+        ? move.candidates[choice]
+        : undefined
+      if (!candidate) {
+        unresolvedMoves += 1
+        continue
+      }
+      const correctionResult = await window.novelTracker.correctLibraryFile(
+        move.newFileId,
+        candidate.correction
+      )
+      if (!correctionResult.ok) {
+        error.value = correctionResult.error
+        unresolvedMoves += 1
+        continue
+      }
+      transferredCorrections += 1
+      index.value = correctionResult.value.index
+    }
     clearSelectedNovel()
     await refreshNovelSummaries()
     selectFirstNovel()
@@ -443,7 +478,11 @@ async function scan(forceRebuild = false): Promise<void> {
     const errorMessage = result.value.scanErrors
       ? ` ${result.value.scanErrors.toLocaleString()} files need attention.`
       : ''
-    success.value = `${forceRebuild ? 'Rebuilt' : 'Indexed'} ${result.value.fileCount.toLocaleString()} files.${cacheMessage}${errorMessage}`
+    const moveMessage = [
+      transferredCorrections ? ` Transferred ${transferredCorrections} confirmed legacy correction${transferredCorrections === 1 ? '' : 's'}.` : '',
+      unresolvedMoves ? ` ${unresolvedMoves} possible legacy move${unresolvedMoves === 1 ? '' : 's'} left unchanged.` : ''
+    ].join('')
+    success.value = `${forceRebuild ? 'Rebuilt' : 'Indexed'} ${result.value.fileCount.toLocaleString()} files.${cacheMessage}${errorMessage}${moveMessage}`
   } catch (reason) {
     error.value = toMessage(reason)
   } finally {
@@ -589,7 +628,7 @@ async function mergeSelectedEpubs(): Promise<void> {
       ? ` Removed ${result.value.duplicateChapterCount.toLocaleString()} duplicate chapter(s); the earlier-range copy was kept.`
       : ''
     const conflicts = result.value.conflictingChapterCount
-      ? ` ${result.value.conflictingChapterCount.toLocaleString()} duplicate(s) had different text; the earlier-range copy was kept.`
+      ? ` Kept ${result.value.conflictingChapterCount.toLocaleString()} conflicting chapter version(s) instead of dropping them: ${result.value.conflictingChapterTitles.slice(0, 8).join(', ')}${result.value.conflictingChapterCount > 8 ? ', …' : ''}.`
       : ''
     success.value = `Created ${result.value.chapterCount.toLocaleString()} chapters at ${result.value.outputPath}.${duplicates}${conflicts}`
     mergeFileIds.value = []

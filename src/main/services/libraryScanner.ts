@@ -4,12 +4,14 @@ import { extname, isAbsolute, relative, resolve } from 'node:path'
 import type {
   LibraryFileRecord,
   LibraryIndex,
+  LibraryPossibleMove,
   LibraryFileFormat,
   LibraryProgress,
   LibraryFolderState
 } from '../../shared/contracts'
 import { LIBRARY_FOLDERS, MAX_EPUB_INPUT_BYTES } from '../../shared/constants'
 import { isNodeError, OperationCancelledError, toMessage } from '../../shared/errors'
+import { normalizeNovelTitleForMatching } from '../../shared/novelTitle'
 import {
   parseFilenameRange,
   stripTrailingFilenameRange
@@ -30,6 +32,7 @@ interface ScannableFile {
 export interface LibraryScanOptions {
   scanOldFolder: boolean
   scanOldCompletedFolder: boolean
+  forceRebuild?: boolean
 }
 
 export type PackagedEpubInspection =
@@ -134,6 +137,24 @@ function normalizedRelativePath(relativePath: string): string {
   return relativePath.replace(/[\\/]+/g, '/').toLocaleLowerCase()
 }
 
+function stableBookVolumeKey(file: LibraryFileRecord): string | null {
+  return file.stableBookId && Number.isSafeInteger(file.volumeIndex) && file.volumeIndex! > 0
+    ? `${file.stableBookId}:${file.volumeIndex}`
+    : null
+}
+
+function legacyMoveIdentity(file: LibraryFileRecord): string | null {
+  if (file.stableBookId || file.chapterNumbers.length === 0) return null
+  const numbers = [...file.chapterNumbers].sort((left, right) => left - right)
+  return [
+    file.size,
+    file.modifiedAt,
+    normalizeNovelTitleForMatching(file.novelTitle),
+    numbers[0],
+    numbers[numbers.length - 1]
+  ].join(':')
+}
+
 async function matchesLibraryRoot(previousIndex: LibraryIndex | null, root: string): Promise<boolean> {
   if (
     !previousIndex ||
@@ -191,6 +212,8 @@ function cachedFile(
     ...libraryFileIdentity(file),
     filename: cached.filename,
     novelTitle: cached.novelTitle,
+    ...(cached.stableBookId ? { stableBookId: cached.stableBookId } : {}),
+    ...(cached.volumeIndex ? { volumeIndex: cached.volumeIndex } : {}),
     author: cached.author,
     language: cached.language,
     chapterTitles: cached.chapterTitles ?? [],
@@ -313,9 +336,11 @@ export async function scanLibrary(
   onProgress: (progress: LibraryProgress) => void,
   options: LibraryScanOptions
 ): Promise<LibraryIndex> {
+  const scanStartedAt = new Date().toISOString()
   const root = await realpath(libraryRoot)
   const files: ScannableFile[] = []
   let scanErrors = 0
+  const fullyScannedFolders = new Set<LibraryFolderState>()
   const folders = LIBRARY_FOLDERS.filter((folder) =>
     (folder !== 'Old' || options.scanOldFolder) &&
     (folder !== 'Old Completed' || options.scanOldCompletedFolder)
@@ -345,6 +370,7 @@ export async function scanLibrary(
     )
     files.push(...result.files)
     scanErrors += result.errors
+    if (result.errors === 0) fullyScannedFolders.add(folder)
   }
 
   const canReusePreviousIndex = await matchesLibraryRoot(previousIndex, root)
@@ -355,9 +381,37 @@ export async function scanLibrary(
       .filter((file) => typeof file.relativePath === 'string')
       .map((file) => [normalizedRelativePath(file.relativePath), file])
   )
+  const previousFilesByStableBookVolume = new Map<string, LibraryFileRecord>()
+  const repeatedStableBookVolumes = new Set<string>()
+  const previousFilesByLegacyIdentity = new Map<string, LibraryFileRecord>()
+  const legacyIdentityCandidates = new Map<string, LibraryFileRecord[]>()
+  const repeatedLegacyIdentities = new Set<string>()
+  for (const previousFile of previousFiles) {
+    const key = stableBookVolumeKey(previousFile)
+    if (!key) continue
+    if (previousFilesByStableBookVolume.has(key)) {
+      repeatedStableBookVolumes.add(key)
+      previousFilesByStableBookVolume.delete(key)
+    } else if (!repeatedStableBookVolumes.has(key)) {
+      previousFilesByStableBookVolume.set(key, previousFile)
+    }
+    const legacyKey = legacyMoveIdentity(previousFile)
+    if (!legacyKey) continue
+    const candidates = legacyIdentityCandidates.get(legacyKey) ?? []
+    candidates.push(previousFile)
+    legacyIdentityCandidates.set(legacyKey, candidates)
+    if (previousFilesByLegacyIdentity.has(legacyKey)) {
+      repeatedLegacyIdentities.add(legacyKey)
+      previousFilesByLegacyIdentity.delete(legacyKey)
+    } else if (!repeatedLegacyIdentities.has(legacyKey)) {
+      previousFilesByLegacyIdentity.set(legacyKey, previousFile)
+    }
+  }
   const previousCorrections = canReusePreviousIndex ? previousIndex?.corrections ?? {} : {}
   const corrections: LibraryIndex['corrections'] = {}
   const indexedFiles: LibraryFileRecord[] = []
+  const reusedFileIds: string[] = []
+  const possibleMoves: LibraryPossibleMove[] = []
   let reusedFiles = 0
   let inspectedFiles = 0
 
@@ -371,12 +425,15 @@ export async function scanLibrary(
     message: `Starting metadata inspection for ${files.length.toLocaleString()} files…`
   })
 
-  for (let index = 0; index < files.length; index += 1) {
+  const inspectFile = async (file: ScannableFile): Promise<{
+    record: LibraryFileRecord
+    correction?: LibraryIndex['corrections'][string]
+    possibleMove?: LibraryPossibleMove
+  }> => {
     checkCancelled(signal)
-    const file = files[index]
     const previousFile = previousFilesById.get(file.id) ??
       previousFilesByPath.get(normalizedRelativePath(file.relativePath))
-    let record = cachedFile(previousFile, file)
+    let record = options.forceRebuild ? undefined : cachedFile(previousFile, file)
     if (!record) {
       inspectedFiles += 1
       try {
@@ -416,32 +473,88 @@ export async function scanLibrary(
       }
     } else {
       reusedFiles += 1
+      reusedFileIds.push(file.id)
     }
 
+    const stablePreviousFile = stableBookVolumeKey(record)
+      ? previousFilesByStableBookVolume.get(stableBookVolumeKey(record)!)
+      : undefined
+    const legacyKey = previousFile ? null : legacyMoveIdentity(record)
+    const legacyPreviousFile = legacyKey && !repeatedLegacyIdentities.has(legacyKey)
+      ? previousFilesByLegacyIdentity.get(legacyKey)
+      : undefined
     const correction = previousCorrections[file.id] ??
-      (previousFile ? previousCorrections[previousFile.id] : undefined)
-    if (correction) corrections[file.id] = correction
+      (previousFile ? previousCorrections[previousFile.id] : undefined) ??
+      (stablePreviousFile ? previousCorrections[stablePreviousFile.id] : undefined) ??
+      (legacyPreviousFile ? previousCorrections[legacyPreviousFile.id] : undefined)
+    const possibleMoveCandidates = legacyKey && repeatedLegacyIdentities.has(legacyKey)
+      ? legacyIdentityCandidates.get(legacyKey) ?? []
+      : []
+    const candidates = possibleMoveCandidates.flatMap((candidate) => {
+      const previousCorrection = previousCorrections[candidate.id]
+      return previousCorrection && Object.keys(previousCorrection).length > 0
+        ? [{ previousFilename: candidate.filename, correction: previousCorrection }]
+        : []
+    })
+    const possibleMove: LibraryPossibleMove | undefined = candidates.length > 0
+      ? {
+          newFilename: file.relativePath.split(/[\\/]/).pop() ?? file.relativePath,
+          newFileId: file.id,
+          candidates
+        }
+      : undefined
     if (correction?.novelTitle) record.novelTitle = correction.novelTitle
     if (correction?.chapterNumbers) {
       record.chapterNumbers = [...correction.chapterNumbers].sort((left, right) => left - right)
       record.coverageConfidence = 'user-corrected'
     }
-    indexedFiles.push(record)
+    return { record, correction, possibleMove }
+  }
 
-    if ((index + 1) % 25 === 0 || index + 1 === files.length) {
-      onProgress({
-        stage: 'inspect',
-        current: index + 1,
-        total: files.length,
-        discoveredFiles: files.length,
-        indexedFiles: index + 1,
-        totalFiles: files.length,
-        message: `Indexed ${(index + 1).toLocaleString()} of ${files.length.toLocaleString()} files…`
-      })
+  const inspectionConcurrency = 4
+  for (let offset = 0; offset < files.length; offset += inspectionConcurrency) {
+    checkCancelled(signal)
+    const batch = files.slice(offset, offset + inspectionConcurrency)
+    const results = await Promise.all(batch.map((file) => inspectFile(file)))
+    for (let batchIndex = 0; batchIndex < results.length; batchIndex += 1) {
+      const result = results[batchIndex]
+      const file = batch[batchIndex]
+      if (result.correction) corrections[file.id] = result.correction
+      if (result.possibleMove && possibleMoves.length < 20) {
+        possibleMoves.push(result.possibleMove)
+      }
+      indexedFiles.push(result.record)
+      const current = offset + batchIndex + 1
+      if (current % 25 === 0 || current === files.length) {
+        onProgress({
+          stage: 'inspect',
+          current,
+          total: files.length,
+          discoveredFiles: files.length,
+          indexedFiles: current,
+          totalFiles: files.length,
+          message: `Indexed ${current.toLocaleString()} of ${files.length.toLocaleString()} files…`
+        })
+      }
     }
   }
 
+  const indexedIds = new Set(indexedFiles.map((file) => file.id))
+  for (const previousFile of previousFiles) {
+    if (fullyScannedFolders.has(previousFile.folderState) || indexedIds.has(previousFile.id)) continue
+    indexedFiles.push(previousFile)
+    indexedIds.add(previousFile.id)
+    reusedFileIds.push(previousFile.id)
+    reusedFiles += 1
+    const correction = previousCorrections[previousFile.id]
+    if (correction) corrections[previousFile.id] = correction
+  }
+
   checkCancelled(signal)
+  const contentChanged = !canReusePreviousIndex ||
+    indexedFiles.length !== previousFiles.length ||
+    inspectedFiles > 0 ||
+    Object.keys(corrections).length !== Object.keys(previousCorrections).length
   return {
     schemaVersion: 1,
     libraryRoot: root,
@@ -449,6 +562,14 @@ export async function scanLibrary(
     files: indexedFiles,
     corrections,
     scanErrors,
-    scanSummary: { reusedFiles, inspectedFiles }
+    scanSummary: {
+      reusedFiles,
+      inspectedFiles,
+      reusedFileIds,
+      scannedFolders: [...fullyScannedFolders],
+      contentChanged,
+      possibleMoves,
+      scanStartedAt
+    }
   }
 }

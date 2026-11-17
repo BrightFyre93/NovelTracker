@@ -428,6 +428,8 @@ function supportedEbookIndex(index: LibraryIndex | null): LibraryIndex | null {
       size: file.size,
       modifiedAt: file.modifiedAt,
       novelTitle: file.novelTitle,
+      ...(file.stableBookId ? { stableBookId: file.stableBookId } : {}),
+      ...(file.volumeIndex ? { volumeIndex: file.volumeIndex } : {}),
       author: file.author,
       language: file.language,
       chapterTitles: file.chapterTitles,

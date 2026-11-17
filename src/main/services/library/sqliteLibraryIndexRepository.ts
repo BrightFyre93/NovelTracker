@@ -1,5 +1,6 @@
+import { access, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { DatabaseSync, SQLOutputValue } from 'node:sqlite'
+import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import type {
   CoverageConfidence,
   LibraryFileCorrection,
@@ -200,6 +201,12 @@ function parseFileRow(row: Record<string, SQLOutputValue>): LibraryFileRecord {
     size: getNumber(row.size, 'file size'),
     modifiedAt: getString(row.modified_at, 'file modification date'),
     novelTitle: getString(row.novel_title, 'novel title'),
+    ...(row.stable_book_id === null || row.stable_book_id === undefined
+      ? {}
+      : { stableBookId: getString(row.stable_book_id, 'stable book identifier') }),
+    ...(row.volume_index === null || row.volume_index === undefined
+      ? {}
+      : { volumeIndex: getNumber(row.volume_index, 'volume index') }),
     author: getString(row.author, 'author'),
     language: getString(row.language, 'language'),
     chapterTitles: [],
@@ -227,7 +234,7 @@ function readFilesByNovelIds(
   const fileRows = database
     .prepare(
       `SELECT novel_id, id, path, relative_path, filename, format,
-              folder_state, size, modified_at, novel_title, author, language,
+              folder_state, size, modified_at, novel_title, stable_book_id, volume_index, author, language,
               filename_range_start, filename_range_end, coverage_confidence,
               cover_path, inspection_error
        FROM library_files
@@ -284,7 +291,7 @@ function readFileRecordsByIds(
     const fileRows = database
       .prepare(
         `SELECT id, path, relative_path, filename, format, folder_state, size,
-                modified_at, novel_title, author, language, filename_range_start,
+                modified_at, novel_title, stable_book_id, volume_index, author, language, filename_range_start,
                 filename_range_end, coverage_confidence, cover_path, inspection_error
          FROM library_files WHERE id IN (${placeholders})`
       )
@@ -477,10 +484,10 @@ function replaceIndex(database: DatabaseSync, index: LibraryIndex): void {
   const insertFile = database.prepare(
     `INSERT INTO library_files (
        id, ordinal, path, relative_path, filename, format, folder_state, size,
-       modified_at, novel_id, novel_title, author, language,
+       modified_at, novel_id, novel_title, stable_book_id, volume_index, author, language,
        filename_range_start, filename_range_end, coverage_confidence,
        cover_path, inspection_error
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
   const insertChapter = database.prepare(
     `INSERT INTO library_chapters
@@ -501,6 +508,8 @@ function replaceIndex(database: DatabaseSync, index: LibraryIndex): void {
       file.modifiedAt,
       novelId,
       file.novelTitle,
+      file.stableBookId ?? null,
+      file.volumeIndex ?? null,
       file.author,
       file.language,
       file.filenameRange?.start ?? null,
@@ -541,7 +550,7 @@ function replaceIndex(database: DatabaseSync, index: LibraryIndex): void {
   }
 }
 
-function readIndex(database: DatabaseSync): LibraryIndex | null {
+function readIndex(database: DatabaseSync, includeChapterRows = true): LibraryIndex | null {
   const metadata = database
     .prepare(
       `SELECT library_root, scanned_at, scan_errors, reused_files, inspected_files
@@ -553,30 +562,45 @@ function readIndex(database: DatabaseSync): LibraryIndex | null {
   const files = database
     .prepare(
       `SELECT id, path, relative_path, filename, format, folder_state, size,
-              modified_at, novel_title, author, language, filename_range_start,
+              modified_at, novel_title, stable_book_id, volume_index, author, language, filename_range_start,
               filename_range_end, coverage_confidence, cover_path, inspection_error
        FROM library_files ORDER BY ordinal`
     )
     .all()
     .map(parseFileRow)
   const filesById = new Map(files.map((file) => [file.id, file]))
-  const chapters = database
-    .prepare(
-      `SELECT file_id, chapter_number, title_key
-       FROM library_chapters ORDER BY file_id, ordinal`
-    )
-    .all()
+  const chapters = includeChapterRows
+    ? database
+        .prepare(
+          `SELECT file_id, chapter_number, title_key
+           FROM library_chapters ORDER BY file_id, ordinal`
+        )
+        .all()
+    : database
+        .prepare(
+          `SELECT file_id, MIN(chapter_number) AS first_number,
+                  MAX(chapter_number) AS last_number
+           FROM library_chapters WHERE chapter_number IS NOT NULL
+           GROUP BY file_id`
+        )
+        .all()
   for (const row of chapters) {
     const fileId = getString(row.file_id, 'chapter file identifier')
     const file = filesById.get(fileId)
     if (!file) {
       throw new Error(`Saved chapters refer to missing library file ${fileId}.`)
     }
-    if (row.chapter_number !== null) {
-      file.chapterNumbers.push(getNumber(row.chapter_number, 'chapter number'))
-    }
-    if (row.title_key !== null) {
-      file.chapterTitleKeys?.push(getString(row.title_key, 'chapter title key'))
+    if (includeChapterRows) {
+      if (row.chapter_number !== null) {
+        file.chapterNumbers.push(getNumber(row.chapter_number, 'chapter number'))
+      }
+      if (row.title_key !== null) {
+        file.chapterTitleKeys?.push(getString(row.title_key, 'chapter title key'))
+      }
+    } else {
+      const first = getNumber(row.first_number, 'first chapter number')
+      const last = getNumber(row.last_number, 'last chapter number')
+      file.chapterNumbers = first === last ? [first] : [first, last]
     }
   }
 
@@ -681,6 +705,11 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
   async read(): Promise<LibraryIndex | null> {
     await this.ensureInitialized()
     return readIndex(await this.database.open())
+  }
+
+  async readScanCache(): Promise<LibraryIndex | null> {
+    await this.ensureInitialized()
+    return readIndex(await this.database.open(), false)
   }
 
   async readOverview(): Promise<LibraryIndexOverview | null> {
@@ -873,7 +902,20 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
       .prepare('SELECT payload_json FROM library_index_backup WHERE id = 1')
       .get()
     if (!row) return null
-    return decodeBackup(getString(row.payload_json, 'backup payload'))
+    const payload = getString(row.payload_json, 'backup payload')
+    if (payload) return decodeBackup(payload)
+    const backupDatabasePath = join(this.dataDirectory(), 'library-index.backup.sqlite')
+    try {
+      await access(backupDatabasePath)
+    } catch {
+      return null
+    }
+    const backupDatabase = new DatabaseSync(backupDatabasePath, { readOnly: true })
+    try {
+      return readIndex(backupDatabase)
+    } finally {
+      backupDatabase.close()
+    }
   }
 
   async readBackupDate(): Promise<string | null> {
@@ -891,14 +933,157 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
     const database = await this.database.open()
     const backupCandidate =
       previousIndex === undefined ? await this.read() : previousIndex
+    const contentChanged =
+      !backupCandidate || !sameLibraryContent(backupCandidate, index)
+    if (backupCandidate && contentChanged) {
+      await this.writeBackupSnapshot(database)
+    }
     withSqliteTransaction(database, () => {
-      if (backupCandidate) this.writeBackup(database, backupCandidate)
+      if (backupCandidate && contentChanged) this.updateBackupDate(database)
       if (backupCandidate && sameLibraryContent(backupCandidate, index)) {
         updateIndexMetadata(database, index)
       } else {
         replaceIndex(database, index)
       }
     })
+  }
+
+  async writeScan(index: LibraryIndex): Promise<void> {
+    await this.ensureInitialized()
+    const database = await this.database.open()
+    const metadata = database.prepare('SELECT library_root FROM library_index_metadata WHERE id = 1').get()
+    const existingRoot = typeof metadata?.library_root === 'string' ? metadata.library_root : null
+    const sameRoot = existingRoot !== null && samePath(existingRoot, index.libraryRoot)
+    const contentChanged = index.scanSummary?.contentChanged !== false
+    if (existingRoot && contentChanged) await this.writeBackupSnapshot(database)
+
+    if (sameRoot && !contentChanged) {
+      withSqliteTransaction(database, () => updateIndexMetadata(database, index))
+      clearLibraryIndexCache()
+      return
+    }
+
+    withSqliteTransaction(database, () => {
+      if (!sameRoot || !index.scanSummary?.scannedFolders) {
+        replaceIndex(database, index)
+        if (existingRoot && contentChanged) this.updateBackupDate(database)
+        return
+      }
+
+      const scannedFolders = new Set(index.scanSummary.scannedFolders)
+      const filesById = new Map(index.files.map((file) => [file.id, file]))
+      const existingFiles = database.prepare('SELECT id, folder_state, modified_at FROM library_files').all()
+      const deleteFile = database.prepare('DELETE FROM library_files WHERE id = ?')
+      for (const row of existingFiles) {
+        const id = getString(row.id, 'file identifier')
+        const folder = getString(row.folder_state, 'folder state')
+        if (scannedFolders.has(folder as LibraryFolderState) && !filesById.has(id)) {
+          const modifiedAt = getString(row.modified_at, 'file modification date')
+          const wasIndexedDuringScan = index.scanSummary?.scanStartedAt !== undefined &&
+            Date.parse(modifiedAt) > Date.parse(index.scanSummary.scanStartedAt)
+          if (!wasIndexedDuringScan) deleteFile.run(id)
+        }
+      }
+
+      const reusedFileIds = new Set(index.scanSummary.reusedFileIds ?? [])
+      const insertNovel = database.prepare(
+        `INSERT INTO library_novels (id, display_title, normalized_title)
+         VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET display_title = excluded.display_title,
+           normalized_title = excluded.normalized_title`
+      )
+      const insertAlias = database.prepare(
+        'INSERT OR IGNORE INTO library_novel_aliases (novel_id, alias_key) VALUES (?, ?)'
+      )
+      const upsertFile = database.prepare(
+        `INSERT INTO library_files (
+           id, ordinal, path, relative_path, filename, format, folder_state, size,
+           modified_at, novel_id, novel_title, stable_book_id, volume_index, author,
+           language, filename_range_start, filename_range_end, coverage_confidence,
+           cover_path, inspection_error
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET ordinal = excluded.ordinal,
+           path = excluded.path, relative_path = excluded.relative_path,
+           filename = excluded.filename, format = excluded.format,
+           folder_state = excluded.folder_state, size = excluded.size,
+           modified_at = excluded.modified_at, novel_id = excluded.novel_id,
+           novel_title = excluded.novel_title, stable_book_id = excluded.stable_book_id,
+           volume_index = excluded.volume_index, author = excluded.author,
+           language = excluded.language, filename_range_start = excluded.filename_range_start,
+           filename_range_end = excluded.filename_range_end,
+           coverage_confidence = excluded.coverage_confidence,
+           cover_path = excluded.cover_path, inspection_error = excluded.inspection_error`
+      )
+      const deleteChapters = database.prepare('DELETE FROM library_chapters WHERE file_id = ?')
+      const insertChapter = database.prepare(
+        `INSERT INTO library_chapters (file_id, ordinal, chapter_number, title_key)
+         VALUES (?, ?, ?, ?)`
+      )
+      index.files.forEach((file, ordinal) => {
+        const novelId = normalizeNovelTitleForGrouping(file.novelTitle)
+        insertNovel.run(novelId, file.novelTitle, novelId)
+        const alias = normalizeNovelTitleForMatching(file.novelTitle)
+        if (alias) insertAlias.run(novelId, alias)
+        upsertFile.run(
+          file.id, ordinal, file.path, file.relativePath, file.filename, file.format,
+          file.folderState, file.size, file.modifiedAt, novelId, file.novelTitle,
+          file.stableBookId ?? null, file.volumeIndex ?? null, file.author, file.language,
+          file.filenameRange?.start ?? null, file.filenameRange?.end ?? null,
+          file.coverageConfidence, file.coverPath, file.inspectionError
+        )
+        if (reusedFileIds.has(file.id)) return
+        deleteChapters.run(file.id)
+        const titleKeys = file.chapterTitleKeys ??
+          file.chapterTitles.map(normalizeNovelTitleForMatching).filter((key) => key.length > 0)
+        const rowCount = Math.max(file.chapterNumbers.length, titleKeys.length)
+        for (let chapterOrdinal = 0; chapterOrdinal < rowCount; chapterOrdinal += 1) {
+          const chapterNumber = file.chapterNumbers[chapterOrdinal] ?? null
+          const titleKey = titleKeys[chapterOrdinal] ?? null
+          if (chapterNumber !== null || titleKey !== null) {
+            insertChapter.run(file.id, chapterOrdinal, chapterNumber, titleKey)
+          }
+        }
+      })
+
+      database.exec('DELETE FROM library_file_corrections')
+      const insertCorrection = database.prepare(
+        'INSERT INTO library_file_corrections (file_id, novel_title) VALUES (?, ?)'
+      )
+      const insertCorrectedChapter = database.prepare(
+        `INSERT INTO library_correction_chapters (file_id, ordinal, chapter_number)
+         VALUES (?, ?, ?)`
+      )
+      for (const [fileId, correction] of Object.entries(index.corrections)) {
+        if (!filesById.has(fileId)) continue
+        insertCorrection.run(fileId, correction.novelTitle ?? null)
+        for (const [ordinal, chapterNumber] of (correction.chapterNumbers ?? []).entries()) {
+          insertCorrectedChapter.run(fileId, ordinal, chapterNumber)
+        }
+      }
+
+      database.exec('DELETE FROM library_novel_aliases; DELETE FROM library_novels;')
+      const novelRows = database.prepare('SELECT DISTINCT novel_title FROM library_files').all()
+      const updateNovel = database.prepare('UPDATE library_files SET novel_id = ? WHERE novel_title = ?')
+      for (const row of novelRows) {
+        const title = getString(row.novel_title, 'novel title')
+        const novelId = normalizeNovelTitleForGrouping(title)
+        insertNovel.run(novelId, title, novelId)
+        const alias = normalizeNovelTitleForMatching(title)
+        if (alias) insertAlias.run(novelId, alias)
+        updateNovel.run(novelId, title)
+      }
+      database.prepare(
+        `UPDATE library_index_metadata
+         SET library_root = ?, scanned_at = ?, scan_errors = ?, reused_files = ?, inspected_files = ?
+         WHERE id = 1`
+      ).run(
+        index.libraryRoot, index.scannedAt, index.scanErrors,
+        index.scanSummary?.reusedFiles ?? null,
+        index.scanSummary?.inspectedFiles ?? null
+      )
+      if (existingRoot && contentChanged) this.updateBackupDate(database)
+    })
+    clearLibraryIndexCache()
   }
 
   async upsertFile(
@@ -945,9 +1130,11 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
         .map(normalizeNovelTitleForMatching)
         .filter((titleKey) => titleKey.length > 0)
 
+    if (previous) await this.writeBackupSnapshot(database)
+
     withSqliteTransaction(database, () => {
       if (previous) {
-        this.writeBackup(database, previous)
+        this.updateBackupDate(database)
         database
           .prepare(
             'UPDATE library_index_metadata SET scanned_at = ? WHERE id = 1'
@@ -985,10 +1172,10 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
         .prepare(
           `INSERT INTO library_files (
              id, ordinal, path, relative_path, filename, format, folder_state, size,
-             modified_at, novel_id, novel_title, author, language,
+             modified_at, novel_id, novel_title, stable_book_id, volume_index, author, language,
              filename_range_start, filename_range_end, coverage_confidence,
              cover_path, inspection_error
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              ordinal = excluded.ordinal,
              path = excluded.path,
@@ -1000,6 +1187,8 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
              modified_at = excluded.modified_at,
              novel_id = excluded.novel_id,
              novel_title = excluded.novel_title,
+             stable_book_id = excluded.stable_book_id,
+             volume_index = excluded.volume_index,
              author = excluded.author,
              language = excluded.language,
              filename_range_start = excluded.filename_range_start,
@@ -1020,6 +1209,8 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
           indexedFile.modifiedAt,
           novelId,
           indexedFile.novelTitle,
+          indexedFile.stableBookId ?? null,
+          indexedFile.volumeIndex ?? null,
           indexedFile.author,
           indexedFile.language,
           indexedFile.filenameRange?.start ?? null,
@@ -1143,7 +1334,7 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
 
         if (legacyIndex) replaceIndex(database, legacyIndex)
         if (legacyBackup) {
-          this.writeBackup(
+          this.writeLegacyJsonBackup(
             database,
             legacyBackup,
             legacyBackupDate ?? new Date().toISOString()
@@ -1160,7 +1351,7 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
     }
   }
 
-  private writeBackup(
+  private writeLegacyJsonBackup(
     database: DatabaseSync,
     index: LibraryIndex,
     savedAt = new Date().toISOString()
@@ -1178,5 +1369,29 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
            saved_at = excluded.saved_at`
       )
       .run(payload, savedAt)
+  }
+
+  private async writeBackupSnapshot(database: DatabaseSync): Promise<void> {
+    const dataDirectory = this.dataDirectory()
+    const backupPath = join(dataDirectory, 'library-index.backup.sqlite')
+    const temporaryPath = `${backupPath}.tmp`
+    await rm(temporaryPath, { force: true })
+    const quotedPath = temporaryPath.replace(/'/g, "''")
+    database.exec(`VACUUM INTO '${quotedPath}'`)
+    await rm(backupPath, { force: true })
+    await rename(temporaryPath, backupPath)
+    this.updateBackupDate(database)
+  }
+
+  private updateBackupDate(database: DatabaseSync): void {
+    database
+      .prepare(
+        `INSERT INTO library_index_backup (id, payload_json, saved_at)
+         VALUES (1, '', ?)
+         ON CONFLICT(id) DO UPDATE SET
+           payload_json = '',
+           saved_at = excluded.saved_at`
+      )
+      .run(new Date().toISOString())
   }
 }
