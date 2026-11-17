@@ -13,5 +13,9 @@
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true
   },
-  "files": []
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.web.json" }
+  ]
 }
