@@ -1,7 +1,8 @@
 import { parentPort, workerData } from 'node:worker_threads'
 import type { LibraryProgress } from '../../shared/contracts'
 import { OperationCancelledError, toMessage } from '../../shared/errors'
-import { createJsonLibraryIndexRepository } from './library/libraryIndexRepository'
+import { SqliteDatabase } from '../infra/sqliteDatabase'
+import { createSqliteLibraryIndexRepository } from './library/sqliteLibraryIndexRepository'
 import { scanLibrary } from './libraryScanner'
 import type { WorkerMessage } from './workerRunner'
 
@@ -23,7 +24,9 @@ function getWorkerPort(): NonNullable<typeof parentPort> {
 
 const port = getWorkerPort()
 const input = workerData as LibraryScanWorkerInput
-const libraryIndexRepository = createJsonLibraryIndexRepository(
+const sqliteDatabase = new SqliteDatabase(() => input.dataDirectory)
+const libraryIndexRepository = createSqliteLibraryIndexRepository(
+  sqliteDatabase,
   () => input.dataDirectory
 )
 const controller = new AbortController()
@@ -35,6 +38,7 @@ async function run(): Promise<void> {
   const previousIndex = input.forceRebuild
     ? null
     : await libraryIndexRepository.read()
+
   const index = await scanLibrary(
     input.libraryRoot,
     previousIndex,
@@ -67,6 +71,7 @@ async function run(): Promise<void> {
     index,
     input.forceRebuild ? undefined : previousIndex
   )
+
   port.postMessage({
     type: 'complete',
     result: undefined
@@ -80,4 +85,7 @@ void run()
       error: toMessage(error)
     } satisfies LibraryScanWorkerMessage)
   })
-  .finally(() => port.close())
+  .finally(() => {
+    sqliteDatabase.close()
+    port.close()
+  })

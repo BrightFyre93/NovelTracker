@@ -96,14 +96,11 @@ import type {
   IpcMap
 } from '../shared/ipc'
 import {
-  searchLibraryFileSummaries,
-  searchLibraryNovelSummaries,
   summarizeLibraryIndex,
   summarizeLibraryIndexOverview
 } from '../shared/libraryIndexSummary'
 import { resolveChapterSelection } from '../shared/chapterSelection'
 import {
-  normalizeNovelTitleForGrouping,
   normalizeNovelTitleForMatching
 } from '../shared/novelTitle'
 import { z } from 'zod'
@@ -124,9 +121,10 @@ import type {
   EpubPackagingProgress,
   EpubPackagingResult
 } from './services/epubPackaging'
-import { createJsonQueueRepository } from './services/queue/repository'
 import { QueueStore } from './services/queue/store'
-import { createJsonLibraryIndexRepository } from './services/library/libraryIndexRepository'
+import { SqliteDatabase } from './infra/sqliteDatabase'
+import { createSqliteQueueRepository } from './services/queue/sqliteRepository'
+import { createSqliteLibraryIndexRepository } from './services/library/sqliteLibraryIndexRepository'
 import { transitionQueueItem } from './services/queue/queueStateMachine'
 import { registerSettingsIpcHandlers } from './ipc/settings'
 import { registerQueueIpcHandlers } from './ipc/queue'
@@ -297,10 +295,14 @@ function packageEpubInWorker(
   })
 }
 
-const queueRepository = createJsonQueueRepository(dataDirectory)
+const sqliteDatabase = new SqliteDatabase(dataDirectory)
+const queueRepository = createSqliteQueueRepository(sqliteDatabase, dataDirectory)
 const queueStore = new QueueStore(queueRepository, hasUnknownProperties)
 const discoveryQueue = queueStore.items
-const libraryIndexRepository = createJsonLibraryIndexRepository(dataDirectory)
+const libraryIndexRepository = createSqliteLibraryIndexRepository(
+  sqliteDatabase,
+  dataDirectory
+)
 const queueHelpers = createQueueHelpers({
   dataDirectory,
   queueStore,
@@ -329,6 +331,7 @@ const queueRuntime = createQueueRuntime({
   dataDirectory,
   settingsService,
   libraryIndexRepository,
+  chapterStateRepository: queueRepository,
   packageEpub: packageEpubInWorker,
   isShuttingDown: () => shuttingDown,
   queueHelpers,
@@ -594,17 +597,18 @@ function isWithinDirectory(directory: string, candidate: string): boolean {
 
 async function getIndexedLibraryFile(fileId: string): Promise<string> {
   if (!fileId) throw new Error('Select an indexed library file.')
-  const [index, settings] = await Promise.all([
-    libraryIndexRepository.read(),
+  const [files, overview, settings] = await Promise.all([
+    libraryIndexRepository.readFilesByIds([fileId]),
+    libraryIndexRepository.readOverview(),
     readSettings(dataDirectory())
   ])
-  if (!index)
+  if (!files || !overview)
     throw new Error('Scan the library before working with indexed files.')
   if (!settings.libraryRoot)
     throw new Error(
       'Go to Configuration and choose a historical library root first.'
     )
-  const file = index.files.find((candidate) => candidate.id === fileId)
+  const file = files[0]
   if (!file || file.format !== 'EPUB') {
     throw new Error(
       'The selected EPUB is no longer indexed. Rescan and try again.'
@@ -612,7 +616,7 @@ async function getIndexedLibraryFile(fileId: string): Promise<string> {
   }
   const [libraryRoot, indexRoot] = await Promise.all([
     realpath(settings.libraryRoot),
-    realpath(index.libraryRoot)
+    realpath(overview.libraryRoot)
   ])
   if (!samePath(libraryRoot, indexRoot)) {
     throw new Error(
@@ -1071,7 +1075,6 @@ export const ipcContext = {
   lstat,
   markQueueItemChaptersDirty,
   mutateItem,
-  normalizeNovelTitleForGrouping,
   normalizeNovelTitleForMatching,
   notifyDiscoveryQueueChanged,
   openVerificationBrowser,
@@ -1098,8 +1101,6 @@ export const ipcContext = {
   runWorker,
   samePath,
   sanitizeEpubFilename,
-  searchLibraryFileSummaries,
-  searchLibraryNovelSummaries,
   sendToCurrentFrame,
   sep,
   settingsService,
@@ -1188,6 +1189,7 @@ app
         queueStore.replace(items)
       },
       queueRepository,
+      chapterStateRepository: queueRepository,
       hydrateQueueItem,
       hasUnknownProperties,
       releaseQueueItemChapters,
@@ -1346,6 +1348,11 @@ async function drainApplicationWork(): Promise<void> {
     libraryOperationWrites.drain()
   ])
   await flushLibraryOperations()
+  try {
+    sqliteDatabase.close()
+  } catch (error) {
+    console.error('The SQLite database could not be closed cleanly:', error)
+  }
   if (discoveryQueueNotificationTimer) {
     clearTimeout(discoveryQueueNotificationTimer)
     discoveryQueueNotificationTimer = null

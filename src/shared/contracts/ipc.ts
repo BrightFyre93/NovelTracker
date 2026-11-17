@@ -100,6 +100,7 @@ export interface NovelTrackerApi {
     limit: number
   ): Promise<Result<LibraryFileSearchPage>>
   getLibraryNovelFiles(novelKey: string): Promise<Result<LibraryFileRecord[]>>
+  getLibraryFileChapterTitles(fileId: string): Promise<Result<string[]>>
   getLibraryIndexBackupDate(): Promise<string | null>
   restoreLibraryIndexBackup(): Promise<Result<LibraryIndexOverview>>
   scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndexOverview>>

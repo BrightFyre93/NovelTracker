@@ -415,10 +415,11 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
         throw new Error('The selected item is not ready for recommendations.')
       }
       await withChapters(item, async () => {
-        const libraryIndex = await libraryIndexRepository.read()
+        const libraryFiles =
+          await libraryIndexRepository.readRecommendationFiles(item)
         const recommendation = recommendArchiveCoverage(
           item,
-          libraryIndex?.files ?? []
+          libraryFiles ?? []
         )
         item.chapters = recommendation.chapters.map((chapter) => ({
           ...chapter,

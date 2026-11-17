@@ -70,6 +70,10 @@ export interface IpcMap {
     args: [novelKey: string]
     result: Result<LibraryFileRecord[]>
   }
+  'library:file-chapter-titles': {
+    args: [fileId: string]
+    result: Result<string[]>
+  }
   'library:index-backup-date': {
     args: []
     result: string | null

@@ -18,6 +18,38 @@ export interface QueueRepository {
   ): Promise<void>
 }
 
+export type QueueChapterDownloadStatus =
+  | 'Pending'
+  | 'Downloading'
+  | 'Downloaded'
+  | 'Retrying'
+  | 'Failed'
+  | 'Skipped'
+  | 'InvalidArtifact'
+
+export interface QueueChapterDownloadState {
+  chapterId: string
+  originalUrl: string
+  currentUrl: string
+  title: string
+  sourceOrder: number
+  state: QueueChapterDownloadStatus
+  attemptCount: number
+  createdAt: string
+  updatedAt: string
+  lastHttpStatus: number | null
+  lastError: string | null
+  artifactRef: string | null
+}
+
+export interface QueueChapterStateRepository {
+  readChapterStates(queueItemId: string): Promise<QueueChapterDownloadState[]>
+  writeChapterStates(
+    queueItemId: string,
+    states: QueueChapterDownloadState[]
+  ): Promise<void>
+}
+
 export function createJsonQueueRepository(
   dataDirectory: () => string
 ): QueueRepository {

@@ -14,10 +14,33 @@ export interface ArchiveRecommendation {
   summary: string
 }
 
-function normalizedTitleAliases(value: string): string[] {
+export type ArchiveRecommendationTarget = Pick<
+  DiscoveryQueueItem,
+  'title' | 'alternativeNames' | 'trackerRow'
+>
+
+export function normalizeNovelTitleAliases(value: string): string[] {
   const normalized = normalizeNovelTitleForMatching(value)
   const withoutVolume = normalized.replace(/(?:vol(?:ume)?|book|part)(?:\d+|[ivxlcdm]+)$/, '')
   return [...new Set([normalized, withoutVolume].filter((title) => title.length > 0))]
+}
+
+export function getArchiveRecommendationTitleKeys(
+  item: ArchiveRecommendationTarget
+): string[] {
+  const trackerAlternativeNames = item.trackerRow?.alternativeNames
+    ?.split(/[,;|\r\n]+/)
+    .map((name) => name.trim()) ?? []
+  return [
+    ...new Set(
+      [
+        item.title,
+        ...item.alternativeNames,
+        item.trackerRow?.title ?? '',
+        ...trackerAlternativeNames
+      ].flatMap(normalizeNovelTitleAliases)
+    )
+  ]
 }
 
 interface IndexedNovelFile {
@@ -38,23 +61,20 @@ function fileMatchesChapter(
 }
 
 export function recommendArchiveCoverage(
-  item: Pick<DiscoveryQueueItem, 'title' | 'alternativeNames' | 'trackerRow' | 'chapters'>,
+  item: ArchiveRecommendationTarget & Pick<DiscoveryQueueItem, 'chapters'>,
   files: LibraryFileRecord[]
 ): ArchiveRecommendation {
-  const trackerAlternativeNames = item.trackerRow?.alternativeNames
-    ?.split(/[,;|\r\n]+/)
-    .map((name) => name.trim()) ?? []
-  const titleKeys = new Set(
-    [item.title, ...item.alternativeNames, item.trackerRow?.title ?? '', ...trackerAlternativeNames]
-      .flatMap(normalizedTitleAliases)
-  )
+  const titleKeys = new Set(getArchiveRecommendationTitleKeys(item))
   const novelFiles = files.filter((file) =>
-    normalizedTitleAliases(file.novelTitle).some((title) => titleKeys.has(title))
+    normalizeNovelTitleAliases(file.novelTitle).some((title) =>
+      titleKeys.has(title)
+    )
   )
   const indexedNovelFiles = novelFiles.map((file) => ({
     file,
     chapterTitleKeys: new Set(
-      file.chapterTitles.map(normalizeNovelTitleForMatching)
+      file.chapterTitleKeys ??
+        file.chapterTitles.map(normalizeNovelTitleForMatching)
     ),
     chapterNumbers: new Set(file.chapterNumbers)
   }))

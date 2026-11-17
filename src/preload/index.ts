@@ -124,6 +124,8 @@ const api: NovelTrackerApi = {
     ),
   getLibraryNovelFiles: (novelKey: string) =>
     invokeIpc('library:novel-files', novelKey),
+  getLibraryFileChapterTitles: (fileId: string) =>
+    invokeIpc('library:file-chapter-titles', fileId),
   getLibraryIndexBackupDate: () => invokeIpc('library:index-backup-date'),
   restoreLibraryIndexBackup: () => invokeIpc('library:restore-index-backup'),
   repairEpub: (fileId: string) => invokeIpc('library:repair-epub', fileId),

@@ -6,6 +6,7 @@ export interface RetryOptions {
   shouldRetry: (error: unknown) => boolean
   signal?: AbortSignal
   cancellationMessage: string
+  onAttempt?: (attemptNumber: number) => void | Promise<void>
 }
 
 export async function runPool(
@@ -107,6 +108,7 @@ export async function withRetry<T>(
     if (options.signal?.aborted) {
       throw new OperationCancelledError(options.cancellationMessage)
     }
+    await options.onAttempt?.(attempt + 1)
     try {
       return await operation()
     } catch (error) {

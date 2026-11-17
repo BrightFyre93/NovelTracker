@@ -91,7 +91,8 @@ function cachedFile(
     !cached ||
     cached.size !== file.size ||
     cached.modifiedAt !== file.modifiedAt ||
-    !Array.isArray(cached.chapterTitles) ||
+    (!Array.isArray(cached.chapterTitles) &&
+      !Array.isArray(cached.chapterTitleKeys)) ||
     !Array.isArray(cached.chapterNumbers)
   ) {
     return undefined
@@ -102,7 +103,8 @@ function cachedFile(
     novelTitle: cached.novelTitle,
     author: cached.author,
     language: cached.language,
-    chapterTitles: cached.chapterTitles,
+    chapterTitles: cached.chapterTitles ?? [],
+    chapterTitleKeys: cached.chapterTitleKeys,
     chapterNumbers: cached.chapterNumbers,
     filenameRange: cached.filenameRange,
     coverageConfidence: cached.coverageConfidence,

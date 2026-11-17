@@ -26,6 +26,7 @@ export interface LibraryFileRecord {
   author: string
   language: string
   chapterTitles: string[]
+  chapterTitleKeys?: string[]
   chapterNumbers: number[]
   filenameRange: { start: number; end: number } | null
   coverageConfidence: CoverageConfidence

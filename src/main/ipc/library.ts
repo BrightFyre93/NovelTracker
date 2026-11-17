@@ -25,7 +25,6 @@ type LibraryIpcContext = Pick<
   | 'libraryIndexRestoreActive'
   | 'lstat'
   | 'mainWindow'
-  | 'normalizeNovelTitleForGrouping'
   | 'normalizeNovelTitleForMatching'
   | 'readSettings'
   | 'realpath'
@@ -34,8 +33,6 @@ type LibraryIpcContext = Pick<
   | 'runWorker'
   | 'samePath'
   | 'sanitizeEpubFilename'
-  | 'searchLibraryFileSummaries'
-  | 'searchLibraryNovelSummaries'
   | 'sendToCurrentFrame'
   | 'sep'
   | 'shell'
@@ -54,9 +51,12 @@ import type {
   EpubRepairProgress,
   EpubRepairResult,
   LibraryFileCorrection,
+  LibraryIndex,
   LibraryProgress
 } from '../../shared/contracts'
+import { normalizeNovelTitleForGrouping } from '../../shared/novelTitle'
 import type { EpubMergeInput, EpubMergeResult } from '../services/epubMerger'
+import { inspectEpub } from '../services/epubInspector'
 
 interface ActiveLibraryScan {
   worker: Worker | null
@@ -83,7 +83,6 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
     join,
     libraryIndexRepository,
     lstat,
-    normalizeNovelTitleForGrouping,
     normalizeNovelTitleForMatching,
     readSettings,
     realpath,
@@ -92,8 +91,6 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
     runWorker,
     samePath,
     sanitizeEpubFilename,
-    searchLibraryFileSummaries,
-    searchLibraryNovelSummaries,
     sendToCurrentFrame,
     sep,
     shell,
@@ -123,25 +120,23 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
       limit,
       selectedNovelKey
     ) => {
-      const index = await libraryIndexRepository.read()
-      if (!index) throw new Error('Scan the library before searching novels.')
+      const value = await libraryIndexRepository.searchNovels(
+        query,
+        multipleFilesOnly,
+        offset,
+        limit,
+        selectedNovelKey
+      )
+      if (!value) throw new Error('Scan the library before searching novels.')
       return {
         ok: true,
-        value: searchLibraryNovelSummaries(
-          index,
-          query,
-          multipleFilesOnly,
-          offset,
-          limit,
-          selectedNovelKey
-        )
+        value
       }
     }
   )
 
   handleTypedIpc('library:index-summary', z.tuple([]), async () => {
-    const index = await libraryIndexRepository.read()
-    return index ? summarizeLibraryIndexOverview(index) : null
+    return libraryIndexRepository.readOverview()
   })
 
   handleValidatedResultIpc(
@@ -153,11 +148,16 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
       z.number().int().min(1).max(100)
     ]),
     async (_event, novelKey, query, offset, limit) => {
-      const index = await libraryIndexRepository.read()
-      if (!index) throw new Error('Scan the library before viewing its files.')
+      const value = await libraryIndexRepository.searchNovelFiles(
+        novelKey,
+        query,
+        offset,
+        limit
+      )
+      if (!value) throw new Error('Scan the library before viewing its files.')
       return {
         ok: true,
-        value: searchLibraryFileSummaries(index, novelKey, query, offset, limit)
+        value
       }
     }
   )
@@ -172,15 +172,34 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
       )
     ]),
     async (_event, rawNovelKey) => {
-      const index = await libraryIndexRepository.read()
-      if (!index) throw new Error('Scan the library before viewing its files.')
+      const value = await libraryIndexRepository.readNovelFiles(rawNovelKey)
+      if (!value) throw new Error('Scan the library before viewing its files.')
       return {
         ok: true,
-        value: index.files.filter(
-          (file) =>
-            normalizeNovelTitleForGrouping(file.novelTitle) === rawNovelKey
-        )
+        value
       }
+    }
+  )
+
+  handleValidatedResultIpc(
+    'library:file-chapter-titles',
+    z.tuple([z.string()]),
+    async (_event, fileId) => {
+      const files = await libraryIndexRepository.readFilesByIds([fileId])
+      const file = files?.[0]
+      if (!file) throw new Error('The selected library file is no longer indexed.')
+      if (file.format !== 'EPUB') return { ok: true, value: [] }
+
+      const path = await getIndexedLibraryFile(fileId)
+      const details = await inspectEpub(
+        path,
+        file.relativePath,
+        file.folderState,
+        file.size,
+        file.modifiedAt,
+        file.id
+      )
+      return { ok: true, value: details.chapterTitles }
     }
   )
 
@@ -298,10 +317,10 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
             )
           }
         })
-        const index = await libraryIndexRepository.read()
-        if (!index)
+        const overview = await libraryIndexRepository.readOverview()
+        if (!overview)
           throw new Error('The library scan completed without saving an index.')
-        return { ok: true, value: summarizeLibraryIndexOverview(index) }
+        return { ok: true, value: overview }
       } catch (error) {
         if (!scan.cancelRequested) console.error('Library scan failed:', error)
         return { ok: false, error: errorMessage(error) }
@@ -369,12 +388,32 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
             'Chapter corrections must be a list of non-negative numbers.'
           )
         }
-        const index = await libraryIndexRepository.writeCorrection(rawFileId, {
+        const correctedFile = await libraryIndexRepository.writeCorrection(rawFileId, {
           novelTitle,
           chapterNumbers
         } satisfies LibraryFileCorrection)
-        const novel = summarizeLibraryIndex(index).novels.find((group) =>
-          group.files.some((file) => file.id === rawFileId)
+        const novelKey = normalizeNovelTitleForGrouping(
+          correctedFile.novelTitle
+        )
+        const [index, novelFiles] = await Promise.all([
+          libraryIndexRepository.readOverview(),
+          libraryIndexRepository.readNovelFiles(novelKey)
+        ])
+        if (!index || !novelFiles)
+          throw new Error(
+            'The corrected file could not be found in the library index.'
+          )
+        const summaryIndex: LibraryIndex = {
+          schemaVersion: 1,
+          libraryRoot: index.libraryRoot,
+          scannedAt: index.scannedAt,
+          files: novelFiles,
+          corrections: {},
+          scanErrors: index.scanErrors,
+          ...(index.scanSummary ? { scanSummary: index.scanSummary } : {})
+        }
+        const novel = summarizeLibraryIndex(summaryIndex).novels.find(
+          (group) => group.key === novelKey
         )
         if (!novel)
           throw new Error(
@@ -383,7 +422,7 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
         return {
           ok: true,
           value: {
-            index: summarizeLibraryIndexOverview(index),
+            index,
             novel
           }
         }
@@ -428,8 +467,11 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
             'Wait for the current library operation to finish before combining EPUBs.'
           )
         }
-        const index = await libraryIndexRepository.read()
-        if (!index)
+        const [overview, indexedFiles] = await Promise.all([
+          libraryIndexRepository.readOverview(),
+          libraryIndexRepository.readFilesByIds(rawFileIds)
+        ])
+        if (!overview || !indexedFiles)
           throw new Error('Scan the library before combining existing EPUBs.')
         const settings = await readSettings(dataDirectory())
         if (!settings.libraryRoot)
@@ -445,8 +487,11 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
           throw new Error('The configured EPUB output path is not a folder.')
         const filename = sanitizeEpubFilename(rawFilename)
         const outputPath = resolve(outputDirectory, filename)
+        const indexedFilesById = new Map(
+          indexedFiles.map((file) => [file.id, file])
+        )
         const sourceFiles = rawFileIds.map((id) => {
-          const file = index.files.find((candidate) => candidate.id === id)
+          const file = indexedFilesById.get(id)
           if (!file || file.format !== 'EPUB')
             throw new Error('A selected source EPUB is no longer indexed.')
           return file
@@ -461,7 +506,7 @@ export function registerLibraryIpcHandlers(context: LibraryIpcContext): void {
 
         const [configuredRoot, libraryRoot] = await Promise.all([
           realpath(settings.libraryRoot),
-          realpath(index.libraryRoot)
+          realpath(overview.libraryRoot)
         ])
         if (!samePath(configuredRoot, libraryRoot)) {
           throw new Error(

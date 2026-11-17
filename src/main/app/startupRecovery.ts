@@ -6,11 +6,16 @@ import type {
   LibraryOperation
 } from '../../shared/contracts'
 import {
+  readChapterArtifactDescriptor,
   readLibraryOperations,
   readSettings,
   takeStorageRecoveryWarnings
 } from '../services/localStore'
 import type { QueueRepository } from '../services/queue/repository'
+import type {
+  QueueChapterDownloadState,
+  QueueChapterStateRepository
+} from '../services/queue/repository'
 import { transitionQueueItem } from '../services/queue/queueStateMachine'
 
 interface StartupRecoveryDependencies {
@@ -18,7 +23,8 @@ interface StartupRecoveryDependencies {
   setLibraryOperations: (operations: LibraryOperation[]) => void
   flushLibraryOperations: () => Promise<void>
   setDiscoveryQueue: (items: DiscoveryQueueItem[]) => void
-  queueRepository: Pick<QueueRepository, 'readQueue'>
+  queueRepository: Pick<QueueRepository, 'readQueue' | 'readChapters'>
+  chapterStateRepository: QueueChapterStateRepository
   hydrateQueueItem: (item: DiscoveryQueueItem) => DiscoveryQueueItem
   hasUnknownProperties: (saved: object, normalized: object) => boolean
   releaseQueueItemChapters: (item: DiscoveryQueueItem) => void
@@ -48,6 +54,7 @@ export async function recoverStartupState(
     flushLibraryOperations,
     setDiscoveryQueue,
     queueRepository,
+    chapterStateRepository,
     hydrateQueueItem,
     hasUnknownProperties,
     releaseQueueItemChapters,
@@ -74,6 +81,63 @@ export async function recoverStartupState(
   const savedQueue = await queueRepository.readQueue()
   const discoveryQueue = savedQueue.map(hydrateQueueItem)
   setDiscoveryQueue(discoveryQueue)
+  for (const item of discoveryQueue) {
+    if (item.status === 'completed') continue
+    const states = await chapterStateRepository.readChapterStates(item.id)
+    if (states.length === 0) continue
+    const downloadedStates = states.filter(
+      (state) => state.state === 'Downloaded'
+    )
+    const chaptersById = new Map(
+      downloadedStates.length > 0
+        ? (await queueRepository.readChapters(item.id) ?? []).map(
+            (chapter) => [chapter.id, chapter]
+          )
+        : []
+    )
+    const recoveredStates: QueueChapterDownloadState[] = []
+    for (const state of states) {
+      if (state.state === 'Downloading' || state.state === 'Retrying') {
+        recoveredStates.push({
+          ...state,
+          state: 'Pending',
+          updatedAt: new Date().toISOString(),
+          lastError: 'The app closed while this chapter was in progress.',
+          artifactRef: null
+        })
+        continue
+      }
+      if (state.state !== 'Downloaded') continue
+      const chapter = chaptersById.get(state.chapterId)
+      let validArtifact = false
+      let artifactError: string | null = null
+      if (chapter && chapter.url === state.currentUrl) {
+        try {
+          const artifact = await readChapterArtifactDescriptor(
+            dataDirectory,
+            item.id,
+            state.currentUrl
+          )
+          validArtifact = artifact !== null && artifact.url === state.currentUrl
+        } catch (error) {
+          artifactError = errorMessage(error)
+        }
+      }
+      if (validArtifact) continue
+      recoveredStates.push({
+        ...state,
+        state: 'InvalidArtifact',
+        updatedAt: new Date().toISOString(),
+        lastError:
+          artifactError ??
+          'The saved chapter artifact is missing or does not match the saved chapter.',
+        artifactRef: null
+      })
+    }
+    if (recoveredStates.length > 0) {
+      await chapterStateRepository.writeChapterStates(item.id, recoveredStates)
+    }
+  }
   let queueStorageMigrationNeeded = savedQueue.some((saved, index) => {
     const normalized = discoveryQueue[index]
     return (

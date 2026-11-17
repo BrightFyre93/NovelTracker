@@ -29,6 +29,8 @@ const novelSummaries = shallowRef<Array<LibraryNovelSummary | null>>([])
 const totalNovelCount = ref(0)
 const backupDate = ref<string | null>(null)
 const selectedFiles = shallowRef<LibraryFileRecord[]>([])
+const loadedChapterTitleFiles = new Set<string>()
+const loadingChapterTitleFiles = new Set<string>()
 const search = ref('')
 const multipleFilesOnly = ref(false)
 const selectedNovel = ref('')
@@ -101,6 +103,7 @@ function clearSelectedNovel(): void {
   selectedNovelSummary.value = null
   selectedFileId.value = ''
   selectedFiles.value = []
+  loadedChapterTitleFiles.clear()
   fileListItems.value = []
   totalFileListCount.value = 0
   searchingFiles.value = false
@@ -485,7 +488,7 @@ async function openFile(file: LibraryFileRecord, reveal: boolean): Promise<void>
   if (!result.ok) error.value = result.error
 }
 
-function selectFile(fileSummary: LibraryFileListItem | LibraryFileRecord): void {
+async function selectFile(fileSummary: LibraryFileListItem | LibraryFileRecord): Promise<void> {
   const file = 'chapterTitles' in fileSummary
     ? fileSummary
     : selectedFiles.value.find((candidate) => candidate.id === fileSummary.id)
@@ -496,6 +499,34 @@ function selectFile(fileSummary: LibraryFileListItem | LibraryFileRecord): void 
   selectedFileId.value = file.id
   correctedTitle.value = file.novelTitle
   correctedCoverage.value = ''
+  if (
+    file.format !== 'EPUB' ||
+    file.chapterTitleKeys === undefined ||
+    loadedChapterTitleFiles.has(file.id) ||
+    loadingChapterTitleFiles.has(file.id)
+  ) {
+    return
+  }
+  const novelKey = selectedNovel.value
+  loadingChapterTitleFiles.add(file.id)
+  try {
+    const result = await window.novelTracker.getLibraryFileChapterTitles(file.id)
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    if (selectedNovel.value !== novelKey) return
+    loadedChapterTitleFiles.add(file.id)
+    selectedFiles.value = selectedFiles.value.map((candidate) =>
+      candidate.id === file.id
+        ? { ...candidate, chapterTitles: result.value }
+        : candidate
+    )
+  } catch (reason) {
+    error.value = toMessage(reason)
+  } finally {
+    loadingChapterTitleFiles.delete(file.id)
+  }
 }
 
 function toggleMergeFile(file: LibraryFileRecord): void {

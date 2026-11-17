@@ -85,6 +85,10 @@ let libraryIndexCache:
   | undefined
 const storageRecoveryWarnings = new Set<string>()
 
+export function clearLibraryIndexCache(): void {
+  libraryIndexCache = undefined
+}
+
 async function readJson<T>(path: string, fallback: T): Promise<T> {
   try {
     return JSON.parse(await readFile(path, 'utf8')) as T
@@ -114,7 +118,7 @@ function isDownloadHistoryArray(value: unknown): value is DownloadHistoryEntry[]
   )
 }
 
-function isDiscoveryQueueArray(value: unknown): value is DiscoveryQueueItem[] {
+export function isDiscoveryQueueArray(value: unknown): value is DiscoveryQueueItem[] {
   return (
     Array.isArray(value) &&
     value.every((item) =>
@@ -344,6 +348,7 @@ function supportedEbookIndex(index: LibraryIndex | null): LibraryIndex | null {
       author: file.author,
       language: file.language,
       chapterTitles: file.chapterTitles,
+      chapterTitleKeys: file.chapterTitleKeys,
       chapterNumbers: file.chapterNumbers,
       filenameRange: file.filenameRange,
       coverageConfidence: file.coverageConfidence,
@@ -506,12 +511,15 @@ export function writeDiscoveryQueue(dataDirectory: string, items: DiscoveryQueue
   return writeJson(join(dataDirectory, 'discovery-queue.json'), items)
 }
 
-function discoveryQueueChaptersPath(dataDirectory: string, queueItemId: string): string {
+export function discoveryQueueChaptersPath(
+  dataDirectory: string,
+  queueItemId: string
+): string {
   if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
   return join(dataDirectory, 'download-artifacts', queueItemId, 'queue-chapters.json')
 }
 
-function discoveryQueueSelectionPath(
+export function discoveryQueueSelectionPath(
   dataDirectory: string,
   queueItemId: string
 ): string {
@@ -587,6 +595,13 @@ function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapter
   return join(dataDirectory, 'download-artifacts', queueItemId, filename)
 }
 
+export function chapterArtifactReference(
+  queueItemId: string,
+  chapterUrl: string
+): string {
+  return chapterArtifactPath('', queueItemId, chapterUrl)
+}
+
 function chapterImageArtifactPath(
   chapterPath: string,
   imageHash: string
@@ -644,6 +659,24 @@ function isValidChapterBlocks(
           block.imageIndex < imageCount &&
           typeof block.alt === 'string' &&
           block.alt.length <= 1000))
+  )
+}
+
+function hasReadableChapterContent(
+  paragraphs: string[] | undefined,
+  blocks: ChapterContentBlock[] | undefined,
+  imageCount: number
+): boolean {
+  if (blocks !== undefined) {
+    return blocks.some(
+      (block) =>
+        block.type === 'image' ||
+        (block.type === 'paragraph' && block.text.trim().length > 0)
+    )
+  }
+  return (
+    (paragraphs?.some((paragraph) => paragraph.trim().length > 0) ?? false) ||
+    imageCount > 0
   )
 }
 
@@ -735,7 +768,12 @@ export async function readChapterArtifact(
         ? isValidChapterBlocks(stored.blocks, images?.length ?? 0)
         : Array.isArray(stored.paragraphs) &&
           stored.paragraphs.every((paragraph) => typeof paragraph === 'string'))
-    if (!validImageMetadata || !validContent) {
+    const hasContent = hasReadableChapterContent(
+      stored.paragraphs,
+      stored.blocks,
+      images?.length ?? 0
+    )
+    if (!validImageMetadata || !validContent || !hasContent) {
       throw new Error('A saved chapter artifact is invalid and must be fetched again.')
     }
 
@@ -806,6 +844,15 @@ export async function readChapterArtifact(
   ) {
     throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
   }
+  if (
+    !hasReadableChapterContent(
+      legacyArtifact.paragraphs,
+      legacyArtifact.blocks,
+      legacyImages.length
+    )
+  ) {
+    throw new Error('A saved chapter artifact contains no readable content.')
+  }
   return legacyArtifact
 }
 
@@ -842,6 +889,15 @@ export async function readChapterArtifactDescriptor(
         artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string'))
   ) {
     throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+  }
+  if (
+    !hasReadableChapterContent(
+      artifact.paragraphs,
+      artifact.blocks,
+      artifactImages.length
+    )
+  ) {
+    throw new Error('A saved chapter artifact contains no readable content.')
   }
 
   const images: ChapterArtifactImageFile[] = []
@@ -956,6 +1012,15 @@ export function writeChapterArtifact(
       !isValidChapterBlocks(chapter.blocks, images.length)
     ) {
       throw new Error('The chapter cannot be saved because its content blocks are invalid.')
+    }
+    if (
+      !hasReadableChapterContent(
+        chapter.paragraphs,
+        chapter.blocks,
+        images.length
+      )
+    ) {
+      throw new Error('The chapter cannot be saved because it contains no readable content.')
     }
 
     const path = chapterArtifactPath(dataDirectory, queueItemId, chapter.url)
