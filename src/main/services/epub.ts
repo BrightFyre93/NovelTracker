@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
@@ -13,8 +13,10 @@ import type {
   ChapterImage,
   ChapterInlineNode,
   EpubMergeProgress,
-  EpubNovelMetadata
+  EpubNovelMetadata,
+  EpubOutputRecord
 } from '../../shared/contracts'
+import { parseChapterNumber } from '../../shared/chapterNumber'
 import {
   isNodeError,
   OperationCancelledError,
@@ -40,7 +42,11 @@ import {
   writeChapterArtifact,
   writeCoverArtifact
 } from './localStore'
-import type { EpubPackagingInput } from './epubPackaging'
+import type {
+  EpubPackagingInput,
+  EpubPackagingProgress,
+  EpubPackagingResult
+} from './epubPackaging'
 import { DEFAULT_EPUB_OUTPUT_OPTIONS } from '../../shared/epubOutputOptions'
 
 function escapeXml(value: string): string {
@@ -777,7 +783,8 @@ export async function writeEpub(
   signal?: AbortSignal,
   css = DEFAULT_EPUB_CSS,
   metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata(),
-  onProgress?: (progress: EpubMergeProgress) => void
+  onProgress?: (progress: EpubMergeProgress) => void,
+  identifierSeed?: string
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
   const dataDirectory = await mkdtemp(
@@ -809,7 +816,7 @@ export async function writeEpub(
           ...DEFAULT_EPUB_OUTPUT_OPTIONS,
           css,
           language,
-          identifierSeed: metadata.sourceUrl
+          identifierSeed: identifierSeed ?? metadata.sourceUrl
         },
         includeCover: Boolean(metadata.cover),
         metadata: metadataWithoutCover
@@ -822,7 +829,181 @@ export async function writeEpub(
   }
 }
 
+const MAX_VOLUME_SOURCE_IMAGE_BYTES = Math.floor(
+  MAX_TOTAL_EPUB_IMAGE_BYTES * 0.8
+)
+
 export async function writeEpubFromArtifactStore(
+  input: EpubPackagingInput,
+  signal?: AbortSignal,
+  onProgress?: (progress: EpubPackagingProgress) => void
+): Promise<EpubPackagingResult> {
+  const chaptersPerVolume = input.outputOptions.maxChaptersPerEpub
+  const volumes: EpubPackagingInput['chapters'][] = []
+  let currentVolume: EpubPackagingInput['chapters'] = []
+  let currentImageBytes = 0
+  let currentImageHashes = new Set<string>()
+  const cover =
+    input.includeCover && !input.outputOptions.skipImages
+      ? await readCoverArtifact(input.dataDirectory, input.queueItemId)
+      : null
+  const coverBytes = cover
+    ? Buffer.from(cover.dataBase64, 'base64').length
+    : 0
+  if (input.includeCover && !input.outputOptions.skipImages && !cover) {
+    throw new Error(
+      'The saved cover content is missing; retry this EPUB online before repackaging.'
+    )
+  }
+  currentImageBytes = coverBytes
+
+  for (const chapter of input.chapters) {
+    if (signal?.aborted) {
+      throw new OperationCancelledError('EPUB creation was cancelled.')
+    }
+    let chapterImageBytes = 0
+    const chapterImageHashes = new Set<string>()
+    if (!input.outputOptions.skipImages) {
+      const descriptor = await readChapterArtifactDescriptor(
+        input.dataDirectory,
+        input.queueItemId,
+        chapter.url,
+        { verifyImages: false }
+      )
+      if (!descriptor || descriptor.url !== chapter.url) {
+        throw new Error(`Saved chapter content is missing for "${chapter.title}".`)
+      }
+      for (const image of descriptor.images) {
+        if (currentImageHashes.has(image.sha256) || chapterImageHashes.has(image.sha256)) continue
+        chapterImageHashes.add(image.sha256)
+        chapterImageBytes += (await stat(image.path)).size
+      }
+    }
+    const exceedsChapterCap = currentVolume.length >= chaptersPerVolume
+    const exceedsImageCap =
+      currentVolume.length > 0 &&
+      currentImageBytes + chapterImageBytes > MAX_VOLUME_SOURCE_IMAGE_BYTES
+    if (exceedsChapterCap || exceedsImageCap) {
+      volumes.push(currentVolume)
+      currentVolume = []
+      currentImageBytes = coverBytes
+      currentImageHashes = new Set()
+      chapterImageBytes = 0
+      chapterImageHashes.clear()
+      if (!input.outputOptions.skipImages) {
+        const descriptor = await readChapterArtifactDescriptor(
+          input.dataDirectory,
+          input.queueItemId,
+          chapter.url,
+          { verifyImages: false }
+        )
+        for (const image of descriptor?.images ?? []) {
+          if (chapterImageHashes.has(image.sha256)) continue
+          chapterImageHashes.add(image.sha256)
+          chapterImageBytes += (await stat(image.path)).size
+        }
+      }
+    }
+    currentVolume.push(chapter)
+    for (const hash of chapterImageHashes) currentImageHashes.add(hash)
+    currentImageBytes += chapterImageBytes
+  }
+  if (currentVolume.length > 0) volumes.push(currentVolume)
+
+  const outputPaths: EpubOutputRecord[] = []
+  let overwroteExistingFile = false
+  let chapterOrdinal = 0
+  for (const [index, chapters] of volumes.entries()) {
+    const filename =
+      volumes.length === 1
+        ? input.filename
+        : createVolumeFilename(input, chapters, index + 1, chapterOrdinal)
+    const prior = input.completedOutputs?.find(
+      (output) => output.volumeIndex === index + 1 && output.filename === filename
+    )
+    let output: EpubOutputRecord | null = null
+    if (prior) output = await verifyExistingOutput(prior)
+    if (!output) {
+      const result = await writeSingleEpubFromArtifactStore(
+        { ...input, chapters, filename, includeCover: Boolean(cover) },
+        signal,
+        onProgress
+      )
+      overwroteExistingFile ||= result.overwroteExistingFile
+      output = await describeEpubOutput(result.outputPath, index + 1)
+    }
+    outputPaths.push(output)
+    chapterOrdinal += chapters.length
+    onProgress?.({
+      stage: 'saving',
+      percentage: Math.round(((index + 1) / volumes.length) * 100),
+      message: `Published volume ${index + 1} of ${volumes.length}`,
+      publishedOutput: output
+    })
+  }
+  const firstOutput = outputPaths[0]
+  if (!firstOutput) throw new Error('No EPUB volumes were produced.')
+  return {
+    outputPath: firstOutput.path,
+    outputPaths,
+    overwroteExistingFile
+  }
+}
+
+function createVolumeFilename(
+  input: EpubPackagingInput,
+  chapters: EpubPackagingInput['chapters'],
+  volumeIndex: number,
+  chapterOrdinal: number
+): string {
+  const stem = input.filename
+    .replace(/\.epub$/i, '')
+    .replace(/\s+\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?$/i, '')
+    .trim()
+  const first = chapters[0]
+  const last = chapters[chapters.length - 1]
+  if (!first || !last) throw new Error('Cannot name an empty EPUB volume.')
+  const firstNumber = parseChapterNumber(first.title)
+  const lastNumber = parseChapterNumber(last.title)
+  const start = firstNumber === null ? String(chapterOrdinal + 1) : String(firstNumber)
+  const end = lastNumber === null ? String(chapterOrdinal + chapters.length) : String(lastNumber)
+  return sanitizeEpubFilename(`${stem || input.title} (Volume ${volumeIndex}) ${start}-${end}.epub`)
+}
+
+async function describeEpubOutput(
+  path: string,
+  volumeIndex: number
+): Promise<EpubOutputRecord> {
+  const details = await stat(path)
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(path)) {
+    if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) hash.update(chunk)
+  }
+  return {
+    volumeIndex,
+    filename: path.split(/[\\/]/).pop() ?? path,
+    path,
+    byteSize: details.size,
+    sha256: hash.digest('hex'),
+    status: 'published'
+  }
+}
+
+async function verifyExistingOutput(
+  output: EpubOutputRecord
+): Promise<EpubOutputRecord | null> {
+  try {
+    const current = await describeEpubOutput(output.path, output.volumeIndex)
+    return current.byteSize === output.byteSize && current.sha256 === output.sha256
+      ? output
+      : null
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function writeSingleEpubFromArtifactStore(
   input: EpubPackagingInput,
   signal?: AbortSignal,
   onProgress?: (progress: EpubMergeProgress) => void

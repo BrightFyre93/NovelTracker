@@ -2,7 +2,8 @@ import type {
   ChapterLink,
   EpubOutputOptions,
   EpubMergeProgress,
-  EpubNovelMetadata
+  EpubNovelMetadata,
+  EpubOutputRecord
 } from '../../shared/contracts'
 
 export interface EpubPackagingInput {
@@ -14,13 +15,17 @@ export interface EpubPackagingInput {
   author: string
   filename: string
   outputOptions: EpubOutputOptions
+  completedOutputs?: EpubOutputRecord[]
   includeCover: boolean
   metadata: EpubNovelMetadata
 }
 
 export interface EpubPackagingResult {
   outputPath: string
+  outputPaths: EpubOutputRecord[]
   overwroteExistingFile: boolean
 }
 
-export type EpubPackagingProgress = EpubMergeProgress
+export type EpubPackagingProgress = EpubMergeProgress & {
+  publishedOutput?: EpubOutputRecord
+}

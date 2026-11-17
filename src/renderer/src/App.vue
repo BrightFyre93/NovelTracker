@@ -10,6 +10,7 @@ import type {
   DiscoveryQueueItem,
   ChapterSelectionUpdate,
   DownloadHistoryEntry,
+  EpubOutputPreferences,
   LibraryOperation,
   QueueEpubOverrides,
   TrackerNovel
@@ -17,7 +18,8 @@ import type {
 import { QUEUE_SELECTION_SAVE_DEBOUNCE_MS } from '../../shared/constants'
 import { toMessage, unwrapResult } from '../../shared/errors'
 import { encodeChapterSelection } from '../../shared/chapterSelection'
-import { MAX_EPUB_FILENAME_BASENAME_LENGTH, suggestEpubFilename } from '../../shared/epubFilename'
+import { MAX_EPUB_FILENAME_BASENAME_LENGTH, resolveEpubFilename } from '../../shared/epubFilename'
+import { DEFAULT_EPUB_OUTPUT_PREFERENCES } from '../../shared/epubOutputOptions'
 import ConfigurationView from './components/ConfigurationView.vue'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
@@ -40,6 +42,9 @@ const browserDiscoveryRunning = ref(false)
 const browserPageTitle = ref('')
 const browserAssistUrl = ref('')
 const separateJob = ref(false)
+const outputPreferences = ref<EpubOutputPreferences>({
+  ...DEFAULT_EPUB_OUTPUT_PREFERENCES
+})
 const trackerVisible = ref(false)
 const trackerLoading = ref(false)
 const trackerNovels = ref<TrackerNovel[]>([])
@@ -79,10 +84,16 @@ const filenamePreview = computed(() => {
   const selected = chapters.value.filter((chapter) =>
     chapterSelection.value.has(chapter.id)
   )
-  const suggestion =
-    selected.length === 0
-      ? suggestEpubFilename(title.value, '', '')
-      : suggestEpubFilename(title.value, selected[0].title, selected[selected.length - 1].title)
+  const suggestion = resolveEpubFilename(
+    outputPreferences.value.filenameTemplate,
+    {
+      title: title.value,
+      author: author.value,
+      filename: title.value,
+      firstChapterTitle: selected[0]?.title ?? '',
+      lastChapterTitle: selected[selected.length - 1]?.title ?? ''
+    }
+  )
   if (!separateJob.value || !store.queueItemId) return suggestion
   const suffix = ` (separate ${store.queueItemId.slice(0, 8)})`
   const basename = suggestion.replace(/\.epub$/i, '')
@@ -152,6 +163,7 @@ onMounted(() => {
   })
   void window.novelTracker.getSettings().then((settings) => {
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
+    outputPreferences.value = { ...settings.epubOutputPreferences }
     trackerCsvPath.value = settings.trackerCsvPath
     applyAppTheme(settings.appTheme)
   }).catch((error: unknown) => {
@@ -345,6 +357,7 @@ async function openCreateView(): Promise<void> {
     activeView.value = 'create'
     const settings = await window.novelTracker.getSettings()
     if (settings.outputDirectory) store.outputDirectory = settings.outputDirectory
+    outputPreferences.value = { ...settings.epubOutputPreferences }
     trackerCsvPath.value = settings.trackerCsvPath
     applyAppTheme(settings.appTheme)
   } catch (error) {
@@ -427,6 +440,7 @@ async function openQueueItem(item: DiscoveryQueueItem): Promise<void> {
   store.genres = [...item.genres]
   store.source = item.source
   store.novelStatus = item.novelStatus
+  store.language = item.detectedLanguage || 'en'
   store.parserName = item.parserName
   store.chapters = item.chapters.map(({ selected: _selected, ...chapter }) => chapter)
   store.chapterSelection = new Set(
@@ -515,7 +529,7 @@ async function createEpub(): Promise<void> {
       source: store.source,
       novelStatus: store.novelStatus,
       language: store.language,
-      filename: store.filename.trim() || filenamePreview.value,
+      filename: store.filename.trim(),
       outputDirectory: store.outputDirectory
     }
     const result = await window.novelTracker.enqueueEpubFromSnapshot(
@@ -916,6 +930,9 @@ function updateChapterSelection(id: string, event: Event): void {
             <h3 id="output-heading">Queue EPUB</h3>
           </div>
         </div>
+        <p class="help-text">
+          Uses global EPUB defaults from Configuration. Filename preview: {{ filenamePreview }}
+        </p>
         <div class="filename-field">
           <label class="field-label" for="epub-filename">EPUB filename</label>
           <InputText
@@ -976,6 +993,9 @@ function updateChapterSelection(id: string, event: Event): void {
         </div>
         <span class="history-status" :class="`status-${job.status}`">{{ job.status }}</span>
         <span v-if="job.error" class="history-error">{{ job.error }}</span>
+        <span v-else-if="job.outputPaths?.length" class="history-error">
+          {{ job.outputPaths.length > 1 ? `${job.outputPaths.length} EPUB volumes: ` : '' }}{{ job.outputPaths.map((output) => output.path).join(', ') }}
+        </span>
         <span v-else-if="job.outputPath" class="history-error">{{ job.outputPath }}</span>
       </div>
     </section>

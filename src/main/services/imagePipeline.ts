@@ -54,8 +54,11 @@ export async function normalizeEpubImage(
       return { mediaType: 'image/gif', data: animatedGif }
     }
 
+    const requestedFormat = options.compressImages
+      ? options.imageFormat
+      : 'original'
     const format = chooseFormat(
-      options.imageFormat,
+      requestedFormat,
       mediaType,
       metadata.hasAlpha === true,
       isCover && options.coverJpegOnly

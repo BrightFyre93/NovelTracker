@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
 const DATABASE_FILENAME = 'novel-tracker.sqlite'
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 export class SqliteDatabase {
   private database: DatabaseSync | null = null
@@ -238,6 +238,26 @@ export class SqliteDatabase {
           `)
         })
         version = 4
+      }
+      if (version === 4) {
+        withSqliteTransaction(database, () => {
+          database.exec(`
+            CREATE TABLE IF NOT EXISTS job_outputs (
+              item_id TEXT NOT NULL
+                REFERENCES queue_items(id) ON DELETE CASCADE,
+              volume_index INTEGER NOT NULL CHECK(volume_index >= 1),
+              filename TEXT NOT NULL,
+              path TEXT NOT NULL,
+              byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+              sha256 TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('published')),
+              PRIMARY KEY(item_id, volume_index)
+            );
+            CREATE INDEX IF NOT EXISTS job_outputs_by_path ON job_outputs(path);
+            PRAGMA user_version = 5;
+          `)
+        })
+        version = 5
       }
       if (version !== SCHEMA_VERSION) {
         throw new Error(`The SQLite schema could not be upgraded to version ${SCHEMA_VERSION}.`)

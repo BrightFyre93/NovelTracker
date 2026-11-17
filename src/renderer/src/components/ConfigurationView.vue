@@ -5,6 +5,7 @@ import Message from 'primevue/message'
 import type {
   AppSettings,
   DomainRequestDelayPreference,
+  EpubOutputPreferences,
   SiteExtractionMode,
   SiteExtractionPreference
 } from '../../../shared/contracts'
@@ -43,6 +44,7 @@ import {
   normalizeSiteHostname
 } from '../../../shared/siteExtractionPreferences'
 import { normalizeDomainRequestDelays } from '../../../shared/domainRequestPreferences'
+import { DEFAULT_EPUB_OUTPUT_PREFERENCES } from '../../../shared/epubOutputOptions'
 
 const emit = defineEmits<{
   themeChanged: [theme: AppSettings['appTheme']]
@@ -65,6 +67,7 @@ const settings = ref<AppSettings>({
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
+  epubOutputPreferences: { ...DEFAULT_EPUB_OUTPUT_PREFERENCES },
   appTheme: 'light'
 })
 const freshnessHoursDraft = ref(DEFAULT_DISCOVERY_FRESHNESS_HOURS)
@@ -82,6 +85,9 @@ const domainPreferenceHostnameDraft = ref('')
 const domainPreferenceDelayDraft = ref(DEFAULT_DOMAIN_REQUEST_DELAY_MS)
 const themeDraft = ref<AppSettings['appTheme']>('light')
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
+const epubOutputPreferencesDraft = ref<EpubOutputPreferences>({
+  ...DEFAULT_EPUB_OUTPUT_PREFERENCES
+})
 const scanOldFolderDraft = ref(false)
 const scanOldCompletedFolderDraft = ref(false)
 const omitHttp404ChaptersDraft = ref(false)
@@ -124,6 +130,9 @@ const siteExtractionPreferencesDirty = computed(() =>
 )
 const themeDirty = computed(() => themeDraft.value !== settings.value.appTheme)
 const epubCssDirty = computed(() => epubCssDraft.value !== settings.value.epubCss)
+const epubOutputPreferencesDirty = computed(
+  () => JSON.stringify(epubOutputPreferencesDraft.value) !== JSON.stringify(settings.value.epubOutputPreferences)
+)
 const libraryScanOptionsDirty = computed(() =>
   scanOldFolderDraft.value !== settings.value.scanOldFolder ||
   scanOldCompletedFolderDraft.value !== settings.value.scanOldCompletedFolder
@@ -156,6 +165,7 @@ const savingDomainRequestDelays = ref(false)
 const savingSiteExtractionPreferences = ref(false)
 const savingTheme = ref(false)
 const savingEpubCss = ref(false)
+const savingEpubOutputPreferences = ref(false)
 const savingLibraryScanOptions = ref(false)
 const savingOmitHttp404Chapters = ref(false)
 
@@ -176,6 +186,7 @@ onMounted(async () => {
     omitHttp404ChaptersDraft.value = settings.value.omitHttp404Chapters
     themeDraft.value = settings.value.appTheme
     epubCssDraft.value = settings.value.epubCss
+    epubOutputPreferencesDraft.value = { ...settings.value.epubOutputPreferences }
   } catch (reason) {
     error.value = toMessage(reason)
   }
@@ -502,6 +513,28 @@ async function saveEpubCss(css = epubCssDraft.value): Promise<void> {
     error.value = toMessage(reason)
   } finally {
     savingEpubCss.value = false
+  }
+}
+
+async function saveEpubOutputPreferences(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingEpubOutputPreferences.value = true
+  try {
+    const result = await window.novelTracker.updateSettings({
+      epubOutputPreferences: { ...epubOutputPreferencesDraft.value }
+    })
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    epubOutputPreferencesDraft.value = { ...result.value.epubOutputPreferences }
+    success.value = 'EPUB defaults saved. Existing queued jobs keep their captured options.'
+  } catch (reason) {
+    error.value = toMessage(reason)
+  } finally {
+    savingEpubOutputPreferences.value = false
   }
 }
 
@@ -949,8 +982,73 @@ async function resetEpubCss(): Promise<void> {
       <div class="section-heading">
         <div>
           <p class="step-label">EPUB DEFAULTS</p>
-          <h3 id="configuration-epub-heading">EPUB stylesheet</h3>
+          <h3 id="configuration-epub-heading">EPUB defaults</h3>
         </div>
+      </div>
+      <p class="help-text">These defaults apply to newly queued EPUB jobs. Existing queued jobs keep their captured options.</p>
+      <div class="configuration-settings-grid epub-output-preferences-grid">
+        <div class="configuration-setting epub-output-template-setting">
+          <label class="field-label" for="epub-filename-template">Filename template</label>
+          <input id="epub-filename-template" v-model="epubOutputPreferencesDraft.filenameTemplate" class="full-input" maxlength="1000" placeholder="%Title% %FirstChapter%-%LastChapter%" :disabled="savingEpubOutputPreferences" />
+          <small class="help-text">Tokens: %Filename%, %Title%, %Author%, %FirstChapter%, %LastChapter%.</small>
+        </div>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.includeNovelInfoPage" type="checkbox" />
+          <span><strong>Include Novel Information page</strong></span>
+        </label>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.includeChapterListPage" type="checkbox" />
+          <span><strong>Include Chapter List page</strong></span>
+        </label>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.skipImages" type="checkbox" />
+          <span><strong>Skip images</strong></span>
+        </label>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.compressImages" type="checkbox" />
+          <span><strong>Compress images</strong></span>
+        </label>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.coverJpegOnly" type="checkbox" />
+          <span><strong>Restrict cover to JPEG</strong></span>
+        </label>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.flattenAnimatedImages" type="checkbox" />
+          <span><strong>Flatten animated images (lossy)</strong></span>
+        </label>
+        <label class="configuration-setting configuration-toggle">
+          <input v-model="epubOutputPreferencesDraft.includeImageAttribution" type="checkbox" />
+          <span><strong>Link images to their source</strong></span>
+        </label>
+        <label class="configuration-setting">
+          <span class="field-label">Maximum image dimension</span>
+          <span class="configuration-inline-control">
+            <input v-model.number="epubOutputPreferencesDraft.maxImageDimension" class="configuration-number" type="number" min="64" max="8192" step="1" :disabled="savingEpubOutputPreferences || !epubOutputPreferencesDraft.compressImages" /> px
+          </span>
+        </label>
+        <label class="configuration-setting">
+          <span class="field-label">Image format</span>
+          <select v-model="epubOutputPreferencesDraft.imageFormat" class="configuration-select" :disabled="savingEpubOutputPreferences">
+            <option value="jpeg">JPEG for opaque images</option>
+            <option value="png">PNG</option>
+            <option value="original">Preserve supported formats</option>
+          </select>
+        </label>
+        <label class="configuration-setting">
+          <span class="field-label">Maximum chapters per EPUB</span>
+          <input v-model.number="epubOutputPreferencesDraft.maxChaptersPerEpub" class="configuration-number" type="number" min="1" max="20000" step="1" :disabled="savingEpubOutputPreferences" />
+        </label>
+      </div>
+      <div class="configuration-section-actions">
+        <Button
+          icon="pi pi-save"
+          title="Save EPUB defaults"
+          aria-label="Save EPUB defaults"
+          size="small"
+          :loading="savingEpubOutputPreferences"
+          :disabled="savingEpubOutputPreferences || !epubOutputPreferencesDirty"
+          @click="saveEpubOutputPreferences"
+        />
       </div>
       <details class="epub-css-settings">
         <summary>Edit EPUB stylesheet</summary>

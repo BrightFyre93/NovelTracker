@@ -44,6 +44,7 @@ export function projectDownloadJob(
         ? Math.min(completedChapters, selectedChapterCount)
         : 0,
     outputPath: item.outputPath || '',
+    outputPaths: (item.outputPaths ?? []).map((output) => ({ ...output })),
     error: item.error || '',
     startedAt:
       item.downloadStartedAt ||

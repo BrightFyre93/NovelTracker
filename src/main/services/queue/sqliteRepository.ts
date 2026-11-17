@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite'
 import type {
   DiscoveryQueueItem,
+  EpubOutputRecord,
   QueueChapter
 } from '../../../shared/contracts'
 import { backupLegacyJsonFile } from '../../infra/jsonMigrationBackup'
@@ -265,9 +266,19 @@ class SqliteQueueRepository
         'SELECT id, sequence, status, item_json FROM queue_items ORDER BY ordinal'
       )
       .all()
-      .map((row) =>
-        parseStoredQueueItem(row.id, row.sequence, row.status, row.item_json)
-      )
+      .map((row) => {
+        const item = parseStoredQueueItem(
+          row.id,
+          row.sequence,
+          row.status,
+          row.item_json
+        )
+        const outputs = readJobOutputs(database, item.id)
+        return {
+          ...item,
+          outputPaths: outputs.length > 0 ? outputs : (item.outputPaths ?? [])
+        }
+      })
   }
 
   async writeQueue(items: DiscoveryQueueItem[]): Promise<void> {
@@ -286,7 +297,10 @@ class SqliteQueueRepository
          item_json = excluded.item_json`
     )
     withSqliteTransaction(database, () => {
-      items.forEach((item, ordinal) => writeQueueItem(upsert, item, ordinal))
+      items.forEach((item, ordinal) => {
+        writeQueueItem(upsert, item, ordinal)
+        replaceJobOutputs(database, item.id, item.outputPaths ?? [])
+      })
       if (items.length === 0) {
         database.exec('DELETE FROM queue_items')
       } else {
@@ -572,6 +586,64 @@ class SqliteQueueRepository
         )
         .run(QUEUE_JSON_MIGRATION, new Date().toISOString())
     })
+  }
+}
+
+function readJobOutputs(
+  database: DatabaseSync,
+  queueItemId: string
+): EpubOutputRecord[] {
+  return database
+    .prepare(
+      `SELECT volume_index, filename, path, byte_size, sha256, status
+       FROM job_outputs WHERE item_id = ? ORDER BY volume_index`
+    )
+    .all(queueItemId)
+    .map((row) => {
+      if (
+        typeof row.volume_index !== 'number' ||
+        !Number.isSafeInteger(row.volume_index) ||
+        typeof row.filename !== 'string' ||
+        typeof row.path !== 'string' ||
+        typeof row.byte_size !== 'number' ||
+        !Number.isSafeInteger(row.byte_size) ||
+        typeof row.sha256 !== 'string' ||
+        row.status !== 'published'
+      ) {
+        throw new Error(`Saved EPUB output data is invalid for job ${queueItemId}.`)
+      }
+      return {
+        volumeIndex: row.volume_index,
+        filename: row.filename,
+        path: row.path,
+        byteSize: row.byte_size,
+        sha256: row.sha256,
+        status: 'published'
+      }
+    })
+}
+
+function replaceJobOutputs(
+  database: DatabaseSync,
+  queueItemId: string,
+  outputs: EpubOutputRecord[]
+): void {
+  database.prepare('DELETE FROM job_outputs WHERE item_id = ?').run(queueItemId)
+  const insert = database.prepare(
+    `INSERT INTO job_outputs
+     (item_id, volume_index, filename, path, byte_size, sha256, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  )
+  for (const output of outputs) {
+    insert.run(
+      queueItemId,
+      output.volumeIndex,
+      output.filename,
+      output.path,
+      output.byteSize,
+      output.sha256,
+      output.status
+    )
   }
 }
 

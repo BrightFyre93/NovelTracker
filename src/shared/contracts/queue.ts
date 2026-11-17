@@ -22,9 +22,19 @@ export interface DownloadHistoryEntry {
   status: DownloadJobStatus
   completedChapters: number
   outputPath: string
+  outputPaths?: EpubOutputRecord[]
   error: string
   startedAt: string
   updatedAt: string
+}
+
+export interface EpubOutputRecord {
+  volumeIndex: number
+  filename: string
+  path: string
+  byteSize: number
+  sha256: string
+  status: 'published'
 }
 
 export interface TrackerSource {
@@ -132,6 +142,7 @@ export interface DiscoveryQueueItem {
   genres: string[]
   source: string
   novelStatus: string
+  detectedLanguage?: string
   sourceUrl: string
   origin: 'tracker' | 'manual'
   separateJob?: boolean
@@ -151,6 +162,7 @@ export interface DiscoveryQueueItem {
   queuedAt: string
   failedChapters: FailedQueueChapter[]
   outputPath: string
+  outputPaths?: EpubOutputRecord[]
   downloadHistoryId: string
   progress: JobProgress | null
   error: string

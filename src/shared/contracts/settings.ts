@@ -1,3 +1,5 @@
+import type { EpubOutputPreferences } from './epub'
+
 export interface AppSettings {
   libraryRoot: string
   trackerCsvPath: string
@@ -15,6 +17,7 @@ export interface AppSettings {
   discoveryFreshnessHours: number
   siteExtractionPreferences: SiteExtractionPreference[]
   epubCss: string
+  epubOutputPreferences: EpubOutputPreferences
   appTheme: 'light' | 'dark'
 }
 
@@ -34,6 +37,7 @@ export type SettingsUpdatePatch = Partial<
     | 'discoveryFreshnessHours'
     | 'siteExtractionPreferences'
     | 'epubCss'
+    | 'epubOutputPreferences'
     | 'appTheme'
   >
 >

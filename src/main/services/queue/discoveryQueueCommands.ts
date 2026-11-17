@@ -5,6 +5,7 @@ import type {
 } from '../../../shared/contracts'
 import type { QueueCommandContext } from './queueCommands'
 import { isActiveQueueStatus } from './queueStateMachine'
+import { removeJobDiagnostic } from '../jobDiagnostics'
 
 export function createDiscoveryQueueCommands(context: QueueCommandContext) {
   const {
@@ -315,6 +316,13 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
         )
       }
     )
+    await removeJobDiagnostic(dataDirectory(), removedItem.id).catch(
+      (error: unknown) =>
+        console.warn(
+          `Diagnostic for removed queue item ${removedItem.id} could not be removed:`,
+          errorMessage(error)
+        )
+    )
     notifyDiscoveryQueueChanged()
   }
 
@@ -337,6 +345,13 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
             errorMessage(error)
           )
         }
+      )
+      await removeJobDiagnostic(dataDirectory(), item.id).catch(
+        (error: unknown) =>
+          console.warn(
+            `Diagnostic for cleared queue item ${item.id} could not be removed:`,
+            errorMessage(error)
+          )
       )
     }
     notifyDiscoveryQueueChanged()
@@ -366,6 +381,13 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
             errorMessage(error)
           )
         }
+      )
+      await removeJobDiagnostic(dataDirectory(), item.id).catch(
+        (error: unknown) =>
+          console.warn(
+            `Diagnostic for completed queue item ${item.id} could not be removed:`,
+            errorMessage(error)
+          )
       )
     }
     notifyDiscoveryQueueChanged()

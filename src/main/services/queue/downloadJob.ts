@@ -1,4 +1,5 @@
 import { statfs } from 'node:fs/promises'
+import { appendJobDiagnostic } from '../jobDiagnostics'
 import type {
   ChapterContent,
   ChapterLink,
@@ -499,6 +500,38 @@ export async function runQueuedDownloadJob(
               }
             }
           })
+          try {
+            await appendJobDiagnostic(dataDirectory(), itemId, {
+              event: 'packaging-failed',
+              error: errorMessage(error),
+              stack: error instanceof Error ? error.stack : String(error),
+              freeBytes,
+              paths: {
+                outputDirectory: options.outputDirectory,
+                targetOutputPath: item.targetOutputPath
+              },
+              options: {
+                ...options.outputOptions,
+                css: undefined,
+                filename: options.filename,
+                outputDirectory: options.outputDirectory,
+                omitHttp404Chapters: options.omitHttp404Chapters === true
+              },
+              failedChapters: item.failedChapters.map((chapter) => ({
+                title: chapter.title,
+                url: chapter.url,
+                httpStatus: chapter.httpStatus ?? null,
+                omitted: chapter.omitted === true,
+                error: chapter.error
+              })),
+              outputs: item.outputPaths ?? []
+            })
+          } catch (diagnosticError) {
+            console.warn(
+              `Job diagnostic could not be written for ${itemId}:`,
+              errorMessage(diagnosticError)
+            )
+          }
         } else {
           const finalStatus =
             chapterProgress.completedSelectedChapterCount > 0

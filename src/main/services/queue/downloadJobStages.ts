@@ -6,6 +6,7 @@ import { transitionQueueItem } from './queueStateMachine'
 import { inspectPackagedEpubForLibrary } from '../libraryScanner'
 import type { createDownloadArtifactStore } from './artifactStore'
 import type { DownloadJobDependencies } from './downloadJob'
+import type { EpubPackagingResult } from '../epubPackaging'
 import {
   assertOutputPathAvailable,
   expectedOutputPath,
@@ -198,7 +199,10 @@ export async function packageAndFinalizeDownloadJob(input: {
   } = dependencies
 
   lifecycle.packagingStarted = true
-  const result = await packageEpub(
+  let outputPersistenceTail = Promise.resolve()
+  let result: EpubPackagingResult
+  try {
+    result = await packageEpub(
     {
       dataDirectory: dataDirectory(),
       queueItemId: itemId,
@@ -208,6 +212,7 @@ export async function packageAndFinalizeDownloadJob(input: {
       author: options.author,
       filename: outputFilename,
       outputOptions: options.outputOptions,
+      completedOutputs: item.outputPaths ?? [],
       includeCover,
       metadata: {
         description: options.description,
@@ -220,32 +225,56 @@ export async function packageAndFinalizeDownloadJob(input: {
     },
     signal,
     (progress) => {
+      if (progress.publishedOutput) {
+        const published = progress.publishedOutput
+        item.outputPaths = [
+          ...(item.outputPaths ?? []).filter(
+            (output) => output.volumeIndex !== published.volumeIndex
+          ),
+          published
+        ].sort((left, right) => left.volumeIndex - right.volumeIndex)
+        item.outputPath = item.outputPaths[0]?.path ?? published.path
+        outputPersistenceTail = outputPersistenceTail.then(() =>
+          persistDownloadState(item, true)
+        )
+      }
       item.progress = {
         current: chapters.length,
         total: selectedChapters.length,
         message: progress.message
       }
       notifyDiscoveryQueueChanged()
-    }
-  )
+      }
+    )
+  } catch (error) {
+    await outputPersistenceTail
+    throw error
+  }
+  await outputPersistenceTail
   lifecycle.packagingStarted = false
   lifecycle.outputPackaged = true
 
   let libraryIndexWarning = ''
   try {
     const settings = await settingsService.get()
-    const inspection = await inspectPackagedEpubForLibrary(
-      result.outputPath,
-      settings.libraryRoot,
-      settings
-    )
-    if (inspection.file) {
-      await libraryIndexRepository.upsertFile(
-        inspection.file,
-        inspection.libraryRoot
+    const warnings: string[] = []
+    for (const output of result.outputPaths) {
+      const inspection = await inspectPackagedEpubForLibrary(
+        output.path,
+        settings.libraryRoot,
+        settings
       )
-    } else {
-      libraryIndexWarning = `EPUB saved, but not added to the library index because ${inspection.skippedReason}.`
+      if (inspection.file) {
+        await libraryIndexRepository.upsertFile(
+          inspection.file,
+          inspection.libraryRoot
+        )
+      } else {
+        warnings.push(`${output.filename}: ${inspection.skippedReason}`)
+      }
+    }
+    if (warnings.length > 0) {
+      libraryIndexWarning = `EPUB saved, but some volumes were not added to the library index: ${warnings.join('; ')}.`
     }
   } catch (error) {
     libraryIndexWarning = `EPUB saved, but could not be added to the library index: ${errorMessage(error)}`
@@ -258,6 +287,7 @@ export async function packageAndFinalizeDownloadJob(input: {
   item.repackageOnly = false
   item.saveAvailableChaptersOnly = false
   item.outputPath = result.outputPath
+  item.outputPaths = result.outputPaths
   item.targetOutputPath = result.outputPath.toLowerCase()
   item.error = [
     incompleteOutput

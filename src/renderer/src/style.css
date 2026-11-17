@@ -1184,6 +1184,10 @@ footer {
   gap: 14px;
 }
 
+.epub-output-template-setting {
+  grid-column: 1 / -1;
+}
+
 .configuration-setting {
   display: flex;
   flex-direction: column;

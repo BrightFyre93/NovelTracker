@@ -1507,7 +1507,10 @@ async function clearCompletedQueueItems(): Promise<void> {
               class="queue-item-output"
               :title="item.outputPath"
             >
-              {{ item.outputPath }}
+              <template v-if="(item.outputPaths?.length ?? 0) > 1">
+                {{ item.outputPaths?.length }} EPUB volumes: {{ item.outputPaths?.map((output) => output.path).join(', ') }}
+              </template>
+              <template v-else>{{ item.outputPath }}</template>
             </span>
             <Button
               v-if="item.failedChapterCount"

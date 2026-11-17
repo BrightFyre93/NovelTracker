@@ -16,6 +16,7 @@ export interface DiscoveryResult {
   genres: string[]
   source: string
   novelStatus: string
+  detectedLanguage?: string
   parserName: string
   chapters: ChapterLink[]
 }
@@ -54,6 +55,11 @@ export interface EpubOutputOptions {
   includeImageAttribution: boolean
   maxChaptersPerEpub: number
 }
+
+export type EpubOutputPreferences = Omit<
+  EpubOutputOptions,
+  'css' | 'language' | 'identifierSeed'
+>
 
 export type ChapterInlineNode =
   | { type: 'text'; text: string }

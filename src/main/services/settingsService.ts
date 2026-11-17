@@ -95,7 +95,8 @@ export class SettingsService {
       })),
       siteExtractionPreferences: settings.siteExtractionPreferences.map(
         (preference) => ({ ...preference })
-      )
+      ),
+      epubOutputPreferences: { ...settings.epubOutputPreferences }
     }
   }
 }

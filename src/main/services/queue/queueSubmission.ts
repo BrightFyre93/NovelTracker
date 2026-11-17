@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { DiscoveryQueueItem } from '../../../shared/contracts'
 import { normalizeEpubOutputOptions } from '../../../shared/epubOutputOptions'
+import { resolveEpubFilename } from '../../../shared/epubFilename'
 import type { QueueCommandContext } from './queueCommands'
 
 export interface EnqueueSnapshotOverrides {
@@ -74,24 +75,49 @@ export function createQueueSubmissionCommand(context: QueueSubmissionContext) {
           .filter((chapter) => chapter.selected)
           .map(({ id, title, url }) => ({ id, title, url }))
       )
+      const settings = await settingsService.get()
+      const sourceUrl = item.sourceUrl
+      const title = overrides.title ?? item.title
+      const author = overrides.author ?? item.author
+      const language =
+        overrides.language ?? item.detectedLanguage ?? 'en'
+      const outputOptions = normalizeEpubOutputOptions(
+        {
+          ...settings.epubOutputPreferences,
+          css: settings.epubCss,
+          language,
+          identifierSeed: sourceUrl
+        },
+        { css: settings.epubCss, language }
+      )
+      const filename = resolveEpubFilename(
+        outputOptions.filenameTemplate,
+        {
+          title,
+          author,
+          filename: title,
+          firstChapterTitle: selectedChapters[0]?.title ?? '',
+          lastChapterTitle:
+            selectedChapters[selectedChapters.length - 1]?.title ?? ''
+        },
+        overrides.filename ?? ''
+      )
       const input = parseGenerateInput({
-        title: overrides.title ?? item.title,
-        author: overrides.author ?? item.author,
+        title,
+        author,
         description: overrides.description ?? item.description,
         coverUrl: overrides.coverUrl ?? item.coverUrl,
         alternativeNames: overrides.alternativeNames ?? item.alternativeNames,
         genres: overrides.genres ?? item.genres,
         source: overrides.source ?? item.source,
         novelStatus: overrides.novelStatus ?? item.novelStatus,
-        language: overrides.language ?? 'en',
-        filename: overrides.filename ?? '',
-        sourceUrl: item.sourceUrl,
+        language,
+        filename,
+        sourceUrl,
         outputDirectory: overrides.outputDirectory,
         chapters: selectedChapters,
         trackerRow: item.trackerRow ?? undefined
       })
-      const settings = await settingsService.get()
-      const sourceUrl = item.sourceUrl
       const outputPath = expectedOutputPath(
         input.outputDirectory,
         input.title,
@@ -149,16 +175,13 @@ export function createQueueSubmissionCommand(context: QueueSubmissionContext) {
         outputDirectory: input.outputDirectory,
         epubCss: settings.epubCss,
         omitHttp404Chapters: settings.omitHttp404Chapters,
-        outputOptions: normalizeEpubOutputOptions({
-          css: settings.epubCss,
-          language: input.language,
-          identifierSeed: sourceUrl
-        })
+        outputOptions
       }
       queueItem.targetOutputPath = outputPath
       queueItem.queuedAt = now
       queueItem.failedChapters = []
       queueItem.outputPath = ''
+      queueItem.outputPaths = []
       queueItem.downloadHistoryId = historyId
       queueItem.downloadStartedAt = now
       queueItem.sequence = queueStore.nextSequence()

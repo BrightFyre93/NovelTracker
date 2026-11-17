@@ -218,6 +218,7 @@ export function createQueueRuntime(
           item.genres = [...result.genres]
           item.source = result.source
           item.novelStatus = result.novelStatus
+          item.detectedLanguage = result.detectedLanguage || ''
           item.parserName = result.parserName
           const newUrls = new Set(result.chapters.map((chapter) => chapter.url))
           const addedCount = result.chapters.filter(

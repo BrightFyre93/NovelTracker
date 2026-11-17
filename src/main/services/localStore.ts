@@ -34,6 +34,10 @@ import {
 } from '../../shared/constants'
 import { normalizeSiteExtractionPreferences } from '../../shared/siteExtractionPreferences'
 import { normalizeDomainRequestDelays } from '../../shared/domainRequestPreferences'
+import {
+  DEFAULT_EPUB_OUTPUT_PREFERENCES,
+  normalizeEpubOutputPreferences
+} from '../../shared/epubOutputOptions'
 import { isNodeError } from '../../shared/errors'
 import { invalidateLibraryIndexSummary } from '../../shared/libraryIndexSummary'
 import { atomicWriteFile, renameWithRetry } from './atomicFile'
@@ -72,6 +76,7 @@ const EMPTY_SETTINGS: AppSettings = {
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
+  epubOutputPreferences: { ...DEFAULT_EPUB_OUTPUT_PREFERENCES },
   appTheme: 'light'
 }
 const fileWriteTails = new Map<string, Promise<void>>()
@@ -374,6 +379,12 @@ export async function readSettings(
       DEFAULT_EPUB_CSS,
       (value): value is string =>
         typeof value === 'string' && value.length <= MAX_EPUB_CSS_LENGTH
+    ),
+    epubOutputPreferences: normalizedSetting(
+      'epubOutputPreferences',
+      'EPUB output preferences',
+      defaults.epubOutputPreferences,
+      normalizeEpubOutputPreferences
     ),
     appTheme: setting(
       'appTheme',

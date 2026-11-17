@@ -98,6 +98,7 @@ interface NovelFullCatalogPage {
   genres: string[]
   source: string
   novelStatus: string
+  detectedLanguage: string
   chapters: ChapterLink[]
   pageCount: number
 }
@@ -110,6 +111,7 @@ interface NovelPageMetadata {
   genres: string[]
   source: string
   novelStatus: string
+  detectedLanguage: string
 }
 
 function genericNovelMetadata(
@@ -176,6 +178,12 @@ function genericNovelMetadata(
     $('meta[name="description"]').attr('content') ||
     $('meta[name="twitter:description"]').attr('content') ||
     labeledField(['Description', 'Summary', 'Synopsis'])
+  const language = normalizedText(
+    $('html').attr('lang') ||
+      $('meta[http-equiv="content-language"]').attr('content') ||
+      $('meta[name="language"]').attr('content') ||
+      ''
+  )
   const author =
     $('meta[name="author"]').attr('content') ||
     root.find('[itemprop="author"], .author a, .author').first().text() ||
@@ -218,7 +226,10 @@ function genericNovelMetadata(
           .first()
           .text()
       ) || labeledField(['Status', 'Novel status', 'State'])
-    ).slice(0, 300)
+    ).slice(0, 300),
+    detectedLanguage: /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(language)
+      ? language
+      : ''
   }
 }
 
@@ -339,7 +350,8 @@ function novelFullMetadata(
     novelStatus: (
       infoValue(['Status', 'State', 'Novel status', 'Translation status']) ||
       generic.novelStatus
-    ).slice(0, 300)
+    ).slice(0, 300),
+    detectedLanguage: generic.detectedLanguage
   }
 }
 
@@ -723,6 +735,7 @@ async function discoverNovelFullChapters(
     genres: firstPage.genres,
     source: firstPage.source,
     novelStatus: firstPage.novelStatus,
+    detectedLanguage: firstPage.detectedLanguage,
     parserName: 'NovelFull',
     chapters
   }

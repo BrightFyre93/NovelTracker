@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { EpubOutputOptions } from './contracts/epub'
+import type { EpubOutputOptions, EpubOutputPreferences } from './contracts/epub'
 import { DEFAULT_EPUB_CSS } from './defaultEpubCss'
 import { MAX_EPUB_CSS_LENGTH, MAX_SELECTED_CHAPTERS } from './constants'
 
@@ -36,6 +36,32 @@ export const epubOutputOptionsSchema = z.object({
   includeImageAttribution: z.boolean().default(false),
   maxChaptersPerEpub: z.number().int().min(1).max(MAX_SELECTED_CHAPTERS).default(10_000)
 })
+
+export const DEFAULT_EPUB_OUTPUT_PREFERENCES: EpubOutputPreferences = {
+  filenameTemplate: DEFAULT_EPUB_OUTPUT_OPTIONS.filenameTemplate,
+  includeNovelInfoPage: DEFAULT_EPUB_OUTPUT_OPTIONS.includeNovelInfoPage,
+  includeChapterListPage: DEFAULT_EPUB_OUTPUT_OPTIONS.includeChapterListPage,
+  skipImages: DEFAULT_EPUB_OUTPUT_OPTIONS.skipImages,
+  compressImages: DEFAULT_EPUB_OUTPUT_OPTIONS.compressImages,
+  maxImageDimension: DEFAULT_EPUB_OUTPUT_OPTIONS.maxImageDimension,
+  imageFormat: DEFAULT_EPUB_OUTPUT_OPTIONS.imageFormat,
+  coverJpegOnly: DEFAULT_EPUB_OUTPUT_OPTIONS.coverJpegOnly,
+  flattenAnimatedImages: DEFAULT_EPUB_OUTPUT_OPTIONS.flattenAnimatedImages,
+  includeImageAttribution: DEFAULT_EPUB_OUTPUT_OPTIONS.includeImageAttribution,
+  maxChaptersPerEpub: DEFAULT_EPUB_OUTPUT_OPTIONS.maxChaptersPerEpub
+}
+
+export const epubOutputPreferencesSchema = epubOutputOptionsSchema.omit({
+  css: true,
+  language: true,
+  identifierSeed: true
+})
+
+export function normalizeEpubOutputPreferences(
+  value: unknown
+): EpubOutputPreferences {
+  return epubOutputPreferencesSchema.parse(value)
+}
 
 export function normalizeEpubOutputOptions(
   value: unknown,

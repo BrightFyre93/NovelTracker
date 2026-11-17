@@ -443,7 +443,11 @@ export async function mergeEpubFiles(
       } else {
         onProgress({ ...progress, percentage: progress.stage === 'complete' ? 100 : 99 })
       }
-    }
+    },
+    input.sources
+      .map((source) => createHash('sha256').update(source.path).digest('hex'))
+      .sort()
+      .join('\n')
   )
   onProgress({ stage: 'complete', percentage: 100, message: 'Merged EPUB created and validated.' })
   return {

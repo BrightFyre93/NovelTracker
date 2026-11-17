@@ -24,6 +24,7 @@ import {
   MIN_SIMULTANEOUS_DOWNLOADS
 } from './constants'
 import { z } from 'zod'
+import { epubOutputPreferencesSchema } from './epubOutputOptions'
 
 function integerInRange(
   minimum: number,
@@ -49,6 +50,7 @@ export const settingsUpdatePatchSchema: z.ZodType<SettingsUpdatePatch> = z
         `EPUB CSS must be text of at most ${MAX_EPUB_CSS_LENGTH.toLocaleString()} characters.`
       )
       .optional(),
+    epubOutputPreferences: epubOutputPreferencesSchema.optional(),
     appTheme: z
       .custom<AppSettings['appTheme']>(
         (value): value is AppSettings['appTheme'] =>

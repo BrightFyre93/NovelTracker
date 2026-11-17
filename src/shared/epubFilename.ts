@@ -1,3 +1,5 @@
+import { parseChapterNumber } from './chapterNumber'
+
 export const MAX_EPUB_FILENAME_BASENAME_LENGTH = 175
 
 function cleanFilenamePart(value: string, maximumLength: number, fallback: string): string {
@@ -20,18 +22,50 @@ export function sanitizeEpubFilename(value: string): string {
   return `${safeBasename}.epub`
 }
 
-function chapterNumber(value: string): string | undefined {
-  const labeled = value.match(/\b(?:chapter|episode|part|volume)\s*#?\s*(\d+(?:\.\d+)?)/i)
-  const leading = value.match(/^\s*#?\s*(\d+(?:\.\d+)?)(?=\s|$|[:.-])/)
-  const number = labeled?.[1] ?? leading?.[1]
-  if (number) return number.replace(/^0+(?=\d)/, '')
-  if (/\bprologue\b/i.test(value)) return '0'
-  return undefined
-}
-
 export function suggestEpubFilename(title: string, firstChapter: string, lastChapter: string): string {
   const safeTitle = cleanFilenamePart(title, 130, 'Untitled')
-  const safeFirst = chapterNumber(firstChapter) ?? cleanFilenamePart(firstChapter, 20, 'Chapter')
-  const safeLast = chapterNumber(lastChapter) ?? cleanFilenamePart(lastChapter, 20, 'Chapter')
+  const firstNumber = parseChapterNumber(firstChapter)
+  const lastNumber = parseChapterNumber(lastChapter)
+  const safeFirst = firstNumber === null ? cleanFilenamePart(firstChapter, 20, 'Chapter') : String(firstNumber)
+  const safeLast = lastNumber === null ? cleanFilenamePart(lastChapter, 20, 'Chapter') : String(lastNumber)
   return sanitizeEpubFilename(`${safeTitle} ${safeFirst}-${safeLast}`)
+}
+
+export interface EpubFilenameTemplateValues {
+  title: string
+  author: string
+  firstChapterTitle: string
+  lastChapterTitle: string
+  filename?: string
+}
+
+export function resolveEpubFilename(
+  template: string,
+  values: EpubFilenameTemplateValues,
+  requestedFilename = ''
+): string {
+  if (requestedFilename.trim()) return sanitizeEpubFilename(requestedFilename)
+  if (!template.trim()) {
+    return suggestEpubFilename(
+      values.title,
+      values.firstChapterTitle,
+      values.lastChapterTitle
+    )
+  }
+  const firstNumber = parseChapterNumber(values.firstChapterTitle)
+  const lastNumber = parseChapterNumber(values.lastChapterTitle)
+  const tokens: Record<string, string> = {
+    filename: (values.filename || values.title).replace(/\.epub$/i, ''),
+    title: values.title,
+    author: values.author,
+    firstchapter:
+      firstNumber === null ? values.firstChapterTitle : String(firstNumber),
+    lastchapter:
+      lastNumber === null ? values.lastChapterTitle : String(lastNumber)
+  }
+  const expanded = template.replace(
+    /%(Filename|Title|Author|FirstChapter|LastChapter)%/gi,
+    (_token, name: string) => tokens[name.toLowerCase()] ?? ''
+  )
+  return sanitizeEpubFilename(expanded)
 }

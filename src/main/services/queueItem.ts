@@ -54,6 +54,7 @@ export function createQueueItem(input: NewQueueItem): DiscoveryQueueItem {
     queuedAt: input.queuedAt ?? '',
     failedChapters: input.failedChapters ?? [],
     outputPath: input.outputPath ?? '',
+    outputPaths: (input.outputPaths ?? []).map((output) => ({ ...output })),
     downloadHistoryId: input.downloadHistoryId ?? '',
     progress: input.progress ?? null,
     error: input.error ?? '',
@@ -91,6 +92,7 @@ function copyQueueItemFields(
           outputOptions: { ...item.downloadOptions.outputOptions }
         }
       : null,
+    outputPaths: (item.outputPaths ?? []).map((output) => ({ ...output })),
     failedChapters: item.failedChapters
       .slice(0, failedChapterLimit)
       .map((chapter) => ({ ...chapter })),
