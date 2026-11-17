@@ -7,6 +7,7 @@ import type {
   DownloadHistoryEntry
 } from '../../../shared/contracts'
 import { DEFAULT_EPUB_CSS } from '../../../shared/constants'
+import { normalizeEpubOutputOptions } from '../../../shared/epubOutputOptions'
 import {
   archiveDownloadJobs,
   readArchivedDownloadHistory
@@ -205,7 +206,14 @@ export function hydrateQueueItem(
           genres: item.downloadOptions.genres ?? [],
           source: item.downloadOptions.source ?? '',
           novelStatus: item.downloadOptions.novelStatus ?? '',
-          epubCss: item.downloadOptions.epubCss ?? DEFAULT_EPUB_CSS
+          epubCss: item.downloadOptions.epubCss ?? DEFAULT_EPUB_CSS,
+          outputOptions: normalizeEpubOutputOptions(
+            item.downloadOptions.outputOptions,
+            {
+              css: item.downloadOptions.epubCss,
+              language: item.downloadOptions.language
+            }
+          )
         }
       : null,
     updatedAt: item.updatedAt ?? ''

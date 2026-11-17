@@ -1,5 +1,6 @@
 import type {
   ChapterLink,
+  EpubOutputOptions,
   EpubMergeProgress,
   EpubNovelMetadata
 } from '../../shared/contracts'
@@ -11,9 +12,8 @@ export interface EpubPackagingInput {
   outputDirectory: string
   title: string
   author: string
-  language: string
   filename: string
-  css: string
+  outputOptions: EpubOutputOptions
   includeCover: boolean
   metadata: EpubNovelMetadata
 }

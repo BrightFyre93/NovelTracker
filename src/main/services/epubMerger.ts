@@ -22,6 +22,7 @@ import {
   type XmlObject
 } from './epubArchiveUtils'
 import {
+  MAX_CHAPTER_IMAGES,
   MAX_EPUB_INPUT_BYTES,
   MAX_EPUB_MERGE_ENTRY_BYTES,
   MAX_EPUB_MERGE_TEXT_BYTES,
@@ -131,8 +132,8 @@ function mediaTypeFor(path: string): EpubImageMediaType | null {
 
 function isFrontMatter(path: string, title: string): boolean {
   const basename = posix.basename(path).toLowerCase().replace(/\.[^.]+$/, '')
-  return /^(?:cover|titlepage|title-page|copyright|dedication|contents|toc|nav|novel-info|colophon)$/.test(basename) ||
-    /^(?:novel information|table of contents|contents|cover|title page)$/i.test(title.trim())
+  return /^(?:cover|titlepage|title-page|copyright|dedication|contents|toc|nav|novel-info|chapter-list|colophon)$/.test(basename) ||
+    /^(?:novel information|chapter list|table of contents|contents|cover|title page)$/i.test(title.trim())
 }
 
 async function parseEpub(
@@ -234,7 +235,7 @@ async function parseEpub(
     const images: ChapterImage[] = []
     const imageBlocks: ChapterContentBlock[] = []
     for (const element of root.find('img[src]').toArray()) {
-      if (images.length >= 24) break
+      if (images.length >= MAX_CHAPTER_IMAGES) break
       const imagePath = resolveArchivePath(chapterPath, $(element).attr('src') ?? '')
       const entry = imagePath ? archive.file(imagePath) : null
       const mediaType = imagePath ? mediaTypeFor(imagePath) : null

@@ -36,6 +36,25 @@ export interface EpubNovelMetadata {
   cover?: ChapterImage
 }
 
+export type EpubImageOutputFormat = 'jpeg' | 'png' | 'original'
+
+export interface EpubOutputOptions {
+  css: string
+  language: string
+  filenameTemplate: string
+  identifierSeed: string
+  includeNovelInfoPage: boolean
+  includeChapterListPage: boolean
+  skipImages: boolean
+  compressImages: boolean
+  maxImageDimension: number
+  imageFormat: EpubImageOutputFormat
+  coverJpegOnly: boolean
+  flattenAnimatedImages: boolean
+  includeImageAttribution: boolean
+  maxChaptersPerEpub: number
+}
+
 export type ChapterInlineNode =
   | { type: 'text'; text: string }
   | { type: 'emphasis'; children: ChapterInlineNode[] }

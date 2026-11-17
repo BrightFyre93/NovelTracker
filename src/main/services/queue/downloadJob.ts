@@ -475,9 +475,28 @@ export async function runQueuedDownloadJob(
               targetOutputPath: item.targetOutputPath
             },
             options: {
-              ...options,
-              alternativeNames: [...options.alternativeNames],
-              genres: [...options.genres]
+              language: options.outputOptions.language,
+              filename: options.filename,
+              outputDirectory: options.outputDirectory,
+              omitHttp404Chapters: options.omitHttp404Chapters === true,
+              outputOptions: {
+                filenameTemplate: options.outputOptions.filenameTemplate,
+                includeNovelInfoPage:
+                  options.outputOptions.includeNovelInfoPage,
+                includeChapterListPage:
+                  options.outputOptions.includeChapterListPage,
+                skipImages: options.outputOptions.skipImages,
+                compressImages: options.outputOptions.compressImages,
+                maxImageDimension: options.outputOptions.maxImageDimension,
+                imageFormat: options.outputOptions.imageFormat,
+                coverJpegOnly: options.outputOptions.coverJpegOnly,
+                flattenAnimatedImages:
+                  options.outputOptions.flattenAnimatedImages,
+                includeImageAttribution:
+                  options.outputOptions.includeImageAttribution,
+                maxChaptersPerEpub:
+                  options.outputOptions.maxChaptersPerEpub
+              }
             }
           })
         } else {

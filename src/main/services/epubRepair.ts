@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
 import { createReadStream } from 'node:fs'
 import JSZip from 'jszip'
-import sharp from 'sharp'
 import { XMLValidator } from 'fast-xml-parser'
 import * as yauzl from 'yauzl'
 import type { EpubRepairProgress, EpubRepairResult } from '../../shared/contracts'
@@ -17,6 +16,7 @@ import {
   MAX_TOTAL_EPUB_IMAGE_BYTES
 } from '../../shared/constants'
 import { resizeSmallKindleCover } from './kindleCover'
+import { convertWebpToJpeg } from './webpToJpeg'
 import { atomicWriteFile, atomicWriteStream } from './atomicFile'
 import { toMessage } from '../../shared/errors'
 import {
@@ -443,11 +443,7 @@ export async function repairEpubFile(
     let jpeg: Buffer
     try {
       const resizedCover = entry.fileName === coverImagePath ? await resizeSmallKindleCover(data) : null
-      jpeg = resizedCover ?? await sharp(data, { failOn: 'error', limitInputPixels: 40_000_000 })
-        .rotate()
-        .flatten({ background: '#ffffff' })
-        .jpeg({ quality: 90 })
-        .toBuffer()
+      jpeg = resizedCover ?? await convertWebpToJpeg(data)
       if (resizedCover) upscaledCover = true
     } catch (error) {
       throw new Error(

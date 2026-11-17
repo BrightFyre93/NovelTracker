@@ -206,9 +206,8 @@ export async function packageAndFinalizeDownloadJob(input: {
       outputDirectory: options.outputDirectory,
       title: options.title,
       author: options.author,
-      language: options.language,
       filename: outputFilename,
-      css: options.epubCss,
+      outputOptions: options.outputOptions,
       includeCover,
       metadata: {
         description: options.description,

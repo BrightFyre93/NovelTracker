@@ -1,4 +1,4 @@
-import type { ChapterLink, GenerateEpubInput } from './epub'
+import type { ChapterLink, EpubOutputOptions, GenerateEpubInput } from './epub'
 import type { SiteExtractionMode } from './settings'
 
 export type DownloadJobStatus =
@@ -83,6 +83,7 @@ export interface QueueDownloadOptions {
   outputDirectory: string
   epubCss: string
   omitHttp404Chapters?: boolean
+  outputOptions: EpubOutputOptions
 }
 
 export interface QueuedEpubJob {

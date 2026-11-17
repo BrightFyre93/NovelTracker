@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { DiscoveryQueueItem } from '../../../shared/contracts'
+import { normalizeEpubOutputOptions } from '../../../shared/epubOutputOptions'
 import type { QueueCommandContext } from './queueCommands'
 
 export interface EnqueueSnapshotOverrides {
@@ -147,7 +148,12 @@ export function createQueueSubmissionCommand(context: QueueSubmissionContext) {
         sourceUrl,
         outputDirectory: input.outputDirectory,
         epubCss: settings.epubCss,
-        omitHttp404Chapters: settings.omitHttp404Chapters
+        omitHttp404Chapters: settings.omitHttp404Chapters,
+        outputOptions: normalizeEpubOutputOptions({
+          css: settings.epubCss,
+          language: input.language,
+          identifierSeed: sourceUrl
+        })
       }
       queueItem.targetOutputPath = outputPath
       queueItem.queuedAt = now

@@ -87,7 +87,8 @@ function copyQueueItemFields(
       ? {
           ...item.downloadOptions,
           alternativeNames: [...(item.downloadOptions.alternativeNames ?? [])],
-          genres: [...(item.downloadOptions.genres ?? [])]
+          genres: [...(item.downloadOptions.genres ?? [])],
+          outputOptions: { ...item.downloadOptions.outputOptions }
         }
       : null,
     failedChapters: item.failedChapters
