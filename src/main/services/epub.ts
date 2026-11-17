@@ -16,7 +16,11 @@ import type {
   EpubMergeProgress,
   EpubNovelMetadata
 } from '../../shared/contracts'
-import { isNodeError, OperationCancelledError, toMessage } from '../../shared/errors'
+import {
+  isNodeError,
+  OperationCancelledError,
+  toMessage
+} from '../../shared/errors'
 import {
   EPUB_IMAGE_TYPES,
   DEFAULT_EPUB_CSS,
@@ -25,7 +29,10 @@ import {
   MAX_TOTAL_EPUB_IMAGE_BYTES,
   type EpubImageMediaType
 } from '../../shared/constants'
-import { sanitizeEpubFilename, suggestEpubFilename } from '../../shared/epubFilename'
+import {
+  sanitizeEpubFilename,
+  suggestEpubFilename
+} from '../../shared/epubFilename'
 import { resizeSmallKindleCover } from './kindleCover'
 import { atomicWriteFile, atomicWriteStream } from './atomicFile'
 import {
@@ -40,15 +47,15 @@ function escapeXml(value: string): string {
   let validXmlText = ''
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index)
-    if (code >= 0xD800 && code <= 0xDBFF) {
+    if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1)
-      if (next >= 0xDC00 && next <= 0xDFFF) {
+      if (next >= 0xdc00 && next <= 0xdfff) {
         validXmlText += value[index] + value[index + 1]
         index += 1
       }
       continue
     }
-    if (code >= 0xDC00 && code <= 0xDFFF) continue
+    if (code >= 0xdc00 && code <= 0xdfff) continue
     validXmlText += value[index]
   }
   return validXmlText
@@ -82,12 +89,18 @@ interface PackagedDiskImage extends PackagedImageManifestEntry {
 function decodeImage(image: ChapterImage): Buffer {
   if (
     !Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, image.mediaType) ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image.dataBase64)
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      image.dataBase64
+    )
   ) {
     throw new Error('EPUB image data is invalid.')
   }
   const data = Buffer.from(image.dataBase64, 'base64')
-  if (data.length === 0 || data.length > MAX_IMAGE_BYTES || data.toString('base64') !== image.dataBase64) {
+  if (
+    data.length === 0 ||
+    data.length > MAX_IMAGE_BYTES ||
+    data.toString('base64') !== image.dataBase64
+  ) {
     throw new Error('EPUB image data exceeds its size limit or is malformed.')
   }
   return data
@@ -97,11 +110,7 @@ async function normalizeKindleImage(
   image: ChapterImage,
   isCover = false
 ): Promise<{ mediaType: EpubImageMediaType; data: Buffer }> {
-  return normalizeKindleImageData(
-    decodeImage(image),
-    image.mediaType,
-    isCover
-  )
+  return normalizeKindleImageData(decodeImage(image), image.mediaType, isCover)
 }
 
 async function normalizeKindleImageData(
@@ -115,7 +124,10 @@ async function normalizeKindleImageData(
       if (resizedCover) return { mediaType: 'image/jpeg', data: resizedCover }
     }
     if (mediaType !== 'image/webp') return { mediaType, data }
-    const jpeg = await sharp(data, { failOn: 'error', limitInputPixels: 40_000_000 })
+    const jpeg = await sharp(data, {
+      failOn: 'error',
+      limitInputPixels: 40_000_000
+    })
       .rotate()
       .jpeg({ quality: 90 })
       .toBuffer()
@@ -134,11 +146,18 @@ async function normalizeKindleImageData(
 async function collectPackagedImages(
   chapters: ChapterContent[],
   cover?: ChapterImage
-): Promise<{ images: PackagedImage[]; chapterHrefs: string[][]; coverHref: string }> {
+): Promise<{
+  images: PackagedImage[]
+  chapterHrefs: string[][]
+  coverHref: string
+}> {
   const images: PackagedImage[] = []
   const byHash = new Map<string, PackagedImage>()
   let totalBytes = 0
-  const addImage = async (image: ChapterImage, isCover = false): Promise<PackagedImage> => {
+  const addImage = async (
+    image: ChapterImage,
+    isCover = false
+  ): Promise<PackagedImage> => {
     const normalized = await normalizeKindleImage(image, isCover)
     const { data, mediaType } = normalized
     const hash = createHash('sha256').update(data).digest('hex')
@@ -149,7 +168,9 @@ async function collectPackagedImages(
     }
     totalBytes += data.length
     if (totalBytes > MAX_TOTAL_EPUB_IMAGE_BYTES) {
-      throw new Error('The selected chapters contain more than 128 MB of images.')
+      throw new Error(
+        'The selected chapters contain more than 128 MB of images.'
+      )
     }
     const extension = EPUB_IMAGE_TYPES[mediaType]
     const packaged = {
@@ -167,7 +188,8 @@ async function collectPackagedImages(
   const chapterHrefs: string[][] = []
   for (const chapter of chapters) {
     const hrefs: string[] = []
-    for (const image of chapter.images ?? []) hrefs.push((await addImage(image)).href)
+    for (const image of chapter.images ?? [])
+      hrefs.push((await addImage(image)).href)
     chapterHrefs.push(hrefs)
   }
   const coverHref = cover ? (await addImage(cover, true)).href : ''
@@ -181,29 +203,34 @@ function makeXhtml(
   imageHrefs: string[] = [],
   blocks?: ChapterContentBlock[]
 ): string {
-  const content: ChapterContentBlock[] = blocks ?? paragraphs.map((text) => ({ type: 'paragraph', text }))
-  const body = content.map((block) => {
-    if (block.type === 'paragraph') {
-      return `<p>${renderInlineContent(block.inline, block.text)}</p>`
-    }
-    if (block.type === 'heading') {
-      return `<h${block.level}>${renderInlineContent(block.inline, block.text)}</h${block.level}>`
-    }
-    if (block.type === 'blockquote') {
-      return `<blockquote><p>${renderInlineContent(block.inline, block.text)}</p></blockquote>`
-    }
-    if (block.type === 'list') {
-      const tagName = block.ordered ? 'ol' : 'ul'
-      const items = block.items
-        .map((item) => `<li>${renderInlineContent(item.inline, item.text)}</li>`)
-        .join('\n')
-      return `<${tagName}>${items}</${tagName}>`
-    }
-    if (block.type === 'scene-break') return '<hr/>'
-    const href = imageHrefs[block.imageIndex]
-    if (!href) throw new Error('Chapter content references a missing image.')
-    return `<figure><img src="../${escapeXml(href)}" alt="${escapeXml(block.alt)}"/></figure>`
-  }).join('\n')
+  const content: ChapterContentBlock[] =
+    blocks ?? paragraphs.map((text) => ({ type: 'paragraph', text }))
+  const body = content
+    .map((block) => {
+      if (block.type === 'paragraph') {
+        return `<p>${renderInlineContent(block.inline, block.text)}</p>`
+      }
+      if (block.type === 'heading') {
+        return `<h${block.level}>${renderInlineContent(block.inline, block.text)}</h${block.level}>`
+      }
+      if (block.type === 'blockquote') {
+        return `<blockquote><p>${renderInlineContent(block.inline, block.text)}</p></blockquote>`
+      }
+      if (block.type === 'list') {
+        const tagName = block.ordered ? 'ol' : 'ul'
+        const items = block.items
+          .map(
+            (item) => `<li>${renderInlineContent(item.inline, item.text)}</li>`
+          )
+          .join('\n')
+        return `<${tagName}>${items}</${tagName}>`
+      }
+      if (block.type === 'scene-break') return '<hr/>'
+      const href = imageHrefs[block.imageIndex]
+      if (!href) throw new Error('Chapter content references a missing image.')
+      return `<figure><img src="../${escapeXml(href)}" alt="${escapeXml(block.alt)}"/></figure>`
+    })
+    .join('\n')
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(language)}" lang="${escapeXml(language)}">
@@ -223,30 +250,32 @@ function renderInlineContent(
   fallbackText: string
 ): string {
   if (!nodes) return escapeXml(fallbackText)
-  return nodes.map((node) => {
-    if (node.type === 'text') return escapeXml(node.text)
-    if (node.type === 'break') return '<br/>'
-    const children = renderInlineContent(node.children, '')
-    if (node.type === 'emphasis' || node.type === 'strong') {
-      const tagName = node.type === 'emphasis' ? 'em' : 'strong'
-      return `<${tagName}>${children}</${tagName}>`
-    }
+  return nodes
+    .map((node) => {
+      if (node.type === 'text') return escapeXml(node.text)
+      if (node.type === 'break') return '<br/>'
+      const children = renderInlineContent(node.children, '')
+      if (node.type === 'emphasis' || node.type === 'strong') {
+        const tagName = node.type === 'emphasis' ? 'em' : 'strong'
+        return `<${tagName}>${children}</${tagName}>`
+      }
 
-    let href: URL
-    try {
-      href = new URL(node.href)
-    } catch {
-      throw new Error('Chapter content contains an invalid link.')
-    }
-    if (
-      (href.protocol !== 'http:' && href.protocol !== 'https:') ||
-      href.username ||
-      href.password
-    ) {
-      throw new Error('Chapter content contains an unsafe link.')
-    }
-    return `<a href="${escapeXml(href.href)}">${children}</a>`
-  }).join('')
+      let href: URL
+      try {
+        href = new URL(node.href)
+      } catch {
+        throw new Error('Chapter content contains an invalid link.')
+      }
+      if (
+        (href.protocol !== 'http:' && href.protocol !== 'https:') ||
+        href.username ||
+        href.password
+      ) {
+        throw new Error('Chapter content contains an unsafe link.')
+      }
+      return `<a href="${escapeXml(href.href)}">${children}</a>`
+    })
+    .join('')
 }
 
 function makeNovelInfoXhtml(
@@ -264,7 +293,10 @@ function makeNovelInfoXhtml(
     ['Status', metadata.novelStatus]
   ]
     .filter(([, value]) => value)
-    .map(([label, value]) => `<p><strong>${label}:</strong> ${escapeXml(value)}</p>`)
+    .map(
+      ([label, value]) =>
+        `<p><strong>${label}:</strong> ${escapeXml(value)}</p>`
+    )
     .join('\n')
   const cover = coverHref
     ? `<figure><img src="../${escapeXml(coverHref)}" alt="Cover of ${escapeXml(title)}"/></figure>`
@@ -295,7 +327,11 @@ function makeNovelInfoXhtml(
 </html>`
 }
 
-export function createEpubFilename(title: string, chapters: ChapterContent[], requestedFilename?: string): string {
+export function createEpubFilename(
+  title: string,
+  chapters: ChapterContent[],
+  requestedFilename?: string
+): string {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
   const firstChapter = chapters[0]
   const lastChapter = chapters[chapters.length - 1]
@@ -349,17 +385,24 @@ function createPackageFiles(
   ].join('\n    ')
   const navigation = [
     '<li><a href="text/novel-info.xhtml">Novel Information</a></li>',
-    ...chapters
-    .map(
+    ...chapters.map(
       (_, index) =>
         `<li><a href="text/chapter-${String(index + 1).padStart(4, '0')}.xhtml">${escapeXml(chapters[index].title)}</a></li>`
     )
   ].join('\n      ')
   const descriptiveMetadata = [
-    metadata.description ? `<dc:description>${escapeXml(metadata.description)}</dc:description>` : '',
-    ...metadata.genres.map((genre) => `<dc:subject>${escapeXml(genre)}</dc:subject>`),
-    metadata.sourceUrl ? `<dc:source>${escapeXml(metadata.sourceUrl)}</dc:source>` : ''
-  ].filter(Boolean).join('\n    ')
+    metadata.description
+      ? `<dc:description>${escapeXml(metadata.description)}</dc:description>`
+      : '',
+    ...metadata.genres.map(
+      (genre) => `<dc:subject>${escapeXml(genre)}</dc:subject>`
+    ),
+    metadata.sourceUrl
+      ? `<dc:source>${escapeXml(metadata.sourceUrl)}</dc:source>`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('\n    ')
 
   const opf = `<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id" xml:lang="${escapeXml(language)}">
@@ -409,10 +452,7 @@ function createArtifactPackageFiles(
   language: string,
   chapters: EpubPackagingInput['chapters'],
   metadata: EpubNovelMetadata,
-  images: readonly PackagedImageManifestEntry[],
-  readChapterTitle: (
-    chapter: EpubPackagingInput['chapters'][number]
-  ) => Promise<string>
+  images: readonly PackagedImageManifestEntry[]
 ): {
   container: string
   opf: Readable
@@ -423,10 +463,18 @@ function createArtifactPackageFiles(
   const modified = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const hashes = { opf: '', nav: '' }
   const descriptiveMetadata = [
-    metadata.description ? `<dc:description>${escapeXml(metadata.description)}</dc:description>` : '',
-    ...metadata.genres.map((genre) => `<dc:subject>${escapeXml(genre)}</dc:subject>`),
-    metadata.sourceUrl ? `<dc:source>${escapeXml(metadata.sourceUrl)}</dc:source>` : ''
-  ].filter(Boolean).join('\n    ')
+    metadata.description
+      ? `<dc:description>${escapeXml(metadata.description)}</dc:description>`
+      : '',
+    ...metadata.genres.map(
+      (genre) => `<dc:subject>${escapeXml(genre)}</dc:subject>`
+    ),
+    metadata.sourceUrl
+      ? `<dc:source>${escapeXml(metadata.sourceUrl)}</dc:source>`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('\n    ')
   const opfContent = (function* () {
     yield `<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id" xml:lang="${escapeXml(language)}">
@@ -459,7 +507,7 @@ function createArtifactPackageFiles(
     yield `  </spine>
 </package>`
   })()
-  const navContent = (async function* () {
+  const navContent = (function* () {
     yield `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(language)}" lang="${escapeXml(language)}">
@@ -471,8 +519,7 @@ function createArtifactPackageFiles(
       <li><a href="text/novel-info.xhtml">Novel Information</a></li>
 `
     for (const [index, chapter] of chapters.entries()) {
-      const chapterTitle = await readChapterTitle(chapter)
-      yield `      <li><a href="text/chapter-${String(index + 1).padStart(4, '0')}.xhtml">${escapeXml(chapterTitle)}</a></li>\n`
+      yield `      <li><a href="text/chapter-${String(index + 1).padStart(4, '0')}.xhtml">${escapeXml(chapter.title)}</a></li>\n`
     }
     yield `      </ol>
     </nav>
@@ -482,16 +529,23 @@ function createArtifactPackageFiles(
   const hashTextStream = (
     source: AsyncIterable<string> | Iterable<string>,
     recordHash: (hash: string) => void
-  ): Readable => Readable.from((async function* () {
-    const hash = createHash('sha256')
-    for await (const chunk of source) {
-      hash.update(chunk)
-      yield chunk
-    }
-    recordHash(hash.digest('hex'))
-  })())
-  const opf = hashTextStream(opfContent, (hash) => { hashes.opf = hash })
-  const nav = hashTextStream(navContent, (hash) => { hashes.nav = hash })
+  ): Readable =>
+    Readable.from(
+      (async function* () {
+        const hash = createHash('sha256')
+        for await (const chunk of source) {
+          hash.update(chunk)
+          yield chunk
+        }
+        recordHash(hash.digest('hex'))
+      })()
+    )
+  const opf = hashTextStream(opfContent, (hash) => {
+    hashes.opf = hash
+  })
+  const nav = hashTextStream(navContent, (hash) => {
+    hashes.nav = hash
+  })
   const container = `<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
@@ -507,7 +561,7 @@ async function createEpubArchive(
   language: string,
   chapters: ChapterContent[],
   css = DEFAULT_EPUB_CSS,
-  metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata(),
+  metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata()
 ): Promise<JSZip> {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
 
@@ -573,22 +627,29 @@ export async function buildEpubBuffer(
     css,
     metadata
   )
-  onProgress?.({ stage: 'packaging', percentage: 0, message: 'Compressing EPUB files…' })
-  let lastPackagePercentage = -1
-  const buffer = await zip.generateAsync({
-    type: 'nodebuffer',
-    compression: 'DEFLATE',
-    compressionOptions: { level: 6 }
-  }, (metadata) => {
-    const percentage = Math.round(metadata.percent)
-    if (percentage === lastPackagePercentage) return
-    lastPackagePercentage = percentage
-    onProgress?.({
-      stage: 'packaging',
-      percentage,
-      message: `Compressing EPUB files · ${percentage}%`
-    })
+  onProgress?.({
+    stage: 'packaging',
+    percentage: 0,
+    message: 'Compressing EPUB files…'
   })
+  let lastPackagePercentage = -1
+  const buffer = await zip.generateAsync(
+    {
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    },
+    (metadata) => {
+      const percentage = Math.round(metadata.percent)
+      if (percentage === lastPackagePercentage) return
+      lastPackagePercentage = percentage
+      onProgress?.({
+        stage: 'packaging',
+        percentage,
+        message: `Compressing EPUB files · ${percentage}%`
+      })
+    }
+  )
   await validateEpubBuffer(buffer, chapters.length, onProgress)
   return buffer
 }
@@ -608,47 +669,77 @@ export async function validateEpubBuffer(
     'text/novel-info.xhtml'
   ]
   for (const path of required) {
-    if (!archive.file(path)) throw new Error(`EPUB validation failed: missing ${path}.`)
+    if (!archive.file(path))
+      throw new Error(`EPUB validation failed: missing ${path}.`)
   }
 
   const names = Object.keys(archive.files)
-  const chapterFiles = names.filter((name) => /^text\/chapter-\d{4}\.xhtml$/.test(name))
+  const chapterFiles = names.filter((name) =>
+    /^text\/chapter-\d{4}\.xhtml$/.test(name)
+  )
   if (chapterFiles.length !== chapterCount) {
-    throw new Error('EPUB validation failed: the chapter count does not match the package.')
+    throw new Error(
+      'EPUB validation failed: the chapter count does not match the package.'
+    )
   }
 
   const mimeType = await archive.file('mimetype')!.async('string')
-  if (mimeType !== EPUB_MIMETYPE) throw new Error('EPUB validation failed: invalid mimetype entry.')
+  if (mimeType !== EPUB_MIMETYPE)
+    throw new Error('EPUB validation failed: invalid mimetype entry.')
 
   const firstFilenameLength = buffer.readUInt16LE(26)
-  const firstFilename = buffer.subarray(30, 30 + firstFilenameLength).toString('utf8')
+  const firstFilename = buffer
+    .subarray(30, 30 + firstFilenameLength)
+    .toString('utf8')
   if (firstFilename !== 'mimetype' || buffer.readUInt16LE(8) !== 0) {
-    throw new Error('EPUB validation failed: mimetype must be the first uncompressed ZIP entry.')
+    throw new Error(
+      'EPUB validation failed: mimetype must be the first uncompressed ZIP entry.'
+    )
   }
 
   const packageXml = await archive.file('package.opf')!.async('string')
   if (!/<spine>\s*<itemref idref="novel-info"\/>/.test(packageXml)) {
-    throw new Error('EPUB validation failed: the novel information page must be first in the reading order.')
+    throw new Error(
+      'EPUB validation failed: the novel information page must be first in the reading order.'
+    )
   }
 
   const webpImages = names.filter((name) => /^images\/.*\.webp$/i.test(name))
   if (webpImages.length > 0) {
-    throw new Error('EPUB validation failed: WebP images are not supported for Kindle output.')
+    throw new Error(
+      'EPUB validation failed: WebP images are not supported for Kindle output.'
+    )
   }
-  const imageFiles = names.filter((name) => /^images\/[a-f0-9]{64}\.(?:jpg|png|gif)$/.test(name))
+  const imageFiles = names.filter((name) =>
+    /^images\/[a-f0-9]{64}\.(?:jpg|png|gif)$/.test(name)
+  )
   const xhtmlFiles = ['text/novel-info.xhtml', ...chapterFiles]
-  onProgress?.({ stage: 'validating', percentage: 0, message: 'Validating EPUB resources…' })
+  onProgress?.({
+    stage: 'validating',
+    percentage: 0,
+    message: 'Validating EPUB resources…'
+  })
   const xhtmlUpdateInterval = Math.max(1, Math.ceil(xhtmlFiles.length / 100))
   for (const [index, path] of xhtmlFiles.entries()) {
     const contents = await archive.file(path)!.async('string')
-    const imageReferences = [...contents.matchAll(/<img\b[^>]*\bsrc="\.\.\/([^"]+)"/g)]
+    const imageReferences = [
+      ...contents.matchAll(/<img\b[^>]*\bsrc="\.\.\/([^"]+)"/g)
+    ]
     for (const [, imagePath] of imageReferences) {
-      if (!archive.file(imagePath)) throw new Error(`EPUB validation failed: missing image resource ${imagePath}.`)
+      if (!archive.file(imagePath))
+        throw new Error(
+          `EPUB validation failed: missing image resource ${imagePath}.`
+        )
     }
     if (/<img\b[^>]*\bsrc="(?!\.\.\/)[^"]+"/.test(contents)) {
-      throw new Error(`EPUB validation failed: ${path} contains a nonlocal image reference.`)
+      throw new Error(
+        `EPUB validation failed: ${path} contains a nonlocal image reference.`
+      )
     }
-    if ((index + 1) % xhtmlUpdateInterval === 0 || index + 1 === xhtmlFiles.length) {
+    if (
+      (index + 1) % xhtmlUpdateInterval === 0 ||
+      index + 1 === xhtmlFiles.length
+    ) {
       onProgress?.({
         stage: 'validating',
         percentage: Math.round(((index + 1) / xhtmlFiles.length) * 80),
@@ -657,18 +748,31 @@ export async function validateEpubBuffer(
     }
   }
 
-  const manifestImages = imageFiles.filter((path) => packageXml.includes(`href="${path}"`))
+  const manifestImages = imageFiles.filter((path) =>
+    packageXml.includes(`href="${path}"`)
+  )
   if (manifestImages.length !== imageFiles.length) {
-    throw new Error('EPUB validation failed: an image resource is missing from the package manifest.')
+    throw new Error(
+      'EPUB validation failed: an image resource is missing from the package manifest.'
+    )
   }
 
-  const xmlFiles = ['META-INF/container.xml', 'package.opf', 'nav.xhtml', ...xhtmlFiles]
+  const xmlFiles = [
+    'META-INF/container.xml',
+    'package.opf',
+    'nav.xhtml',
+    ...xhtmlFiles
+  ]
   const xmlUpdateInterval = Math.max(1, Math.ceil(xmlFiles.length / 20))
   for (const [index, path] of xmlFiles.entries()) {
     const contents = await archive.file(path)!.async('string')
     const result = XMLValidator.validate(contents)
-    if (result !== true) throw new Error(`EPUB validation failed: invalid XML in ${path}.`)
-    if ((index + 1) % xmlUpdateInterval === 0 || index + 1 === xmlFiles.length) {
+    if (result !== true)
+      throw new Error(`EPUB validation failed: invalid XML in ${path}.`)
+    if (
+      (index + 1) % xmlUpdateInterval === 0 ||
+      index + 1 === xmlFiles.length
+    ) {
       onProgress?.({
         stage: 'validating',
         percentage: 80 + Math.round(((index + 1) / xmlFiles.length) * 20),
@@ -745,11 +849,18 @@ export async function validateEpubFile(
         if (mimeType !== EPUB_MIMETYPE) {
           throw new Error('EPUB validation failed: invalid mimetype entry.')
         }
-        if (packageHash !== expectedHashes.opf || navHash !== expectedHashes.nav) {
-          throw new Error('EPUB validation failed: the generated package metadata changed while writing.')
+        if (
+          packageHash !== expectedHashes.opf ||
+          navHash !== expectedHashes.nav
+        ) {
+          throw new Error(
+            'EPUB validation failed: the generated package metadata changed while writing.'
+          )
         }
         if (imageFiles.size !== imageCount) {
-          throw new Error('EPUB validation failed: the image count does not match the package.')
+          throw new Error(
+            'EPUB validation failed: the image count does not match the package.'
+          )
         }
         succeed()
       } catch (error) {
@@ -763,22 +874,29 @@ export async function validateEpubFile(
         const name = entry.fileName
         const isChapterFile = /^text\/chapter-\d{4,}\.xhtml$/.test(name)
         const isImageFile = /^images\/[a-f0-9]{64}\.(?:jpg|png|gif)$/.test(name)
-        if ([
-          'mimetype',
-          'META-INF/container.xml',
-          'package.opf',
-          'nav.xhtml',
-          'styles.css',
-          'text/novel-info.xhtml'
-        ].includes(name)) {
+        if (
+          [
+            'mimetype',
+            'META-INF/container.xml',
+            'package.opf',
+            'nav.xhtml',
+            'styles.css',
+            'text/novel-info.xhtml'
+          ].includes(name)
+        ) {
           requiredEntries.add(name)
         }
         if (isChapterFile) chapterFileCount += 1
         if (isImageFile) imageFiles.add(name)
         if (/^images\/.*\.webp$/i.test(name)) {
-          throw new Error('EPUB validation failed: WebP images are not supported for Kindle output.')
+          throw new Error(
+            'EPUB validation failed: WebP images are not supported for Kindle output.'
+          )
         }
-        if (entryIndex === 0 && (name !== 'mimetype' || entry.compressionMethod !== 0)) {
+        if (
+          entryIndex === 0 &&
+          (name !== 'mimetype' || entry.compressionMethod !== 0)
+        ) {
           throw new Error(
             'EPUB validation failed: mimetype must be the first uncompressed ZIP entry.'
           )
@@ -786,9 +904,7 @@ export async function validateEpubFile(
         entryIndex += 1
 
         const isXhtml = name.endsWith('.xhtml')
-        const isXml =
-          isXhtml ||
-          name === 'META-INF/container.xml'
+        const isXml = isXhtml || name === 'META-INF/container.xml'
         const stream = await archive.openReadStreamPromise(entry)
         if (name === 'package.opf' || name === 'nav.xhtml') {
           const hash = createHash('sha256')
@@ -799,7 +915,9 @@ export async function validateEpubFile(
             } else if (typeof data === 'string') {
               hash.update(data)
             } else {
-              throw new Error(`EPUB validation failed: invalid stream data in ${name}.`)
+              throw new Error(
+                `EPUB validation failed: invalid stream data in ${name}.`
+              )
             }
           }
           if (name === 'package.opf') packageHash = hash.digest('hex')
@@ -823,7 +941,9 @@ export async function validateEpubFile(
             )) {
               const imagePath = match[1]
               if (imagePath && !imageFiles.has(imagePath)) {
-                throw new Error(`EPUB validation failed: missing image resource ${imagePath}.`)
+                throw new Error(
+                  `EPUB validation failed: missing image resource ${imagePath}.`
+                )
               }
             }
             if (/<img\b[^>]*\bsrc="(?!\.\.\/)[^"]+"/.test(contents)) {
@@ -880,10 +1000,13 @@ async function publishEpub(
   onProgress?: (progress: EpubMergeProgress) => void
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   const outputPath = join(directory, filename)
-  if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
+  if (signal?.aborted)
+    throw new OperationCancelledError('EPUB creation was cancelled.')
   const overwroteExistingFile = await targetFileExists(outputPath)
   const onAbort = (): void => {
-    contents.destroy(new OperationCancelledError('EPUB creation was cancelled.'))
+    contents.destroy(
+      new OperationCancelledError('EPUB creation was cancelled.')
+    )
   }
   signal?.addEventListener('abort', onAbort, { once: true })
   try {
@@ -932,24 +1055,35 @@ async function writeEpubArchive(
   if (signal?.aborted) {
     throw new OperationCancelledError('EPUB creation was cancelled.')
   }
-  onProgress?.({ stage: 'packaging', percentage: 0, message: 'Compressing EPUB files…' })
+  onProgress?.({
+    stage: 'packaging',
+    percentage: 0,
+    message: 'Compressing EPUB files…'
+  })
   let lastPackagePercentage = -1
-  const contents = zip.generateNodeStream({
-    type: 'nodebuffer',
-    streamFiles: true,
-    compression: 'DEFLATE',
-    compressionOptions: { level: 6 }
-  }, (progress) => {
-    const percentage = Math.round(progress.percent)
-    if (percentage === lastPackagePercentage) return
-    lastPackagePercentage = percentage
-    onProgress?.({
-      stage: 'packaging',
-      percentage,
-      message: `Compressing EPUB files · ${percentage}%`
-    })
-  }) as Readable
-  onProgress?.({ stage: 'saving', percentage: 0, message: `Writing ${filename}…` })
+  const contents = zip.generateNodeStream(
+    {
+      type: 'nodebuffer',
+      streamFiles: true,
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    },
+    (progress) => {
+      const percentage = Math.round(progress.percent)
+      if (percentage === lastPackagePercentage) return
+      lastPackagePercentage = percentage
+      onProgress?.({
+        stage: 'packaging',
+        percentage,
+        message: `Compressing EPUB files · ${percentage}%`
+      })
+    }
+  ) as Readable
+  onProgress?.({
+    stage: 'saving',
+    percentage: 0,
+    message: `Writing ${filename}…`
+  })
   const result = await publishEpub(
     outputDirectory,
     filename,
@@ -960,7 +1094,11 @@ async function writeEpubArchive(
     signal,
     onProgress
   )
-  onProgress?.({ stage: 'saving', percentage: 100, message: 'Writing complete.' })
+  onProgress?.({
+    stage: 'saving',
+    percentage: 100,
+    message: 'Writing complete.'
+  })
   return result
 }
 
@@ -977,7 +1115,9 @@ export async function writeEpub(
   onProgress?: (progress: EpubMergeProgress) => void
 ): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
   if (chapters.length === 0) throw new Error('Select at least one chapter.')
-  const dataDirectory = await mkdtemp(join(tmpdir(), 'novel-tracker-epub-source-'))
+  const dataDirectory = await mkdtemp(
+    join(tmpdir(), 'novel-tracker-epub-source-')
+  )
   const queueItemId = randomUUID()
   try {
     for (const chapter of chapters) {
@@ -1054,7 +1194,9 @@ export async function writeEpubFromArtifactStore(
     } else {
       totalImageBytes += normalized.data.length
       if (totalImageBytes > MAX_TOTAL_EPUB_IMAGE_BYTES) {
-        throw new Error('The selected chapters contain more than 128 MB of images.')
+        throw new Error(
+          'The selected chapters contain more than 128 MB of images.'
+        )
       }
       const extension = EPUB_IMAGE_TYPES[normalized.mediaType]
       const imagePath =
@@ -1079,8 +1221,6 @@ export async function writeEpubFromArtifactStore(
   }
 
   try {
-    let firstChapterTitle = ''
-    let lastChapterTitle = ''
     for (const [index, chapter] of input.chapters.entries()) {
       if (signal?.aborted) {
         throw new OperationCancelledError('EPUB creation was cancelled.')
@@ -1088,21 +1228,17 @@ export async function writeEpubFromArtifactStore(
       const descriptor = await readChapterArtifactDescriptor(
         input.dataDirectory,
         input.queueItemId,
-        chapter.url
+        chapter.url,
+        { verifyImages: false }
       )
       if (!descriptor || descriptor.url !== chapter.url) {
-        throw new Error(`Saved chapter content is missing for "${chapter.title}".`)
+        throw new Error(
+          `Saved chapter content is missing for "${chapter.title}".`
+        )
       }
-      if (index === 0) firstChapterTitle = descriptor.title
-      lastChapterTitle = descriptor.title
       for (const image of descriptor.images) {
         const data = await readFile(image.path)
-        await addImage(
-          data,
-          image.mediaType,
-          image.sha256,
-          image.path
-        )
+        await addImage(data, image.mediaType, image.sha256, image.path)
       }
       if ((index + 1) % 25 === 0 || index + 1 === input.chapters.length) {
         onProgress?.({
@@ -1118,9 +1254,14 @@ export async function writeEpubFromArtifactStore(
       if (signal?.aborted) {
         throw new OperationCancelledError('EPUB creation was cancelled.')
       }
-      const cover = await readCoverArtifact(input.dataDirectory, input.queueItemId)
+      const cover = await readCoverArtifact(
+        input.dataDirectory,
+        input.queueItemId
+      )
       if (!cover) {
-        throw new Error('The saved cover content is missing; retry this EPUB online before repackaging.')
+        throw new Error(
+          'The saved cover content is missing; retry this EPUB online before repackaging.'
+        )
       }
       const coverData = decodeImage(cover)
       const packagedCover = await addImage(
@@ -1141,26 +1282,15 @@ export async function writeEpubFromArtifactStore(
       language,
       input.chapters,
       input.metadata,
-      packagedImages,
-      async (chapter) => {
-        if (signal?.aborted) {
-          throw new OperationCancelledError('EPUB creation was cancelled.')
-        }
-        const descriptor = await readChapterArtifactDescriptor(
-          input.dataDirectory,
-          input.queueItemId,
-          chapter.url
-        )
-        if (!descriptor || descriptor.url !== chapter.url) {
-          throw new Error(`Saved chapter content is missing for "${chapter.title}".`)
-        }
-        return descriptor.title
-      }
+      packagedImages
     )
     const zip = new JSZip()
     zip.file('mimetype', EPUB_MIMETYPE, { compression: 'STORE' })
     zip.file('META-INF/container.xml', files.container)
-    zip.file('package.opf', files.opf, { binary: false, compression: 'DEFLATE' })
+    zip.file('package.opf', files.opf, {
+      binary: false,
+      compression: 'DEFLATE'
+    })
     zip.file('nav.xhtml', files.nav, { binary: false, compression: 'DEFLATE' })
     zip.file('styles.css', input.css)
     for (const image of packagedImages) {
@@ -1180,35 +1310,42 @@ export async function writeEpubFromArtifactStore(
       )
     )
     for (const [index, chapter] of input.chapters.entries()) {
-      const content = Readable.from((async function* () {
-        if (signal?.aborted) {
-          throw new OperationCancelledError('EPUB creation was cancelled.')
-        }
-        const descriptor = await readChapterArtifactDescriptor(
-          input.dataDirectory,
-          input.queueItemId,
-          chapter.url
-        )
-        if (!descriptor || descriptor.url !== chapter.url) {
-          throw new Error(`Saved chapter content is missing for "${chapter.title}".`)
-        }
-        const imageHrefs = descriptor.images.map((image) => {
-          const packaged = sourceImages.get(
-            `${image.mediaType}:${image.sha256}:chapter`
-          )
-          if (!packaged) {
-            throw new Error(`A saved image for "${chapter.title}" was not packaged.`)
+      const content = Readable.from(
+        (async function* () {
+          if (signal?.aborted) {
+            throw new OperationCancelledError('EPUB creation was cancelled.')
           }
-          return packaged.href
-        })
-        yield makeXhtml(
-          descriptor.title,
-          descriptor.paragraphs,
-          language,
-          imageHrefs,
-          descriptor.blocks
-        )
-      })())
+          const descriptor = await readChapterArtifactDescriptor(
+            input.dataDirectory,
+            input.queueItemId,
+            chapter.url,
+            { verifyImages: false }
+          )
+          if (!descriptor || descriptor.url !== chapter.url) {
+            throw new Error(
+              `Saved chapter content is missing for "${chapter.title}".`
+            )
+          }
+          const imageHrefs = descriptor.images.map((image) => {
+            const packaged = sourceImages.get(
+              `${image.mediaType}:${image.sha256}:chapter`
+            )
+            if (!packaged) {
+              throw new Error(
+                `A saved image for "${chapter.title}" was not packaged.`
+              )
+            }
+            return packaged.href
+          })
+          yield makeXhtml(
+            descriptor.title,
+            descriptor.paragraphs,
+            language,
+            imageHrefs,
+            descriptor.blocks
+          )
+        })()
+      )
       zip.file(
         `text/chapter-${String(index + 1).padStart(4, '0')}.xhtml`,
         content,
@@ -1218,8 +1355,8 @@ export async function writeEpubFromArtifactStore(
 
     const filename = createEpubFilenameFromTitles(
       title,
-      firstChapterTitle || firstChapter.title,
-      lastChapterTitle || lastChapter.title,
+      firstChapter.title,
+      lastChapter.title,
       input.filename
     )
     return await writeEpubArchive(

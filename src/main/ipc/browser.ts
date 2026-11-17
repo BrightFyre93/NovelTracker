@@ -1,4 +1,5 @@
 import type { IpcContext } from './context'
+import { z } from 'zod'
 
 type BrowserIpcContext = Pick<
   IpcContext,
@@ -7,13 +8,10 @@ type BrowserIpcContext = Pick<
   | 'dataDirectory'
   | 'discoverChapters'
   | 'discoverChaptersUsingPageLoader'
-  | 'handleResultIpc'
-  | 'handleTypedIpc'
-  | 'handleValidatedResultIpc'
+  | 'handle'
   | 'openVerificationBrowser'
   | 'readBrowserPage'
   | 'shuttingDown'
-  | 'z'
 >
 
 export function registerBrowserIpcHandlers(context: BrowserIpcContext): void {
@@ -23,25 +21,24 @@ export function registerBrowserIpcHandlers(context: BrowserIpcContext): void {
     dataDirectory,
     discoverChapters,
     discoverChaptersUsingPageLoader,
-    handleResultIpc,
-    handleTypedIpc,
-    handleValidatedResultIpc,
+    handle,
     openVerificationBrowser,
-    readBrowserPage,
-    z
+    readBrowserPage
   } = context
 
-  handleResultIpc('chapter:discover', z.tuple([z.string()]), (_event, url) =>
+  handle('result', 'chapter:discover', z.tuple([z.string()]), (_event, url) =>
     discoverChapters(url)
   )
 
-  handleResultIpc(
+  handle(
+    'result',
     'browser:open-verification',
     z.tuple([z.string()]),
     (_event, url) => openVerificationBrowser(url, dataDirectory())
   )
 
-  handleResultIpc(
+  handle(
+    'result',
     'browser:discover',
     z.tuple([z.string()]),
     async (event, url) => {
@@ -65,7 +62,8 @@ export function registerBrowserIpcHandlers(context: BrowserIpcContext): void {
     }
   )
 
-  handleTypedIpc(
+  handle(
+    'typed',
     'browser:cancel-discovery',
     z.tuple([z.string().optional()]),
     (event, queueItemId) => {
@@ -77,7 +75,7 @@ export function registerBrowserIpcHandlers(context: BrowserIpcContext): void {
     }
   )
 
-  handleValidatedResultIpc('browser:clear-session', z.tuple([]), async () => {
+  handle('validated-result', 'browser:clear-session', z.tuple([]), async () => {
     await clearBrowserSession(dataDirectory())
     return { ok: true, value: undefined }
   })

@@ -10,6 +10,7 @@ import type {
   JobProgress,
   SiteExtractionMode
 } from '../../../shared/contracts'
+import { chapterContentBlocksSchema } from '../../../shared/chapterContentSchema'
 import {
   HttpStatusError,
   NoReadableContentError,
@@ -68,11 +69,15 @@ function isVerificationPage(
   }
 
   const title = documentTitle($)
-  const blockedText = BLOCKED_PAGE_PATTERN.test(`${title} ${pageText.slice(0, 1000)}`)
+  const blockedText = BLOCKED_PAGE_PATTERN.test(
+    `${title} ${pageText.slice(0, 1000)}`
+  )
   if (!blockedText) return false
 
-  return VERIFICATION_CHALLENGE_MARKER_PATTERN.test(html) ||
+  return (
+    VERIFICATION_CHALLENGE_MARKER_PATTERN.test(html) ||
     VERIFICATION_CHALLENGE_TITLE_PATTERN.test(title)
+  )
 }
 
 function isNovelFullUrl(value: string): boolean {
@@ -107,11 +112,19 @@ interface NovelPageMetadata {
   novelStatus: string
 }
 
-function genericNovelMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPageMetadata {
-  const contentRoot = $('main, article, .novel-info, .book-info, .book-detail').first()
+function genericNovelMetadata(
+  $: ReturnType<typeof load>,
+  pageUrl: string
+): NovelPageMetadata {
+  const contentRoot = $(
+    'main, article, .novel-info, .book-info, .book-detail'
+  ).first()
   const root = contentRoot.length ? contentRoot : $('body')
   const labeledField = (labels: string[]): string => {
-    const pattern = new RegExp(`^(${labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\s*:?\\s*(.*)$`, 'i')
+    const pattern = new RegExp(
+      `^(${labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\s*:?\\s*(.*)$`,
+      'i'
+    )
     for (const element of root.find('p, li, dt, dd, tr, .item').toArray()) {
       const text = normalizedText($(element).text())
       const match = pattern.exec(text)
@@ -127,7 +140,10 @@ function genericNovelMetadata($: ReturnType<typeof load>, pageUrl: string): Nove
     $('meta[property="og:image"]').attr('content') ||
     $('meta[name="twitter:image"]').attr('content') ||
     $('meta[name="image"]').attr('content') ||
-    root.find('img[itemprop="image"], .cover img, .book-cover img').first().attr('src') ||
+    root
+      .find('img[itemprop="image"], .cover img, .book-cover img')
+      .first()
+      .attr('src') ||
     ''
   let coverUrl = ''
   if (coverValue) {
@@ -138,15 +154,24 @@ function genericNovelMetadata($: ReturnType<typeof load>, pageUrl: string): Nove
     }
   }
   const genres = [
-    ...root.find('[itemprop="genre"], .genre a, .genres a, a[rel="tag"], a[href*="/genre/"], a[href*="/genres/"]')
+    ...root
+      .find(
+        '[itemprop="genre"], .genre a, .genres a, a[rel="tag"], a[href*="/genre/"], a[href*="/genres/"]'
+      )
       .toArray()
       .map((element) => $(element).text()),
-    ...$('meta[property="article:tag"], meta[name="genre"], meta[name="book:genre"]')
+    ...$(
+      'meta[property="article:tag"], meta[name="genre"], meta[name="book:genre"]'
+    )
       .toArray()
       .map((element) => $(element).attr('content') ?? '')
   ]
   const description =
-    $('.books .desc-text, [itemprop="description"], .description, .desc-text, .book-summary, .summary').first().text() ||
+    $(
+      '.books .desc-text, [itemprop="description"], .description, .desc-text, .book-summary, .summary'
+    )
+      .first()
+      .text() ||
     $('meta[property="og:description"]').attr('content') ||
     $('meta[name="description"]').attr('content') ||
     $('meta[name="twitter:description"]').attr('content') ||
@@ -155,29 +180,44 @@ function genericNovelMetadata($: ReturnType<typeof load>, pageUrl: string): Nove
     $('meta[name="author"]').attr('content') ||
     root.find('[itemprop="author"], .author a, .author').first().text() ||
     labeledField(['Authors?', 'Writers?'])
-  const alternativeNames = uniqueText(
-    [
-      ...root.find('[itemprop="alternativeName"], .alternative-names, .alternate-names, .alternative-name, .alt-names')
-        .toArray()
-        .map((element) => $(element).text()),
-      labeledField(['Alternative names?', 'Also known as', 'Other names', 'Aliases'])
-    ]
-  )
+  const alternativeNames = uniqueText([
+    ...root
+      .find(
+        '[itemprop="alternativeName"], .alternative-names, .alternate-names, .alternative-name, .alt-names'
+      )
+      .toArray()
+      .map((element) => $(element).text()),
+    labeledField([
+      'Alternative names?',
+      'Also known as',
+      'Other names',
+      'Aliases'
+    ])
+  ])
 
   return {
     author: normalizedText(author),
-    description: normalizedText(description).slice(0, MAX_NOVEL_DESCRIPTION_LENGTH),
+    description: normalizedText(description).slice(
+      0,
+      MAX_NOVEL_DESCRIPTION_LENGTH
+    ),
     coverUrl,
     alternativeNames,
     genres: uniqueText([...genres, labeledField(['Genres?'])]),
     source: (
-      normalizedText(root.find('[itemprop="publisher"], .source').first().text()) ||
+      normalizedText(
+        root.find('[itemprop="publisher"], .source').first().text()
+      ) ||
       labeledField(['Source', 'Publisher', 'Origin']) ||
       new URL(pageUrl).hostname
     ).slice(0, 300),
     novelStatus: (
-      normalizedText(root.find('[itemprop="bookStatus"], .novel-status, .book-status, .status').first().text()) ||
-      labeledField(['Status', 'Novel status', 'State'])
+      normalizedText(
+        root
+          .find('[itemprop="bookStatus"], .novel-status, .book-status, .status')
+          .first()
+          .text()
+      ) || labeledField(['Status', 'Novel status', 'State'])
     ).slice(0, 300)
   }
 }
@@ -202,14 +242,29 @@ function novelFullInfoRow($: ReturnType<typeof load>, labels: string[]) {
   return rows
     .filter((_, element) => {
       const label =
-        $(element).find('[title]').first().attr('title')?.trim().replace(/:$/, '').toLowerCase() ||
-        $(element).children('h3').first().text().trim().replace(/:$/, '').toLowerCase()
+        $(element)
+          .find('[title]')
+          .first()
+          .attr('title')
+          ?.trim()
+          .replace(/:$/, '')
+          .toLowerCase() ||
+        $(element)
+          .children('h3')
+          .first()
+          .text()
+          .trim()
+          .replace(/:$/, '')
+          .toLowerCase()
       return expected.has(label)
     })
     .first()
 }
 
-function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPageMetadata {
+function novelFullMetadata(
+  $: ReturnType<typeof load>,
+  pageUrl: string
+): NovelPageMetadata {
   const generic = genericNovelMetadata($, pageUrl)
   const infoRow = (labels: string[]) => novelFullInfoRow($, labels)
   const infoValue = (labels: string[]): string => {
@@ -221,13 +276,17 @@ function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPa
     return normalizedText(value.text())
   }
   const summary = $('.m-desc .txt').first()
-  const classicDescription = $('.col-info-desc .desc-text, .desc-text').first().text()
+  const classicDescription = $('.col-info-desc .desc-text, .desc-text')
+    .first()
+    .text()
   const coverValue =
     $('meta[property="og:image"]').attr('content') ||
     $('meta[name="twitter:image"]').attr('content') ||
     $('meta[name="image"]').attr('content') ||
     $('.info-holder .book img').first().attr('src') ||
-    $('.m-imgtxt img, .books .cover img, .book-cover img').first().attr('src') ||
+    $('.m-imgtxt img, .books .cover img, .book-cover img')
+      .first()
+      .attr('src') ||
     ''
   let coverUrl = ''
   if (coverValue) {
@@ -239,7 +298,9 @@ function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPa
   }
 
   const alternativeNames = uniqueText([
-    ...$('[itemprop="alternativeName"], .alternative-names, .alternate-names, .alternative-name, .alt-names')
+    ...$(
+      '[itemprop="alternativeName"], .alternative-names, .alternate-names, .alternative-name, .alt-names'
+    )
       .toArray()
       .map((element) => $(element).text()),
     ...infoValue([
@@ -261,17 +322,19 @@ function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPa
 
   return {
     author,
-    description: normalizedText(
-      classicDescription ||
-      summary.text() ||
-      $('meta[property="og:description"]').attr('content') ||
-      ''
-    ).slice(0, MAX_NOVEL_DESCRIPTION_LENGTH) || generic.description,
+    description:
+      normalizedText(
+        classicDescription ||
+          summary.text() ||
+          $('meta[property="og:description"]').attr('content') ||
+          ''
+      ).slice(0, MAX_NOVEL_DESCRIPTION_LENGTH) || generic.description,
     coverUrl: coverUrl || generic.coverUrl,
     alternativeNames,
     genres: genres.length > 0 ? genres : generic.genres,
     source: (
-      infoValue(['Source', 'Origin', 'Publisher', 'Original source']) || generic.source
+      infoValue(['Source', 'Origin', 'Publisher', 'Original source']) ||
+      generic.source
     ).slice(0, 300),
     novelStatus: (
       infoValue(['Status', 'State', 'Novel status', 'Translation status']) ||
@@ -280,7 +343,10 @@ function novelFullMetadata($: ReturnType<typeof load>, pageUrl: string): NovelPa
   }
 }
 
-export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelFullCatalogPage {
+export function parseNovelFullCatalogPage(
+  html: string,
+  pageUrl: string
+): NovelFullCatalogPage {
   const url = validateHttpUrl(pageUrl)
   const $ = load(html)
   const pageText = $('body').text().replace(/\s+/g, ' ').trim()
@@ -290,9 +356,15 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
     )
   }
   const title =
-    $('.books .desc h3.title, .m-desc h1.tit').first().text().replace(/\s+/g, ' ').trim() ||
+    $('.books .desc h3.title, .m-desc h1.tit')
+      .first()
+      .text()
+      .replace(/\s+/g, ' ')
+      .trim() ||
     $('h3.title, h1.tit').first().text().replace(/\s+/g, ' ').trim()
-  const authorHeading = $('h3').filter((_, element) => /^author\s*:?$/i.test($(element).text().trim())).first()
+  const authorHeading = $('h3')
+    .filter((_, element) => /^author\s*:?$/i.test($(element).text().trim()))
+    .first()
   const authorLinks = authorHeading.length
     ? authorHeading.parent().find('a[href*="/author/"]')
     : $('a[href*="/author/"]')
@@ -304,43 +376,54 @@ export function parseNovelFullCatalogPage(html: string, pageUrl: string): NovelF
   const metadata = novelFullMetadata($, url)
 
   const chaptersByUrl = new Map<string, ChapterLink>()
-  $('ul.list-chapter, #list-chapter ul#idData, #list-chapter ul.ul-list5').each((listIndex, list) => {
-    if ($(list).closest('.l-chapters').length > 0) return
-    $(list).find('a[href]').each((linkIndex, element) => {
-      const label = $(element).text().replace(/\s+/g, ' ').trim()
-      const href = $(element).attr('href')
-      if (!href || !label) return
+  $('ul.list-chapter, #list-chapter ul#idData, #list-chapter ul.ul-list5').each(
+    (listIndex, list) => {
+      if ($(list).closest('.l-chapters').length > 0) return
+      $(list)
+        .find('a[href]')
+        .each((linkIndex, element) => {
+          const label = $(element).text().replace(/\s+/g, ' ').trim()
+          const href = $(element).attr('href')
+          if (!href || !label) return
 
+          try {
+            const chapterUrl = new URL(href, url)
+            chapterUrl.hash = ''
+            const normalizedUrl = validateHttpUrl(chapterUrl.href)
+            if (!chaptersByUrl.has(normalizedUrl)) {
+              chaptersByUrl.set(normalizedUrl, {
+                id: `chapter-${listIndex}-${linkIndex}`,
+                title: label,
+                url: normalizedUrl
+              })
+            }
+          } catch {
+            return
+          }
+        })
+    }
+  )
+
+  const base = new URL(url)
+  let pageCount = 1
+  $('.pagination-sm a[href], #list-chapter .page a[href]').each(
+    (_, element) => {
       try {
-        const chapterUrl = new URL(href, url)
-        chapterUrl.hash = ''
-        const normalizedUrl = validateHttpUrl(chapterUrl.href)
-        if (!chaptersByUrl.has(normalizedUrl)) {
-          chaptersByUrl.set(normalizedUrl, {
-            id: `chapter-${listIndex}-${linkIndex}`,
-            title: label,
-            url: normalizedUrl
-          })
+        const link = new URL($(element).attr('href')!, url)
+        const page = Number(link.searchParams.get('page') ?? 1)
+        if (
+          link.origin === base.origin &&
+          link.pathname === base.pathname &&
+          Number.isInteger(page) &&
+          page > pageCount
+        ) {
+          pageCount = page
         }
       } catch {
         return
       }
-    })
-  })
-
-  const base = new URL(url)
-  let pageCount = 1
-  $('.pagination-sm a[href], #list-chapter .page a[href]').each((_, element) => {
-    try {
-      const link = new URL($(element).attr('href')!, url)
-      const page = Number(link.searchParams.get('page') ?? 1)
-      if (link.origin === base.origin && link.pathname === base.pathname && Number.isInteger(page) && page > pageCount) {
-        pageCount = page
-      }
-    } catch {
-      return
     }
-  })
+  )
 
   return {
     ...metadata,
@@ -365,8 +448,11 @@ function chapterLinksFromHtml(html: string, pageUrl: string): ChapterLink[] {
       !href ||
       !label ||
       !CHAPTER_LABEL_PATTERN.test(label) ||
-      /^(?:previous|next)(?:\s+chapter)?\b|^(?:first|last)\s+chapter\b/i.test(label)
-    ) return
+      /^(?:previous|next)(?:\s+chapter)?\b|^(?:first|last)\s+chapter\b/i.test(
+        label
+      )
+    )
+      return
 
     let url: string
     try {
@@ -388,7 +474,10 @@ function chapterLinksFromHtml(html: string, pageUrl: string): ChapterLink[] {
   return [...byUrl.values()]
 }
 
-export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult {
+export function discoverFromHtml(
+  html: string,
+  pageUrl: string
+): DiscoveryResult {
   const url = validateHttpUrl(pageUrl)
   const $ = load(html)
   const metadata = genericNovelMetadata($, url)
@@ -440,7 +529,10 @@ export function discoverFromHtml(html: string, pageUrl: string): DiscoveryResult
   )
 }
 
-export type HtmlPageLoader = (url: string, signal?: AbortSignal) => Promise<{ html: string; finalUrl: string }>
+export type HtmlPageLoader = (
+  url: string,
+  signal?: AbortSignal
+) => Promise<{ html: string; finalUrl: string }>
 
 interface GenericPaginationTarget {
   url: string
@@ -467,10 +559,16 @@ function samePaginationRoute(left: URL, right: URL): boolean {
   if (left.origin !== right.origin) return false
   const routeRoot = (pathname: string): string =>
     pathname.replace(/\/page\/\d+\/?$/i, '').replace(/\/+$/, '') || '/'
-  return left.pathname === right.pathname || routeRoot(left.pathname) === routeRoot(right.pathname)
+  return (
+    left.pathname === right.pathname ||
+    routeRoot(left.pathname) === routeRoot(right.pathname)
+  )
 }
 
-function genericPaginationTargets(html: string, pageUrl: string): GenericPaginationTarget[] {
+function genericPaginationTargets(
+  html: string,
+  pageUrl: string
+): GenericPaginationTarget[] {
   const $ = load(html)
   const normalizedPageUrl = validateHttpUrl(pageUrl)
   const currentUrl = new URL(normalizedPageUrl)
@@ -486,13 +584,19 @@ function genericPaginationTargets(html: string, pageUrl: string): GenericPaginat
     const className = (link.attr('class') ?? '').trim().toLowerCase()
     const relValues = (link.attr('rel') ?? '').toLowerCase().split(/\s+/)
     const isInPagination = link.closest(paginationContainers).length > 0
-    const isNextChapter = /(?:chapter|episode|part)/.test(`${text} ${ariaLabel} ${className}`)
+    const isNextChapter = /(?:chapter|episode|part)/.test(
+      `${text} ${ariaLabel} ${className}`
+    )
     if (isNextChapter) return
 
     const isNext =
       relValues.includes('next') ||
-      /^(?:next|next page|older|load more|more chapters)(?:\s*[›»→])?$/.test(text) ||
-      /(?:^|\s)(?:next|load-more|older)(?:[-_\s]|$)/.test(`${ariaLabel} ${className}`)
+      /^(?:next|next page|older|load more|more chapters)(?:\s*[›»→])?$/.test(
+        text
+      ) ||
+      /(?:^|\s)(?:next|load-more|older)(?:[-_\s]|$)/.test(
+        `${ariaLabel} ${className}`
+      )
     if (!isInPagination && !isNext) return
 
     const href = link.attr('href')
@@ -524,10 +628,17 @@ function nextGenericPaginationTarget(
   currentPage: number,
   visitedUrls: Set<string>
 ): GenericPaginationTarget | undefined {
-  const nextLink = targets.find((target) => target.isNext && !visitedUrls.has(target.url))
+  const nextLink = targets.find(
+    (target) => target.isNext && !visitedUrls.has(target.url)
+  )
   if (nextLink) return nextLink
   return targets
-    .filter((target) => target.pageNumber !== null && target.pageNumber > currentPage && !visitedUrls.has(target.url))
+    .filter(
+      (target) =>
+        target.pageNumber !== null &&
+        target.pageNumber > currentPage &&
+        !visitedUrls.has(target.url)
+    )
     .sort((left, right) => (left.pageNumber ?? 0) - (right.pageNumber ?? 0))[0]
 }
 
@@ -540,21 +651,31 @@ async function discoverNovelFullChapters(
   const firstPageUrl = new URL(value)
   firstPageUrl.searchParams.delete('page')
   const catalogUrl = validateHttpUrl(firstPageUrl.href)
-  onProgress?.({ current: 0, total: 0, message: 'Loading NovelFull chapter index…' })
+  onProgress?.({
+    current: 0,
+    total: 0,
+    message: 'Loading NovelFull chapter index…'
+  })
 
   const firstResponse = await loadPage(catalogUrl, signal)
-  const firstPage = parseNovelFullCatalogPage(firstResponse.html, firstResponse.finalUrl)
+  const firstPage = parseNovelFullCatalogPage(
+    firstResponse.html,
+    firstResponse.finalUrl
+  )
   if (firstPage.chapters.length === 0) {
     throw new NoReadableContentError(
       'No chapters were found in NovelFull’s chapter list.'
     )
   }
   if (firstPage.pageCount > MAX_NOVELFULL_CATALOG_PAGES) {
-    throw new Error(`NovelFull reported more than ${MAX_NOVELFULL_CATALOG_PAGES} chapter-list pages.`)
+    throw new Error(
+      `NovelFull reported more than ${MAX_NOVELFULL_CATALOG_PAGES} chapter-list pages.`
+    )
   }
 
   const chaptersByUrl = new Map<string, ChapterLink>()
-  for (const chapter of firstPage.chapters) chaptersByUrl.set(chapter.url, chapter)
+  for (const chapter of firstPage.chapters)
+    chaptersByUrl.set(chapter.url, chapter)
   onProgress?.({
     current: 1,
     total: firstPage.pageCount,
@@ -562,7 +683,10 @@ async function discoverNovelFullChapters(
   })
 
   for (let pageNumber = 2; pageNumber <= firstPage.pageCount; pageNumber += 1) {
-    if (signal?.aborted) throw new OperationCancelledError('Browser-assisted discovery was cancelled.')
+    if (signal?.aborted)
+      throw new OperationCancelledError(
+        'Browser-assisted discovery was cancelled.'
+      )
     const pageUrl = new URL(catalogUrl)
     pageUrl.searchParams.set('page', String(pageNumber))
     const response = await loadPage(pageUrl.href, signal)
@@ -573,7 +697,8 @@ async function discoverNovelFullChapters(
       )
     }
     for (const chapter of page.chapters) {
-      if (!chaptersByUrl.has(chapter.url)) chaptersByUrl.set(chapter.url, chapter)
+      if (!chaptersByUrl.has(chapter.url))
+        chaptersByUrl.set(chapter.url, chapter)
     }
     onProgress?.({
       current: pageNumber,
@@ -610,18 +735,26 @@ async function discoverGenericHtmlChapters(
   signal?: AbortSignal
 ): Promise<DiscoveryResult> {
   const firstResponse = await loadPage(value, signal)
-  const firstResult = discoverFromHtml(firstResponse.html, firstResponse.finalUrl)
-  if (CHAPTER_URL_PATTERN.test(new URL(firstResponse.finalUrl).pathname)) return firstResult
+  const firstResult = discoverFromHtml(
+    firstResponse.html,
+    firstResponse.finalUrl
+  )
+  if (CHAPTER_URL_PATTERN.test(new URL(firstResponse.finalUrl).pathname))
+    return firstResult
 
   const chaptersByUrl = new Map<string, ChapterLink>()
-  for (const chapter of firstResult.chapters) chaptersByUrl.set(chapter.url, chapter)
+  for (const chapter of firstResult.chapters)
+    chaptersByUrl.set(chapter.url, chapter)
 
   const firstPageUrl = validateHttpUrl(firstResponse.finalUrl)
   const visitedUrls = new Set([validateHttpUrl(value), firstPageUrl])
   let currentUrl = firstPageUrl
   let currentPage = paginationPageNumber(currentUrl) ?? 1
   let pagesRead = 1
-  let paginationTargets = genericPaginationTargets(firstResponse.html, currentUrl)
+  let paginationTargets = genericPaginationTargets(
+    firstResponse.html,
+    currentUrl
+  )
   let totalPages = Math.max(
     1,
     ...paginationTargets.map((target) => target.pageNumber ?? 0)
@@ -637,29 +770,42 @@ async function discoverGenericHtmlChapters(
   })
 
   while (true) {
-    const target = nextGenericPaginationTarget(paginationTargets, currentPage, visitedUrls)
+    const target = nextGenericPaginationTarget(
+      paginationTargets,
+      currentPage,
+      visitedUrls
+    )
     if (!target) break
-    if (signal?.aborted) throw new OperationCancelledError('Browser-assisted discovery was cancelled.')
+    if (signal?.aborted)
+      throw new OperationCancelledError(
+        'Browser-assisted discovery was cancelled.'
+      )
     if (pagesRead >= MAX_GENERIC_DISCOVERY_PAGES) {
-      throw new Error(`Generic chapter discovery exceeded the ${MAX_GENERIC_DISCOVERY_PAGES}-page limit.`)
+      throw new Error(
+        `Generic chapter discovery exceeded the ${MAX_GENERIC_DISCOVERY_PAGES}-page limit.`
+      )
     }
 
     visitedUrls.add(target.url)
     const response = await loadPage(target.url, signal)
     const pageUrl = validateHttpUrl(response.finalUrl)
     if (visitedUrls.has(pageUrl) && pageUrl !== target.url) {
-      throw new Error('Generic chapter-list pagination redirected to an already visited page.')
+      throw new Error(
+        'Generic chapter-list pagination redirected to an already visited page.'
+      )
     }
     visitedUrls.add(pageUrl)
 
     const pageResult = discoverFromHtml(response.html, pageUrl)
     for (const chapter of pageResult.chapters) {
-      if (!chaptersByUrl.has(chapter.url)) chaptersByUrl.set(chapter.url, chapter)
+      if (!chaptersByUrl.has(chapter.url))
+        chaptersByUrl.set(chapter.url, chapter)
     }
 
     pagesRead += 1
     currentUrl = pageUrl
-    currentPage = paginationPageNumber(currentUrl) ?? target.pageNumber ?? currentPage + 1
+    currentPage =
+      paginationPageNumber(currentUrl) ?? target.pageNumber ?? currentPage + 1
     paginationTargets = genericPaginationTargets(response.html, currentUrl)
     totalPages = Math.max(
       pagesRead,
@@ -680,7 +826,12 @@ async function discoverGenericHtmlChapters(
     ...chapter,
     id: `chapter-${index + 1}`
   }))
-  return { ...firstResult, sourceUrl: firstPageUrl, parserName: 'Generic HTML', chapters }
+  return {
+    ...firstResult,
+    sourceUrl: firstPageUrl,
+    parserName: 'Generic HTML',
+    chapters
+  }
 }
 
 function shouldRetryDiscoveryPage(error: unknown): boolean {
@@ -713,15 +864,22 @@ const registeredSiteExtractors: SiteExtractor[] = []
 export function registerSiteExtractor(extractor: SiteExtractor): void {
   const normalizedName = extractor.name.trim().toLowerCase()
   if (!normalizedName) throw new Error('A site extractor must have a name.')
-  if (registeredSiteExtractors.some((registered) => registered.name.trim().toLowerCase() === normalizedName)) {
-    throw new Error(`A site extractor named "${extractor.name}" is already registered.`)
+  if (
+    registeredSiteExtractors.some(
+      (registered) => registered.name.trim().toLowerCase() === normalizedName
+    )
+  ) {
+    throw new Error(
+      `A site extractor named "${extractor.name}" is already registered.`
+    )
   }
   registeredSiteExtractors.push(extractor)
 }
 
 registerSiteExtractor({
   name: 'NovelFull',
-  matches: (url) => isNovelFullUrl(url.href) && !CHAPTER_URL_PATTERN.test(url.pathname),
+  matches: (url) =>
+    isNovelFullUrl(url.href) && !CHAPTER_URL_PATTERN.test(url.pathname),
   discover: discoverNovelFullChapters
 })
 
@@ -731,7 +889,13 @@ export async function discoverChapters(
   signal?: AbortSignal,
   extractionMode: SiteExtractionMode = 'automatic'
 ): Promise<DiscoveryResult> {
-  return discoverChaptersUsingPageLoader(value, fetchHtml, onProgress, signal, extractionMode)
+  return discoverChaptersUsingPageLoader(
+    value,
+    fetchHtml,
+    onProgress,
+    signal,
+    extractionMode
+  )
 }
 
 export async function discoverChaptersUsingPageLoader(
@@ -747,7 +911,9 @@ export async function discoverChaptersUsingPageLoader(
     extractor = undefined
   } else if (extractionMode === 'novelfull') {
     if (!isSiteExtractionModeCompatible(url, extractionMode)) {
-      throw new Error('The NovelFull parser is not compatible with this source URL.')
+      throw new Error(
+        'The NovelFull parser is not compatible with this source URL.'
+      )
     }
     extractor = registeredSiteExtractors.find(
       (registered) => registered.name.trim().toLowerCase() === 'novelfull'
@@ -835,7 +1001,9 @@ function inlineNodesFromSelection(
       if (
         /(?:^|\s)(?:next|prev|previous)(?:\s|$)/i.test(rel) ||
         /(?:^|\s)(?:next|prev|previous)(?:\s|$)/i.test(className) ||
-        /^(?:next|previous)(?:\s+chapter)?$|^(?:first|last)\s+chapter$/i.test(label)
+        /^(?:next|previous)(?:\s+chapter)?$|^(?:first|last)\s+chapter$/i.test(
+          label
+        )
       ) {
         return
       }
@@ -894,7 +1062,11 @@ function fallbackParagraphBlocks(
   return fragment.split('\u0000').flatMap((part) => {
     if (!part.trim()) return []
     const fragment$ = load(`<body>${part}</body>`)
-    const inline = inlineNodesFromSelection(fragment$, fragment$('body'), pageUrl)
+    const inline = inlineNodesFromSelection(
+      fragment$,
+      fragment$('body'),
+      pageUrl
+    )
     const text = inlineNodesText(inline)
     return text ? [{ type: 'paragraph' as const, text, inline }] : []
   })
@@ -906,7 +1078,10 @@ interface ExtractedChapter {
 }
 
 function inlineImageResource(value: string, pageUrl: string): ChapterImage {
-  const match = /^data:(image\/(?:jpeg|png|gif|webp));base64,([A-Za-z0-9+/=]+)$/i.exec(value)
+  const match =
+    /^data:(image\/(?:jpeg|png|gif|webp));base64,([A-Za-z0-9+/=]+)$/i.exec(
+      value
+    )
   if (!match) throw new Error('A chapter contains an unsupported inline image.')
   const data = Buffer.from(match[2], 'base64')
   if (
@@ -914,7 +1089,9 @@ function inlineImageResource(value: string, pageUrl: string): ChapterImage {
     data.length > MAX_IMAGE_BYTES ||
     data.toString('base64') !== match[2]
   ) {
-    throw new Error('An inline chapter image exceeds the 4 MB size limit or is malformed.')
+    throw new Error(
+      'An inline chapter image exceeds the 4 MB size limit or is malformed.'
+    )
   }
   const mediaType = imageMediaType(data)
   if (mediaType !== match[1].toLowerCase()) {
@@ -923,11 +1100,19 @@ function inlineImageResource(value: string, pageUrl: string): ChapterImage {
   return { sourceUrl: pageUrl, mediaType, dataBase64: data.toString('base64') }
 }
 
-function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: string): ExtractedChapter {
+function extractChapterStructure(
+  html: string,
+  pageUrl: string,
+  fallbackTitle: string
+): ExtractedChapter {
   const url = validateHttpUrl(pageUrl)
   const $ = load(html)
   const root = chapterRoot($)
-  root.find('script, style, noscript, nav, header, footer, aside, iframe, form, .ads, .ad, .advertisement').remove()
+  root
+    .find(
+      'script, style, noscript, nav, header, footer, aside, iframe, form, .ads, .ad, .advertisement'
+    )
+    .remove()
 
   const text = root.text().replace(/\s+/g, ' ').trim()
   const pageTitle = documentTitle($)
@@ -937,14 +1122,18 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
     )
   }
   if (text.length < 40) {
-    throw new NoReadableContentError('No readable chapter content was found on this page.')
+    throw new NoReadableContentError(
+      'No readable chapter content was found on this page.'
+    )
   }
 
   const blocks: ChapterContentBlock[] = []
   const imageReferences: ExtractedChapter['imageReferences'] = []
   const imageIndexes = new Map<string, number>()
 
-  for (const element of root.find('p, h2, h3, h4, blockquote, ul, ol, hr, img').toArray()) {
+  for (const element of root
+    .find('p, h2, h3, h4, blockquote, ul, ol, hr, img')
+    .toArray()) {
     const tagName = element.tagName?.toLowerCase()
     const selection = $(element)
     if (selection.parents('blockquote, ul, ol').length > 0) continue
@@ -954,7 +1143,11 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
       continue
     }
 
-    if (tagName === 'p' || tagName === 'blockquote' || /^h[234]$/.test(tagName ?? '')) {
+    if (
+      tagName === 'p' ||
+      tagName === 'blockquote' ||
+      /^h[234]$/.test(tagName ?? '')
+    ) {
       const inline = inlineNodesFromSelection($, selection, url)
       const paragraphText = inlineNodesText(inline)
       if (!paragraphText) continue
@@ -974,12 +1167,16 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
     }
 
     if (tagName === 'ul' || tagName === 'ol') {
-      const items = selection.children('li').toArray().flatMap((item) => {
-        const inline = inlineNodesFromSelection($, $(item), url)
-        const itemText = inlineNodesText(inline)
-        return itemText ? [{ text: itemText, inline }] : []
-      })
-      if (items.length > 0) blocks.push({ type: 'list', ordered: tagName === 'ol', items })
+      const items = selection
+        .children('li')
+        .toArray()
+        .flatMap((item) => {
+          const inline = inlineNodesFromSelection($, $(item), url)
+          const itemText = inlineNodesText(inline)
+          return itemText ? [{ text: itemText, inline }] : []
+        })
+      if (items.length > 0)
+        blocks.push({ type: 'list', ordered: tagName === 'ol', items })
       continue
     }
 
@@ -1007,7 +1204,9 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
       let imageIndex = imageIndexes.get(key)
       if (imageIndex === undefined) {
         if (imageReferences.length >= MAX_CHAPTER_IMAGES) {
-          throw new Error(`A chapter contains more than ${MAX_CHAPTER_IMAGES} images.`)
+          throw new Error(
+            `A chapter contains more than ${MAX_CHAPTER_IMAGES} images.`
+          )
         }
         imageIndex = imageReferences.length
         imageIndexes.set(key, imageIndex)
@@ -1022,20 +1221,27 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
     }
   }
 
-  if (!blocks.some((block) =>
-    block.type === 'paragraph' ||
-    block.type === 'heading' ||
-    block.type === 'blockquote' ||
-    block.type === 'list'
-  )) {
+  if (
+    !blocks.some(
+      (block) =>
+        block.type === 'paragraph' ||
+        block.type === 'heading' ||
+        block.type === 'blockquote' ||
+        block.type === 'list'
+    )
+  ) {
     blocks.unshift(...fallbackParagraphBlocks(root, url))
   }
-  const readableParagraphs = blocks.flatMap((block) => {
+  const validatedBlocks = chapterContentBlocksSchema(
+    imageReferences.length
+  ).parse(blocks)
+  const readableParagraphs = validatedBlocks.flatMap((block) => {
     if (
       block.type === 'paragraph' ||
       block.type === 'heading' ||
       block.type === 'blockquote'
-    ) return [block.text]
+    )
+      return [block.text]
     if (block.type === 'list') return block.items.map((item) => item.text)
     return []
   })
@@ -1048,16 +1254,24 @@ function extractChapterStructure(html: string, pageUrl: string, fallbackTitle: s
     : ''
   return {
     content: {
-      title: novelFullChapterTitle || $('h1').first().text().trim() || pageTitle || fallbackTitle,
+      title:
+        novelFullChapterTitle ||
+        $('h1').first().text().trim() ||
+        pageTitle ||
+        fallbackTitle,
       url,
       paragraphs: readableParagraphs,
-      blocks
+      blocks: validatedBlocks
     },
     imageReferences
   }
 }
 
-export function extractChapterFromHtml(html: string, pageUrl: string, fallbackTitle: string): ChapterContent {
+export function extractChapterFromHtml(
+  html: string,
+  pageUrl: string,
+  fallbackTitle: string
+): ChapterContent {
   const { content } = extractChapterStructure(html, pageUrl, fallbackTitle)
   return content
 }
@@ -1069,22 +1283,32 @@ export async function fetchChapterContentFromHtml(
   signal?: AbortSignal
 ): Promise<ChapterContent> {
   const finalUrl = validateHttpUrl(pageUrl)
-  const { content, imageReferences } = extractChapterStructure(html, finalUrl, chapter.title)
+  const { content, imageReferences } = extractChapterStructure(
+    html,
+    finalUrl,
+    chapter.title
+  )
   const images: ChapterImage[] = []
   let totalImageBytes = 0
   for (const image of imageReferences) {
-    const resource = image.inline ?? await fetchImageResource(image.url, content.url, signal)
+    const resource =
+      image.inline ?? (await fetchImageResource(image.url, content.url, signal))
     const imageBytes = Buffer.byteLength(resource.dataBase64, 'base64')
     totalImageBytes += imageBytes
     if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
-      throw new Error(`A chapter contains more than ${MAX_CHAPTER_IMAGE_BYTES / 1024 / 1024} MB of images.`)
+      throw new Error(
+        `A chapter contains more than ${MAX_CHAPTER_IMAGE_BYTES / 1024 / 1024} MB of images.`
+      )
     }
     images.push(resource)
   }
   return { ...content, images }
 }
 
-export async function fetchChapterContent(chapter: ChapterLink, signal?: AbortSignal): Promise<ChapterContent> {
+export async function fetchChapterContent(
+  chapter: ChapterLink,
+  signal?: AbortSignal
+): Promise<ChapterContent> {
   const url = validateHttpUrl(chapter.url)
   const { html, finalUrl } = await fetchHtml(url, signal)
   return fetchChapterContentFromHtml(chapter, html, finalUrl, signal)

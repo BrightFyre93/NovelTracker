@@ -28,6 +28,17 @@ const allowedTransitions: Record<
   cancelled: ['discovering', 'queued']
 }
 
+const activeQueueStatuses = new Set<DiscoveryQueueStatus>([
+  'discovering',
+  'queued',
+  'downloading',
+  'paused'
+])
+
+export function isActiveQueueStatus(status: DiscoveryQueueStatus): boolean {
+  return activeQueueStatuses.has(status)
+}
+
 export function transitionQueueItem(
   item: DiscoveryQueueItem,
   nextStatus: DiscoveryQueueStatus

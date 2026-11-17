@@ -1,26 +1,20 @@
 import type { IpcContext } from './context'
+import { z } from 'zod'
 
 type SettingsIpcContext = Pick<
   IpcContext,
-  | 'handleResultIpc'
-  | 'handleTypedIpc'
-  | 'settingsService'
-  | 'settingsUpdatePatchSchema'
-  | 'z'
+  'handle' | 'settingsService' | 'settingsUpdatePatchSchema'
 >
 
 export function registerSettingsIpcHandlers(context: SettingsIpcContext): void {
-  const {
-    handleResultIpc,
-    handleTypedIpc,
-    settingsService,
-    settingsUpdatePatchSchema,
-    z
-  } = context
+  const { handle, settingsService, settingsUpdatePatchSchema } = context
 
-  handleTypedIpc('settings:get', z.tuple([]), async () => settingsService.get())
+  handle('typed', 'settings:get', z.tuple([]), async () =>
+    settingsService.get()
+  )
 
-  handleResultIpc(
+  handle(
+    'result',
     'settings:update',
     z.tuple([settingsUpdatePatchSchema]),
     (_event, patch) => settingsService.update(patch)

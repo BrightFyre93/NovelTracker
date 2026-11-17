@@ -1,4 +1,3 @@
-import { statfs } from 'node:fs/promises'
 import type {
   ChapterContent,
   ChapterLink,
@@ -21,21 +20,10 @@ import { recommendArchiveCoverage } from '../../../shared/archiveRecommendation'
 import {
   fetchChapterContent,
   fetchChapterContentFromHtml,
-  fetchImageResource,
   discoverChapters,
   discoverChaptersUsingPageLoader
 } from '../scraper'
 import { readBrowserPage } from '../browserService'
-import {
-  chapterArtifactReference,
-  readChapterArtifact,
-  readChapterArtifactDescriptor,
-  readCoverArtifact,
-  removeChapterArtifacts,
-  writeChapterArtifact,
-  writeCoverArtifact
-} from '../localStore'
-import { runPool, withRetry } from '../retry'
 import type {
   EpubPackagingInput,
   EpubPackagingProgress,
@@ -47,20 +35,9 @@ import { transitionQueueItem } from './queueStateMachine'
 import { DiscoveryScheduler } from './discoveryScheduler'
 import { DownloadScheduler } from './downloadScheduler'
 import type { LibraryIndexRepository } from '../library/libraryIndexRepository'
-import { inspectPackagedEpubForLibrary } from '../libraryScanner'
-import type {
-  QueueChapterDownloadState,
-  QueueChapterDownloadStatus,
-  QueueChapterStateRepository
-} from './repository'
-import {
-  assertOutputPathAvailable,
-  discoveryQueueItemStatus,
-  discoverySnapshotIsStale,
-  expectedOutputPath,
-  reserveIncompleteEpubFilename
-} from './helpers'
-
+import { runQueuedDownloadJob } from './downloadJob'
+import type { QueueChapterStateRepository } from './repository'
+import { discoveryQueueItemStatus, discoverySnapshotIsStale } from './helpers'
 
 export interface ActiveDownload {
   controller: AbortController
@@ -89,9 +66,7 @@ interface QueueRuntimeDependencies {
   isShuttingDown: () => boolean
   queueHelpers: Pick<
     QueueHelpers,
-    | 'markQueueItemChaptersDirty'
-    | 'withChapters'
-    | 'persistDiscoveryQueue'
+    'markQueueItemChaptersDirty' | 'withChapters' | 'persistDiscoveryQueue'
   >
   notifyDiscoveryQueueChanged: () => void
   trackBackgroundTask: (task: Promise<void>, label: string) => void
@@ -99,14 +74,9 @@ interface QueueRuntimeDependencies {
 }
 
 export interface QueueRuntime {
-  discoverQueueItem: (
-    id: string,
-    browserAssisted?: boolean
-  ) => Promise<boolean>
+  discoverQueueItem: (id: string, browserAssisted?: boolean) => Promise<boolean>
   discoveryScheduler: DiscoveryScheduler
-  revalidateStaleQueuedJob: (
-    item: DiscoveryQueueItem
-  ) => Promise<boolean>
+  revalidateStaleQueuedJob: (item: DiscoveryQueueItem) => Promise<boolean>
   canRetryChapter: (error: unknown) => boolean
   persistDownloadState: (
     item: DiscoveryQueueItem,
@@ -141,11 +111,8 @@ export function createQueueRuntime(
     trackBackgroundTask,
     errorMessage
   } = dependencies
-  const {
-    markQueueItemChaptersDirty,
-    withChapters,
-    persistDiscoveryQueue
-  } = queueHelpers
+  const { markQueueItemChaptersDirty, withChapters, persistDiscoveryQueue } =
+    queueHelpers
 
   async function fetchChapterContentWithBrowserFallback(
     chapter: ChapterLink,
@@ -159,7 +126,7 @@ export function createQueueRuntime(
           (error.status === 401 || error.status === 403)) ||
         error instanceof VerificationRequiredError
       if (!verificationRequired) throw error
-  
+
       const { html, finalUrl } = await readBrowserPage(chapter.url, signal)
       return fetchChapterContentFromHtml(chapter, html, finalUrl, signal)
     }
@@ -182,7 +149,9 @@ export function createQueueRuntime(
     let hadPreviousSnapshot = false
     let verificationRequired = false
     const cleanup = (notify: boolean): void => {
-      if (activeBrowserDiscoveries.get(browserOperationId) === browserController) {
+      if (
+        activeBrowserDiscoveries.get(browserOperationId) === browserController
+      ) {
         activeBrowserDiscoveries.delete(browserOperationId)
       }
       if (activeQueueDiscoveries.get(id) === controller)
@@ -190,159 +159,157 @@ export function createQueueRuntime(
       if (notify) notifyDiscoveryQueueChanged()
     }
     let shouldNotify = true
-  
+
     try {
       return await withChapters(item, async () => {
-      try {
-      if (item.siteExtractionMode === undefined) {
-        const settings = await settingsService.get()
-        item.siteExtractionMode = siteExtractionModeForUrl(
-          item.sourceUrl,
-          settings.siteExtractionPreferences
-        )
-        await persistDiscoveryQueue()
-        notifyDiscoveryQueueChanged()
-      }
-      previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
-      previousByUrl = new Map(
-        previousChapters.map((chapter) => [chapter.url, chapter])
-      )
-      hadPreviousSnapshot = Boolean(
-        item.discoveredAt && previousChapters.length > 0
-      )
-      const result = browserAssisted
-        ? await discoverChaptersUsingPageLoader(
-            item.sourceUrl,
-            readBrowserPage,
-            (progress) => {
-              if (activeQueueDiscoveries.get(id) !== controller) return
-              item.progress = progress
-              notifyDiscoveryQueueChanged()
-            },
-            controller.signal,
-            item.siteExtractionMode
+        try {
+          if (item.siteExtractionMode === undefined) {
+            const settings = await settingsService.get()
+            item.siteExtractionMode = siteExtractionModeForUrl(
+              item.sourceUrl,
+              settings.siteExtractionPreferences
+            )
+            await persistDiscoveryQueue()
+            notifyDiscoveryQueueChanged()
+          }
+          previousChapters = item.chapters.map((chapter) => ({ ...chapter }))
+          previousByUrl = new Map(
+            previousChapters.map((chapter) => [chapter.url, chapter])
           )
-        : await discoverChapters(
-            item.sourceUrl,
-            (progress) => {
-              if (activeQueueDiscoveries.get(id) !== controller) return
-              item.progress = progress
-              notifyDiscoveryQueueChanged()
-            },
-            controller.signal,
-            item.siteExtractionMode
+          hadPreviousSnapshot = Boolean(
+            item.discoveredAt && previousChapters.length > 0
           )
-      if (controller.signal.aborted)
-        throw new OperationCancelledError('Discovery was cancelled.')
-      if (
-        activeQueueDiscoveries.get(id) !== controller ||
-        item.status !== 'discovering'
-      ) {
-        shouldNotify = false
-        return false
-      }
-      item.title = result.title || item.title
-      item.author = result.author || item.author
-      item.description = result.description
-      item.coverUrl = result.coverUrl
-      item.alternativeNames = [...result.alternativeNames]
-      item.genres = [...result.genres]
-      item.source = result.source
-      item.novelStatus = result.novelStatus
-      item.parserName = result.parserName
-      const newUrls = new Set(result.chapters.map((chapter) => chapter.url))
-      const addedCount = result.chapters.filter(
-        (chapter) => !previousByUrl.has(chapter.url)
-      ).length
-      const removedCount = previousChapters.filter(
-        (chapter) => !newUrls.has(chapter.url)
-      ).length
-      const orderChanged =
-        previousChapters.length === result.chapters.length &&
-        previousChapters.some(
-          (chapter, index) => chapter.url !== result.chapters[index].url
-        )
-      const refreshedChapters: QueueChapter[] = result.chapters.map(
-        (chapter) => ({
-          ...chapter,
-          archiveStatus: 'missing',
-          archiveSources: [],
-          chapterNumber: null,
-          archiveGap: false,
-          recommended: true,
-          selected: previousByUrl.get(chapter.url)?.selected ?? true
-        })
-      )
-      const libraryFiles =
-        await libraryIndexRepository.readRecommendationFiles(item)
-      if (
-        controller.signal.aborted ||
-        activeQueueDiscoveries.get(id) !== controller ||
-        item.status !== 'discovering'
-      ) {
-        shouldNotify = false
-        return false
-      }
-      const recommendation = recommendArchiveCoverage(
-        { ...item, chapters: refreshedChapters },
-        libraryFiles ?? []
-      )
-      item.chapters = recommendation.chapters
-      markQueueItemChaptersDirty(item)
-      item.recommendationSummary = recommendation.summary
-      item.discoveryChanges =
-        hadPreviousSnapshot &&
-        (addedCount > 0 || removedCount > 0 || orderChanged)
-          ? `Chapter list changed: ${addedCount} added, ${removedCount} removed${orderChanged ? ', order changed' : ''}. Review your selection.`
-          : ''
-      transitionQueueItem(item, 'needs-review')
-      item.progress = null
-      item.error = ''
-      item.discoveredAt = new Date().toISOString()
-      item.updatedAt = item.discoveredAt
-    } catch (error) {
-      if (activeQueueDiscoveries.get(id) !== controller) {
-        shouldNotify = false
-        return false
-      }
-      verificationRequired =
-        error instanceof VerificationRequiredError ||
-        (error instanceof HttpStatusError &&
-          (error.status === 401 || error.status === 403))
-      const finalStatus =
-        controller.signal.aborted && !isShuttingDown()
-          ? 'cancelled'
-          : 'failed'
-      transitionQueueItem(item, finalStatus)
-      item.progress = null
-      item.error = finalStatus === 'cancelled' ? '' : errorMessage(error)
-      item.updatedAt = new Date().toISOString()
-    }
-  
-    try {
-      await persistDiscoveryQueue()
-    } catch (error) {
-      console.error(`Discovery queue item ${id} could not be saved:`, error)
-      transitionQueueItem(item, 'failed')
-      item.error = `Discovery result could not be saved: ${errorMessage(error)}`
-      item.updatedAt = new Date().toISOString()
-      try {
-        await persistDiscoveryQueue()
-      } catch (saveError) {
-        console.error(
-          `Discovery queue item ${id} failure state could not be saved:`,
-          saveError
-        )
-      }
-    }
-    return verificationRequired
+          const result = browserAssisted
+            ? await discoverChaptersUsingPageLoader(
+                item.sourceUrl,
+                readBrowserPage,
+                (progress) => {
+                  if (activeQueueDiscoveries.get(id) !== controller) return
+                  item.progress = progress
+                  notifyDiscoveryQueueChanged()
+                },
+                controller.signal,
+                item.siteExtractionMode
+              )
+            : await discoverChapters(
+                item.sourceUrl,
+                (progress) => {
+                  if (activeQueueDiscoveries.get(id) !== controller) return
+                  item.progress = progress
+                  notifyDiscoveryQueueChanged()
+                },
+                controller.signal,
+                item.siteExtractionMode
+              )
+          if (controller.signal.aborted)
+            throw new OperationCancelledError('Discovery was cancelled.')
+          if (
+            activeQueueDiscoveries.get(id) !== controller ||
+            item.status !== 'discovering'
+          ) {
+            shouldNotify = false
+            return false
+          }
+          item.title = result.title || item.title
+          item.author = result.author || item.author
+          item.description = result.description
+          item.coverUrl = result.coverUrl
+          item.alternativeNames = [...result.alternativeNames]
+          item.genres = [...result.genres]
+          item.source = result.source
+          item.novelStatus = result.novelStatus
+          item.parserName = result.parserName
+          const newUrls = new Set(result.chapters.map((chapter) => chapter.url))
+          const addedCount = result.chapters.filter(
+            (chapter) => !previousByUrl.has(chapter.url)
+          ).length
+          const removedCount = previousChapters.filter(
+            (chapter) => !newUrls.has(chapter.url)
+          ).length
+          const orderChanged =
+            previousChapters.length === result.chapters.length &&
+            previousChapters.some(
+              (chapter, index) => chapter.url !== result.chapters[index].url
+            )
+          const refreshedChapters: QueueChapter[] = result.chapters.map(
+            (chapter) => ({
+              ...chapter,
+              archiveStatus: 'missing',
+              archiveSources: [],
+              chapterNumber: null,
+              archiveGap: false,
+              recommended: true,
+              selected: previousByUrl.get(chapter.url)?.selected ?? true
+            })
+          )
+          const libraryFiles =
+            await libraryIndexRepository.readRecommendationFiles(item)
+          if (
+            controller.signal.aborted ||
+            activeQueueDiscoveries.get(id) !== controller ||
+            item.status !== 'discovering'
+          ) {
+            shouldNotify = false
+            return false
+          }
+          const recommendation = recommendArchiveCoverage(
+            { ...item, chapters: refreshedChapters },
+            libraryFiles ?? []
+          )
+          item.chapters = recommendation.chapters
+          markQueueItemChaptersDirty(item)
+          item.recommendationSummary = recommendation.summary
+          item.discoveryChanges =
+            hadPreviousSnapshot &&
+            (addedCount > 0 || removedCount > 0 || orderChanged)
+              ? `Chapter list changed: ${addedCount} added, ${removedCount} removed${orderChanged ? ', order changed' : ''}. Review your selection.`
+              : ''
+          transitionQueueItem(item, 'needs-review')
+          item.progress = null
+          item.error = ''
+          item.discoveredAt = new Date().toISOString()
+          item.updatedAt = item.discoveredAt
+        } catch (error) {
+          if (activeQueueDiscoveries.get(id) !== controller) {
+            shouldNotify = false
+            return false
+          }
+          verificationRequired =
+            error instanceof VerificationRequiredError ||
+            (error instanceof HttpStatusError &&
+              (error.status === 401 || error.status === 403))
+          const finalStatus =
+            controller.signal.aborted && !isShuttingDown()
+              ? 'cancelled'
+              : 'failed'
+          transitionQueueItem(item, finalStatus)
+          item.progress = null
+          item.error = finalStatus === 'cancelled' ? '' : errorMessage(error)
+          item.updatedAt = new Date().toISOString()
+        }
+
+        try {
+          await persistDiscoveryQueue()
+        } catch (error) {
+          console.error(`Discovery queue item ${id} could not be saved:`, error)
+          transitionQueueItem(item, 'failed')
+          item.error = `Discovery result could not be saved: ${errorMessage(error)}`
+          item.updatedAt = new Date().toISOString()
+          try {
+            await persistDiscoveryQueue()
+          } catch (saveError) {
+            console.error(
+              `Discovery queue item ${id} failure state could not be saved:`,
+              saveError
+            )
+          }
+        }
+        return verificationRequired
       })
     } catch (error) {
       if (activeQueueDiscoveries.get(id) !== controller) return false
       const finalStatus =
-        controller.signal.aborted && !isShuttingDown()
-          ? 'cancelled'
-          : 'failed'
+        controller.signal.aborted && !isShuttingDown() ? 'cancelled' : 'failed'
       transitionQueueItem(item, finalStatus)
       item.progress = null
       item.error = finalStatus === 'cancelled' ? '' : errorMessage(error)
@@ -388,7 +355,7 @@ export function createQueueRuntime(
       message: 'Refreshing the chapter list before starting this older job…'
     }
     await persistDownloadState(item)
-  
+
     const verificationRequired = await discoverQueueItem(item.id)
     if (discoveryQueueItemStatus(item) === 'failed' && verificationRequired) {
       transitionQueueItem(item, 'discovering')
@@ -401,12 +368,12 @@ export function createQueueRuntime(
       await persistDownloadState(item)
       await discoverQueueItem(item.id, true)
     }
-  
+
     if (discoveryQueueItemStatus(item) === 'cancelled') {
       await persistDownloadState(item)
       return false
     }
-  
+
     if (discoveryQueueItemStatus(item) !== 'needs-review') {
       if (discoveryQueueItemStatus(item) !== 'failed') {
         transitionQueueItem(item, 'failed')
@@ -418,7 +385,7 @@ export function createQueueRuntime(
       await persistDownloadState(item)
       return false
     }
-  
+
     const refreshedSelection = await withChapters(item, async (loadedItem) => {
       const previouslySelected = new Set(selectedUrls)
       for (const chapter of loadedItem.chapters) {
@@ -434,7 +401,7 @@ export function createQueueRuntime(
     const selectionUnchanged =
       selectedUrls.length === refreshedSelection.length &&
       selectedUrls.every((url, index) => url === refreshedSelection[index])
-  
+
     if (!selectionUnchanged) {
       transitionQueueItem(item, 'needs-review')
       item.error =
@@ -442,7 +409,7 @@ export function createQueueRuntime(
       await persistDownloadState(item)
       return false
     }
-  
+
     transitionQueueItem(item, 'queued')
     item.error = ''
     item.progress = {
@@ -484,844 +451,28 @@ export function createQueueRuntime(
     controller: AbortController,
     maxSimultaneousChapters: number
   ): Promise<void> {
-    const item = discoveryQueue.find((candidate) => candidate.id === itemId)
-    if (!item || !item.downloadOptions) return
-    const options = item.downloadOptions
-    const retryAttempts = settingsService.current.maxDownloadRetryAttempts
-    await withChapters(item, async () => {
-    const saveAvailableChaptersOnly = item.saveAvailableChaptersOnly === true
-    const selectedChapters = item.chapters.filter((chapter) => chapter.selected)
-    const chapterSourceOrder = new Map(
-      item.chapters.map((chapter, sourceOrder) => [chapter.id, sourceOrder])
+    return runQueuedDownloadJob(
+      {
+        discoveryQueue,
+        activeDownloads,
+        reservedOutputPaths,
+        dataDirectory,
+        packageEpub,
+        settingsService,
+        libraryIndexRepository,
+        chapterStateRepository,
+        notifyDiscoveryQueueChanged,
+        errorMessage,
+        withChapters,
+        persistDownloadState,
+        canRetryChapter,
+        fetchChapterContentWithBrowserFallback
+      },
+      itemId,
+      controller,
+      maxSimultaneousChapters
     )
-    const savedChapterStates =
-      await chapterStateRepository.readChapterStates(itemId)
-    const chapterStates = new Map(
-      savedChapterStates.map((state) => [state.chapterId, state])
-    )
-    const missingSelectedChapterUrls = new Set<string>()
-    let completedSelectedChapterCount = 0
-    let activeChapterRequests = 0
-    let lastCheckpointAt = Date.now()
-    let chaptersSinceCheckpoint = 0
-    let progressCheckpointTail = Promise.resolve()
-    let releaseOutputReservation = (): void => {}
-    let packagingStarted = false
-    let outputPackaged = false
-
-    const updateChapterState = async (
-      chapter: ChapterLink,
-      sourceOrder: number,
-      state: QueueChapterDownloadStatus,
-      update: Partial<
-        Pick<
-          QueueChapterDownloadState,
-          'attemptCount' | 'lastHttpStatus' | 'lastError' | 'artifactRef'
-        >
-      > = {}
-    ): Promise<void> => {
-      const previous = chapterStates.get(chapter.id)
-      const updatedAt = new Date().toISOString()
-      const nextState: QueueChapterDownloadState = {
-        chapterId: chapter.id,
-        originalUrl: previous?.originalUrl ?? chapter.url,
-        currentUrl: chapter.url,
-        title: chapter.title,
-        sourceOrder: chapterSourceOrder.get(chapter.id) ?? sourceOrder,
-        state,
-        attemptCount: update.attemptCount ?? previous?.attemptCount ?? 0,
-        createdAt: previous?.createdAt ?? updatedAt,
-        updatedAt,
-        lastHttpStatus:
-          update.lastHttpStatus === undefined
-            ? state === 'Failed' || state === 'InvalidArtifact'
-              ? (previous?.lastHttpStatus ?? null)
-              : null
-            : update.lastHttpStatus,
-        lastError:
-          update.lastError === undefined
-            ? state === 'Failed' || state === 'InvalidArtifact'
-              ? (previous?.lastError ?? null)
-              : null
-            : update.lastError,
-        artifactRef:
-          update.artifactRef === undefined
-            ? state === 'Downloaded'
-              ? (previous?.artifactRef ??
-                chapterArtifactReference(itemId, chapter.url))
-              : null
-            : update.artifactRef
-      }
-      await chapterStateRepository.writeChapterStates(itemId, [nextState])
-      chapterStates.set(chapter.id, nextState)
-    }
-
-    const initialChapterStates = selectedChapters.flatMap(
-      (chapter, sourceOrder) => {
-        const previous = chapterStates.get(chapter.id)
-        if (previous && previous.state !== 'Skipped') return []
-        const now = new Date().toISOString()
-        const nextState: QueueChapterDownloadState = {
-          chapterId: chapter.id,
-          originalUrl: previous?.originalUrl ?? chapter.url,
-          currentUrl: chapter.url,
-          title: chapter.title,
-          sourceOrder: chapterSourceOrder.get(chapter.id) ?? sourceOrder,
-          state: 'Pending',
-          attemptCount: previous?.attemptCount ?? 0,
-          createdAt: previous?.createdAt ?? now,
-          updatedAt: now,
-          lastHttpStatus: null,
-          lastError: null,
-          artifactRef: null
-        }
-        chapterStates.set(chapter.id, nextState)
-        return [nextState]
-      }
-    )
-    if (initialChapterStates.length > 0) {
-      await chapterStateRepository.writeChapterStates(
-        itemId,
-        initialChapterStates
-      )
-    }
-  
-    const recordUnavailableChapter = (
-      chapter: ChapterLink,
-      reason: string
-    ): void => {
-      missingSelectedChapterUrls.add(chapter.url)
-      const previous = item.failedChapters.find(
-        (failed) => failed.url === chapter.url
-      )
-      item.failedChapters = [
-        ...item.failedChapters.filter((failed) => failed.url !== chapter.url),
-        {
-          url: chapter.url,
-          title: chapter.title,
-          error: reason,
-          ...(previous?.httpStatus === undefined
-            ? {}
-            : { httpStatus: previous.httpStatus }),
-          ...(previous?.omitted ? { omitted: true } : {})
-        }
-      ]
-      item.error = `${missingSelectedChapterUrls.size} selected chapter(s) are unavailable; saving the available chapters.`
-    }
-
-    const updateChapterIssueSummary = (): void => {
-      const omittedCount = item.failedChapters.filter(
-        (chapter) => chapter.omitted
-      ).length
-      const failedCount = item.failedChapters.length - omittedCount
-      item.error = [
-        failedCount > 0
-          ? `${failedCount} chapter(s) failed. Retry failed chapters to continue.`
-          : '',
-        omittedCount > 0
-          ? `${omittedCount} selected chapter(s) omitted after HTTP 404 under the saved policy.`
-          : ''
-      ]
-        .filter(Boolean)
-        .join(' ')
-    }
-  
-    const persistChapterProgress = (): Promise<void> => {
-      const operation = progressCheckpointTail.then(async () => {
-        chaptersSinceCheckpoint += 1
-        const now = Date.now()
-        const shouldCheckpoint =
-          chaptersSinceCheckpoint >= 25 || now - lastCheckpointAt >= 5000
-        await persistDownloadState(item, shouldCheckpoint)
-        if (shouldCheckpoint) {
-          chaptersSinceCheckpoint = 0
-          lastCheckpointAt = now
-        }
-      })
-      progressCheckpointTail = operation
-      return operation
-    }
-  
-    try {
-      if (selectedChapters.length === 0)
-        throw new Error('Select at least one chapter before queueing this EPUB.')
-      const processChapter = async (
-        index: number,
-        chapter: ChapterLink
-      ): Promise<void> => {
-        const active = activeDownloads.get(itemId)
-        if (
-          !active ||
-          active.requestedAction !== 'none' ||
-          controller.signal.aborted
-        )
-          return
-        let savedContent: ChapterContent | null = null
-        if (item.repackageOnly) {
-          item.progress = {
-            current: completedSelectedChapterCount,
-            total: selectedChapters.length,
-            message: `Validating saved chapter ${index + 1} of ${selectedChapters.length}: ${chapter.title}`
-          }
-          await persistDownloadState(item, false)
-          try {
-            savedContent = await readChapterArtifact(
-              dataDirectory(),
-              itemId,
-              chapter.url
-            )
-          } catch (error) {
-            await updateChapterState(
-              chapter,
-              index,
-              'InvalidArtifact',
-              { lastError: errorMessage(error), artifactRef: null }
-            )
-            if (!saveAvailableChaptersOnly) throw error
-            console.warn(
-              `Saved chapter artifact for ${chapter.url} will be omitted:`,
-              errorMessage(error)
-            )
-          }
-          if (!savedContent || savedContent.url !== chapter.url) {
-            const reason = `Saved chapter content is missing or invalid for "${chapter.title}".`
-            await updateChapterState(chapter, index, 'Skipped', {
-              lastError: reason,
-              artifactRef: null
-            })
-            if (!saveAvailableChaptersOnly) throw new Error(reason)
-            recordUnavailableChapter(chapter, reason)
-            item.progress = {
-              current: completedSelectedChapterCount,
-              total: selectedChapters.length,
-              message: `Skipped unavailable saved chapter: ${chapter.title}`
-            }
-            await persistChapterProgress()
-            return
-          }
-          await updateChapterState(chapter, index, 'Downloaded', {
-            artifactRef: chapterArtifactReference(itemId, chapter.url)
-          })
-          missingSelectedChapterUrls.delete(chapter.url)
-          item.failedChapters = item.failedChapters.filter(
-            (failed) => failed.url !== chapter.url
-          )
-          completedSelectedChapterCount += 1
-        } else {
-          try {
-            savedContent = await readChapterArtifact(
-              dataDirectory(),
-              itemId,
-              chapter.url
-            )
-            if (savedContent && savedContent.url !== chapter.url) {
-              console.warn(
-                `Saved chapter artifact for ${chapter.url} has a mismatched URL and will be fetched again.`
-              )
-              savedContent = null
-            }
-          } catch (error) {
-            await updateChapterState(
-              chapter,
-              index,
-              'InvalidArtifact',
-              { lastError: errorMessage(error), artifactRef: null }
-            )
-            console.warn(
-              `Saved chapter artifact for ${chapter.url} will be fetched again:`,
-              errorMessage(error)
-            )
-          }
-          if (savedContent) {
-            await updateChapterState(chapter, index, 'Downloaded', {
-              artifactRef: chapterArtifactReference(itemId, chapter.url)
-            })
-            completedSelectedChapterCount += 1
-            item.failedChapters = item.failedChapters.filter(
-              (failed) => failed.url !== chapter.url
-            )
-          }
-          if (!savedContent) {
-            const previousState = chapterStates.get(chapter.id)
-            if (previousState?.state === 'Downloaded') {
-              await updateChapterState(chapter, index, 'InvalidArtifact', {
-                lastError: `Saved chapter content is missing or invalid for "${chapter.title}".`,
-                artifactRef: null
-              })
-            }
-          }
-        }
-  
-        if (!savedContent) {
-          let lastError: unknown = new Error('Chapter could not be fetched.')
-          activeChapterRequests += 1
-          try {
-            item.progress = {
-              current: completedSelectedChapterCount,
-              total: selectedChapters.length,
-              message: `Fetching chapter ${index + 1} of ${selectedChapters.length} (${activeChapterRequests} active): ${chapter.title}`
-            }
-            await persistDownloadState(item, false)
-  
-            try {
-              savedContent = await withRetry(
-                () =>
-                  fetchChapterContentWithBrowserFallback(
-                    chapter,
-                    controller.signal
-                  ),
-                {
-                  attempts: retryAttempts,
-                  shouldRetry: canRetryChapter,
-                  signal: controller.signal,
-                  cancellationMessage: 'EPUB creation was cancelled.',
-                  onAttempt: async (attemptNumber) => {
-                    await updateChapterState(
-                      chapter,
-                      index,
-                      attemptNumber === 1 ? 'Downloading' : 'Retrying',
-                      {
-                        attemptCount:
-                          (chapterStates.get(chapter.id)?.attemptCount ?? 0) +
-                          1,
-                        lastHttpStatus: null,
-                        lastError: null,
-                        artifactRef: null
-                      }
-                    )
-                  }
-                }
-              )
-            } catch (error) {
-              if (controller.signal.aborted) {
-                await updateChapterState(chapter, index, 'Pending', {
-                  lastHttpStatus: null,
-                  lastError: null,
-                  artifactRef: null
-                })
-                return
-              }
-              lastError = error
-            }
-  
-            if (controller.signal.aborted) {
-              await updateChapterState(chapter, index, 'Pending', {
-                lastHttpStatus: null,
-                lastError: null,
-                artifactRef: null
-              })
-              return
-            }
-            if (lastError instanceof VerificationRequiredError) {
-              await updateChapterState(chapter, index, 'Failed', {
-                lastHttpStatus:
-                  lastError instanceof HttpStatusError
-                    ? lastError.status
-                    : null,
-                lastError: errorMessage(lastError),
-                artifactRef: null
-              })
-              item.failedChapters = [
-                {
-                  url: chapter.url,
-                  title: chapter.title,
-                  error: errorMessage(lastError)
-                },
-                ...item.failedChapters.filter(
-                  (failed) => failed.url !== chapter.url
-                )
-              ]
-              item.error = errorMessage(lastError)
-              const active = activeDownloads.get(itemId)
-              if (active?.requestedAction === 'none')
-                active.requestedAction = 'pause'
-              throw lastError
-            }
-            if (savedContent) {
-              await writeChapterArtifact(dataDirectory(), itemId, savedContent)
-              const artifact = await readChapterArtifactDescriptor(
-                dataDirectory(),
-                itemId,
-                chapter.url
-              )
-              if (!artifact || artifact.url !== chapter.url) {
-                throw new Error(
-                  `The saved chapter artifact could not be validated for "${chapter.title}".`
-                )
-              }
-              await updateChapterState(chapter, index, 'Downloaded', {
-                artifactRef: chapterArtifactReference(itemId, chapter.url),
-                lastHttpStatus: null,
-                lastError: null
-              })
-              completedSelectedChapterCount += 1
-              item.failedChapters = item.failedChapters.filter(
-                (failed) => failed.url !== chapter.url
-              )
-            } else {
-              const httpStatus =
-                lastError instanceof HttpStatusError
-                  ? lastError.status
-                  : null
-              const omitted404 =
-                httpStatus === 404 &&
-                options.omitHttp404Chapters === true
-              const issueMessage = omitted404
-                ? 'HTTP 404; omitted under the saved chapter policy.'
-                : errorMessage(lastError)
-              await updateChapterState(
-                chapter,
-                index,
-                omitted404 ? 'Skipped' : 'Failed',
-                {
-                  lastHttpStatus: httpStatus,
-                  lastError: issueMessage,
-                  artifactRef: null
-                }
-              )
-              item.failedChapters = [
-                ...item.failedChapters.filter(
-                  (failed) => failed.url !== chapter.url
-                ),
-                {
-                  url: chapter.url,
-                  title: chapter.title,
-                  error: issueMessage,
-                  ...(httpStatus === null ? {} : { httpStatus }),
-                  ...(omitted404 ? { omitted: true } : {})
-                }
-              ]
-              updateChapterIssueSummary()
-            }
-          } finally {
-            activeChapterRequests -= 1
-          }
-        }
-  
-        item.progress = {
-          current: completedSelectedChapterCount,
-          total: selectedChapters.length,
-          message: savedContent
-            ? item.repackageOnly
-              ? `Validated saved content for ${chapter.title}`
-              : `Fetched ${chapter.title}`
-            : `Failed ${chapter.title}`
-        }
-        await persistChapterProgress()
-      }
-  
-      let poolError: unknown
-      let poolFailed = false
-      try {
-        await runPool(
-          selectedChapters.length,
-          maxSimultaneousChapters,
-          async (index) => {
-            const active = activeDownloads.get(itemId)
-            const chapter = selectedChapters[index]
-            if (
-              !active ||
-              active.requestedAction !== 'none' ||
-              !chapter
-            ) return
-            try {
-              await processChapter(index, chapter)
-            } catch (error) {
-              controller.abort()
-              throw error
-            }
-          },
-          controller.signal,
-          'EPUB creation was cancelled.'
-        )
-      } catch (error) {
-        poolFailed = true
-        poolError = error
-      }
-      await progressCheckpointTail
-      if (poolFailed) throw poolError
-  
-      const requestedAction =
-        activeDownloads.get(itemId)?.requestedAction ?? 'cancel'
-      if (requestedAction === 'pause') {
-        transitionQueueItem(item, 'paused')
-        item.progress = {
-          ...(item.progress ?? {
-            current: 0,
-            total: selectedChapters.length,
-            message: ''
-          }),
-          message: 'Paused'
-        }
-        await persistDownloadState(item)
-        return
-      }
-      if (requestedAction === 'shutdown') {
-        transitionQueueItem(item, 'downloading')
-        item.progress = {
-          ...(item.progress ?? {
-            current: 0,
-            total: selectedChapters.length,
-            message: ''
-          }),
-          message: 'Interrupted; resuming after app restart'
-        }
-        await persistDownloadState(item)
-        return
-      }
-      if (requestedAction === 'cancel' || controller.signal.aborted) {
-        transitionQueueItem(item, 'cancelled')
-        item.progress = {
-          ...(item.progress ?? {
-            current: 0,
-            total: selectedChapters.length,
-            message: ''
-          }),
-          message: 'Cancelled'
-        }
-        await persistDownloadState(item)
-        return
-      }
-      if (item.failedChapters.length > 0 && !saveAvailableChaptersOnly) {
-        const finalStatus =
-          completedSelectedChapterCount > 0
-            ? 'partially-completed'
-            : 'failed'
-        transitionQueueItem(item, finalStatus)
-        updateChapterIssueSummary()
-        const omittedCount = item.failedChapters.filter(
-          (chapter) => chapter.omitted
-        ).length
-        const failedCount = item.failedChapters.length - omittedCount
-        item.progress = {
-          current: completedSelectedChapterCount,
-          total: selectedChapters.length,
-          message: [
-            failedCount > 0 ? `${failedCount} chapter(s) failed` : '',
-            omittedCount > 0 ? `${omittedCount} chapter(s) omitted` : ''
-          ]
-            .filter(Boolean)
-            .join(' · ')
-        }
-        await persistDownloadState(item)
-        return
-      }
-  
-      const chapters: Array<Pick<ChapterLink, 'title' | 'url'>> = []
-      for (const chapter of selectedChapters) {
-        let content: ChapterContent | null = null
-        let artifactError: Error | undefined
-        try {
-          content = await readChapterArtifact(
-            dataDirectory(),
-            itemId,
-            chapter.url
-          )
-        } catch (error) {
-          artifactError =
-            error instanceof Error ? error : new Error(String(error))
-        }
-        if (!content || content.url !== chapter.url) {
-          const reason = `Saved chapter content is missing or invalid for "${chapter.title}".`
-          if (!saveAvailableChaptersOnly) {
-            if (artifactError) throw artifactError
-            throw new Error(reason)
-          }
-          recordUnavailableChapter(chapter, reason)
-          continue
-        }
-        missingSelectedChapterUrls.delete(chapter.url)
-        chapters.push({ title: content.title, url: content.url })
-      }
-      if (chapters.length === 0) {
-        throw new Error(
-          'No valid saved chapter content is available to create an EPUB.'
-        )
-      }
-      let includeCover = false
-      if (options.coverUrl) {
-        if (item.repackageOnly) {
-          try {
-            includeCover = Boolean(
-              await readCoverArtifact(dataDirectory(), itemId)
-            )
-          } catch (error) {
-            if (!saveAvailableChaptersOnly) throw error
-            console.warn(
-              `Saved cover artifact for queue item ${itemId} will be omitted:`,
-              errorMessage(error)
-            )
-          }
-          if (!includeCover && !saveAvailableChaptersOnly) {
-            throw new Error(
-              'Saved cover content is missing; retry this EPUB online before repackaging.'
-            )
-          }
-        } else {
-          try {
-            includeCover = Boolean(
-              await readCoverArtifact(dataDirectory(), itemId)
-            )
-          } catch (error) {
-            console.warn(
-              `Saved cover artifact for queue item ${itemId} will be fetched again:`,
-              errorMessage(error)
-            )
-          }
-          if (!includeCover) {
-            item.progress = {
-              current: selectedChapters.length,
-              total: selectedChapters.length,
-              message: 'Fetching novel cover…'
-            }
-            await persistDownloadState(item)
-            try {
-              const fetchedCover = await withRetry(
-                async () => {
-                  const fetchedCover = await fetchImageResource(
-                    options.coverUrl,
-                    options.sourceUrl || item.sourceUrl,
-                    controller.signal
-                  )
-                  await writeCoverArtifact(dataDirectory(), itemId, fetchedCover)
-                  return fetchedCover
-                },
-                {
-                  attempts: retryAttempts,
-                  shouldRetry: canRetryChapter,
-                  signal: controller.signal,
-                  cancellationMessage: 'EPUB creation was cancelled.'
-                }
-              )
-              includeCover = Boolean(fetchedCover)
-            } catch (error) {
-              if (controller.signal.aborted) {
-                throw new OperationCancelledError('EPUB creation was cancelled.')
-              }
-              throw error
-            }
-          }
-        }
-      }
-      item.progress = {
-        current: chapters.length,
-        total: selectedChapters.length,
-        message: 'Validating and packaging EPUB…'
-      }
-      await persistDownloadState(item)
-      const omittedChapterCount = selectedChapters.length - chapters.length
-      const incompleteOutput =
-        saveAvailableChaptersOnly && omittedChapterCount > 0
-      let outputFilename = options.filename
-      if (incompleteOutput) {
-        const reservation = await reserveIncompleteEpubFilename(
-          item,
-          selectedChapters,
-          discoveryQueue,
-          reservedOutputPaths
-        )
-        outputFilename = reservation.filename
-        item.targetOutputPath = reservation.outputPath
-        releaseOutputReservation = reservation.release
-        await persistDownloadState(item)
-      } else {
-        const outputPath = expectedOutputPath(
-          options.outputDirectory,
-          options.title,
-          options.filename,
-          selectedChapters
-        )
-        assertOutputPathAvailable(discoveryQueue, outputPath, itemId)
-        item.targetOutputPath = outputPath
-        await persistDownloadState(item)
-      }
-      packagingStarted = true
-      const result = await packageEpub(
-        {
-          dataDirectory: dataDirectory(),
-          queueItemId: itemId,
-          chapters,
-          outputDirectory: options.outputDirectory,
-          title: options.title,
-          author: options.author,
-          language: options.language,
-          filename: outputFilename,
-          css: options.epubCss,
-          includeCover,
-          metadata: {
-            description: options.description,
-            alternativeNames: options.alternativeNames,
-            genres: options.genres,
-            source: options.source,
-            novelStatus: options.novelStatus,
-            sourceUrl: options.sourceUrl || item.sourceUrl
-          }
-        },
-        controller.signal,
-        (progress) => {
-          item.progress = {
-            current: chapters.length,
-            total: selectedChapters.length,
-            message: progress.message
-          }
-          notifyDiscoveryQueueChanged()
-        }
-      )
-      packagingStarted = false
-      outputPackaged = true
-      let libraryIndexWarning = ''
-      try {
-        const settings = await settingsService.get()
-        const inspection = await inspectPackagedEpubForLibrary(
-          result.outputPath,
-          settings.libraryRoot,
-          settings
-        )
-        if (inspection.file) {
-          await libraryIndexRepository.upsertFile(
-            inspection.file,
-            inspection.libraryRoot
-          )
-        } else {
-          libraryIndexWarning =
-            `EPUB saved, but not added to the library index because ${inspection.skippedReason}.`
-        }
-      } catch (error) {
-        libraryIndexWarning =
-          `EPUB saved, but could not be added to the library index: ${errorMessage(error)}`
-      }
-      const finalStatus = incompleteOutput
-        ? 'partially-completed'
-        : 'completed'
-      transitionQueueItem(item, finalStatus)
-      item.repackageOnly = false
-      item.saveAvailableChaptersOnly = false
-      item.outputPath = result.outputPath
-      item.targetOutputPath = result.outputPath.toLowerCase()
-      item.error = [
-        incompleteOutput
-          ? `${omittedChapterCount} selected chapter(s) were omitted. Retry to fetch them and create a complete EPUB.`
-          : '',
-        libraryIndexWarning
-      ]
-        .filter(Boolean)
-        .join(' ')
-      item.progress = {
-        current: chapters.length,
-        total: selectedChapters.length,
-        message: incompleteOutput
-          ? `Saved ${chapters.length} of ${selectedChapters.length} selected chapters (incomplete)`
-          : 'Completed'
-      }
-      item.failedChapters = incompleteOutput
-        ? item.failedChapters.filter((failed) =>
-            missingSelectedChapterUrls.has(failed.url)
-          )
-        : []
-      await persistDownloadState(item)
-      if (!incompleteOutput) {
-        await removeChapterArtifacts(dataDirectory(), itemId).catch(
-          (error: unknown) => {
-            console.warn(
-              `Completed chapter artifacts for queue item ${itemId} could not be removed:`,
-              errorMessage(error)
-            )
-          }
-        )
-      }
-    } catch (error) {
-      const requestedAction =
-        activeDownloads.get(itemId)?.requestedAction ?? 'none'
-      if (outputPackaged) {
-        console.error(
-          `EPUB job ${itemId} was packaged, but its final state could not be saved:`,
-          error
-        )
-      } else if (requestedAction === 'shutdown') {
-        transitionQueueItem(item, 'downloading')
-        item.error = ''
-        item.progress = {
-          current: completedSelectedChapterCount,
-          total: selectedChapters.length,
-          message: 'Interrupted; resuming after app restart'
-        }
-      } else if (requestedAction === 'pause' || requestedAction === 'cancel') {
-        const finalStatus = requestedAction === 'pause' ? 'paused' : 'cancelled'
-        transitionQueueItem(item, finalStatus)
-        item.error =
-          requestedAction === 'pause' &&
-          error instanceof VerificationRequiredError
-            ? errorMessage(error)
-            : ''
-      } else {
-        const packagingFailed =
-          packagingStarted &&
-          requestedAction === 'none' &&
-          !controller.signal.aborted
-        if (packagingFailed) {
-          transitionQueueItem(item, 'packaging-failed')
-          let freeBytes: number | null = null
-          try {
-            const filesystem = await statfs(options.outputDirectory)
-            freeBytes = filesystem.bavail * filesystem.bsize
-          } catch (diagnosticError) {
-            console.warn(
-              `Free space could not be read for packaging failure ${itemId}:`,
-              errorMessage(diagnosticError)
-            )
-          }
-          console.error('EPUB packaging failed after chapter processing.', {
-            itemId,
-            error: errorMessage(error),
-            stack:
-              error instanceof Error ? error.stack : String(error),
-            freeBytes,
-            paths: {
-              dataDirectory: dataDirectory(),
-              outputDirectory: options.outputDirectory,
-              targetOutputPath: item.targetOutputPath
-            },
-            options: {
-              ...options,
-              alternativeNames: [...options.alternativeNames],
-              genres: [...options.genres]
-            }
-          })
-        } else {
-          const finalStatus =
-            completedSelectedChapterCount > 0
-              ? 'partially-completed'
-              : 'failed'
-          transitionQueueItem(item, finalStatus)
-        }
-        item.error = errorMessage(error)
-        console.error(`Queued EPUB job ${itemId} failed:`, error)
-      }
-      if (requestedAction !== 'shutdown') {
-        item.progress = {
-          current: completedSelectedChapterCount,
-          total: selectedChapters.length,
-          message:
-            requestedAction === 'pause' &&
-            error instanceof VerificationRequiredError
-              ? 'Waiting for manual verification'
-              : item.status
-        }
-      }
-      try {
-        await persistDownloadState(item)
-      } catch (saveError) {
-        console.error(
-          `Queued EPUB job ${itemId} state could not be saved:`,
-          saveError
-        )
-      }
-    } finally {
-      releaseOutputReservation()
-    }
-    })
   }
-
   async function drainDownloadQueue(): Promise<void> {
     if (isShuttingDown()) return
     try {
@@ -1346,8 +497,7 @@ export function createQueueRuntime(
           )
           .sort(
             (left, right) =>
-              left.sequence - right.sequence ||
-              left.id.localeCompare(right.id)
+              left.sequence - right.sequence || left.id.localeCompare(right.id)
           )[0]
         if (!item) break
         const currentHead = discoveryQueue
@@ -1357,8 +507,7 @@ export function createQueueRuntime(
           )
           .sort(
             (left, right) =>
-              left.sequence - right.sequence ||
-              left.id.localeCompare(right.id)
+              left.sequence - right.sequence || left.id.localeCompare(right.id)
           )[0]
         if (item.status !== 'queued' || currentHead?.id !== item.id) continue
         if (
@@ -1410,7 +559,10 @@ export function createQueueRuntime(
           activeDownloads.delete(item.id)
           transitionQueueItem(item, 'failed')
           item.error = `The queued job could not be started: ${errorMessage(error)}`
-          console.error(`Queued EPUB job ${item.id} could not be started:`, error)
+          console.error(
+            `Queued EPUB job ${item.id} could not be started:`,
+            error
+          )
           await persistDiscoveryQueue().catch((saveError: unknown) => {
             console.error(
               `Queued EPUB job ${item.id} failure state could not be saved:`,

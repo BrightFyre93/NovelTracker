@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { readFile, rm, stat } from 'node:fs/promises'
+import { lstat, readFile, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import {
   DEFAULT_DISCOVERY_FRESHNESS_HOURS,
@@ -37,12 +37,12 @@ import { normalizeDomainRequestDelays } from '../../shared/domainRequestPreferen
 import { isNodeError } from '../../shared/errors'
 import { invalidateLibraryIndexSummary } from '../../shared/libraryIndexSummary'
 import { atomicWriteFile, renameWithRetry } from './atomicFile'
+import { chapterContentBlocksSchema } from '../../shared/chapterContentSchema'
 import type {
   AppSettings,
   ChapterImage,
   ChapterContent,
   ChapterContentBlock,
-  ChapterInlineNode,
   DiscoveryQueueItem,
   QueueChapter,
   DownloadHistoryEntry,
@@ -63,10 +63,12 @@ const EMPTY_SETTINGS: AppSettings = {
   httpResponseReadTimeoutMs: DEFAULT_HTTP_RESPONSE_READ_TIMEOUT_MS,
   maxSimultaneousDiscoveries: DEFAULT_MAX_SIMULTANEOUS_DISCOVERIES,
   maxSimultaneousChaptersPerNovel: DEFAULT_MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
-  domainRequestDelays: Object.entries(DOMAIN_REQUEST_DELAYS_MS).map(([hostname, delayMs]) => ({
-    hostname,
-    delayMs
-  })),
+  domainRequestDelays: Object.entries(DOMAIN_REQUEST_DELAYS_MS).map(
+    ([hostname, delayMs]) => ({
+      hostname,
+      delayMs
+    })
+  ),
   discoveryFreshnessHours: DEFAULT_DISCOVERY_FRESHNESS_HOURS,
   siteExtractionPreferences: [],
   epubCss: DEFAULT_EPUB_CSS,
@@ -108,28 +110,36 @@ function isJsonArray(value: unknown): value is unknown[] {
   return Array.isArray(value)
 }
 
-function isDownloadHistoryArray(value: unknown): value is DownloadHistoryEntry[] {
+function isDownloadHistoryArray(
+  value: unknown
+): value is DownloadHistoryEntry[] {
   return (
     Array.isArray(value) &&
-    value.every((entry) =>
-      isRecord(entry) &&
-      typeof entry.id === 'string' &&
-      typeof entry.title === 'string' &&
-      typeof entry.status === 'string'
+    value.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.id === 'string' &&
+        typeof entry.title === 'string' &&
+        typeof entry.status === 'string'
     )
   )
 }
 
-export function isDiscoveryQueueArray(value: unknown): value is DiscoveryQueueItem[] {
+export function isDiscoveryQueueArray(
+  value: unknown
+): value is DiscoveryQueueItem[] {
   return (
     Array.isArray(value) &&
-    value.every((item) =>
-      isRecord(item) &&
-      typeof item.id === 'string' &&
-      typeof item.title === 'string' &&
-      (item.recoveryReason === undefined || item.recoveryReason === 'missing-history') &&
-      (item.chapterSummary === undefined || isRecord(item.chapterSummary)) &&
-      (item.chapters === undefined || (Array.isArray(item.chapters) && item.chapters.every(isRecord)))
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.id === 'string' &&
+        typeof item.title === 'string' &&
+        (item.recoveryReason === undefined ||
+          item.recoveryReason === 'missing-history') &&
+        (item.chapterSummary === undefined || isRecord(item.chapterSummary)) &&
+        (item.chapters === undefined ||
+          (Array.isArray(item.chapters) && item.chapters.every(isRecord)))
     )
   )
 }
@@ -194,18 +204,29 @@ async function writeJson(path: string, value: unknown): Promise<void> {
     release()
     if (fileWriteTails.get(targetPath) === tail) {
       void tail.then(() => {
-        if (fileWriteTails.get(targetPath) === tail) fileWriteTails.delete(targetPath)
+        if (fileWriteTails.get(targetPath) === tail)
+          fileWriteTails.delete(targetPath)
       })
     }
   }
 }
 
-export async function readSettings(dataDirectory: string): Promise<AppSettings> {
-  const saved = await readJsonWithQuarantine(join(dataDirectory, 'settings.json'), {}, isRecord)
+export async function readSettings(
+  dataDirectory: string
+): Promise<AppSettings> {
+  const saved = await readJsonWithQuarantine(
+    join(dataDirectory, 'settings.json'),
+    {},
+    isRecord
+  )
   const defaults: AppSettings = {
     ...EMPTY_SETTINGS,
-    domainRequestDelays: EMPTY_SETTINGS.domainRequestDelays.map((preference) => ({ ...preference })),
-    siteExtractionPreferences: EMPTY_SETTINGS.siteExtractionPreferences.map((preference) => ({ ...preference }))
+    domainRequestDelays: EMPTY_SETTINGS.domainRequestDelays.map(
+      (preference) => ({ ...preference })
+    ),
+    siteExtractionPreferences: EMPTY_SETTINGS.siteExtractionPreferences.map(
+      (preference) => ({ ...preference })
+    )
   }
   const warnings: string[] = []
   const setting = <T>(
@@ -217,7 +238,9 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
     if (!Object.prototype.hasOwnProperty.call(saved, key)) return fallback
     const value = saved[key]
     if (isValid(value)) return value
-    warnings.push(`The saved ${label} was invalid and has been reset to its default.`)
+    warnings.push(
+      `The saved ${label} was invalid and has been reset to its default.`
+    )
     return fallback
   }
   const normalizedSetting = <T>(
@@ -231,18 +254,45 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       return normalize(saved[key])
     } catch (error) {
       if (!(error instanceof Error)) throw error
-      warnings.push(`The saved ${label} was invalid and has been reset to its default.`)
+      warnings.push(
+        `The saved ${label} was invalid and has been reset to its default.`
+      )
       return fallback
     }
   }
-  const integerBetween = (minimum: number, maximum: number) => (value: unknown): value is number =>
-    typeof value === 'number' && Number.isInteger(value) && value >= minimum && value <= maximum
+  const integerBetween =
+    (minimum: number, maximum: number) =>
+    (value: unknown): value is number =>
+      typeof value === 'number' &&
+      Number.isInteger(value) &&
+      value >= minimum &&
+      value <= maximum
 
   const settings: AppSettings = {
-    libraryRoot: setting('libraryRoot', 'library folder', defaults.libraryRoot, (value): value is string => typeof value === 'string'),
-    trackerCsvPath: setting('trackerCsvPath', 'tracker CSV path', defaults.trackerCsvPath, (value): value is string => typeof value === 'string'),
-    outputDirectory: setting('outputDirectory', 'EPUB output folder', defaults.outputDirectory, (value): value is string => typeof value === 'string'),
-    scanOldFolder: setting('scanOldFolder', 'Old-folder scan option', defaults.scanOldFolder, (value): value is boolean => typeof value === 'boolean'),
+    libraryRoot: setting(
+      'libraryRoot',
+      'library folder',
+      defaults.libraryRoot,
+      (value): value is string => typeof value === 'string'
+    ),
+    trackerCsvPath: setting(
+      'trackerCsvPath',
+      'tracker CSV path',
+      defaults.trackerCsvPath,
+      (value): value is string => typeof value === 'string'
+    ),
+    outputDirectory: setting(
+      'outputDirectory',
+      'EPUB output folder',
+      defaults.outputDirectory,
+      (value): value is string => typeof value === 'string'
+    ),
+    scanOldFolder: setting(
+      'scanOldFolder',
+      'Old-folder scan option',
+      defaults.scanOldFolder,
+      (value): value is boolean => typeof value === 'boolean'
+    ),
     scanOldCompletedFolder: setting(
       'scanOldCompletedFolder',
       'Old Completed-folder scan option',
@@ -277,7 +327,10 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       'httpResponseReadTimeoutMs',
       'HTTP response timeout',
       defaults.httpResponseReadTimeoutMs,
-      integerBetween(MIN_HTTP_RESPONSE_READ_TIMEOUT_MS, MAX_HTTP_RESPONSE_READ_TIMEOUT_MS)
+      integerBetween(
+        MIN_HTTP_RESPONSE_READ_TIMEOUT_MS,
+        MAX_HTTP_RESPONSE_READ_TIMEOUT_MS
+      )
     ),
     maxSimultaneousDiscoveries: setting(
       'maxSimultaneousDiscoveries',
@@ -289,7 +342,10 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       'maxSimultaneousChaptersPerNovel',
       'per-novel chapter concurrency',
       defaults.maxSimultaneousChaptersPerNovel,
-      integerBetween(MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL, MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL)
+      integerBetween(
+        MIN_SIMULTANEOUS_CHAPTERS_PER_NOVEL,
+        MAX_SIMULTANEOUS_CHAPTERS_PER_NOVEL
+      )
     ),
     domainRequestDelays: normalizedSetting(
       'domainRequestDelays',
@@ -301,7 +357,10 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       'discoveryFreshnessHours',
       'discovery freshness window',
       defaults.discoveryFreshnessHours,
-      integerBetween(MIN_DISCOVERY_FRESHNESS_HOURS, MAX_DISCOVERY_FRESHNESS_HOURS)
+      integerBetween(
+        MIN_DISCOVERY_FRESHNESS_HOURS,
+        MAX_DISCOVERY_FRESHNESS_HOURS
+      )
     ),
     siteExtractionPreferences: normalizedSetting(
       'siteExtractionPreferences',
@@ -313,13 +372,15 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       'epubCss',
       'EPUB stylesheet',
       DEFAULT_EPUB_CSS,
-      (value): value is string => typeof value === 'string' && value.length <= MAX_EPUB_CSS_LENGTH
+      (value): value is string =>
+        typeof value === 'string' && value.length <= MAX_EPUB_CSS_LENGTH
     ),
     appTheme: setting(
       'appTheme',
       'app theme',
       defaults.appTheme,
-      (value): value is AppSettings['appTheme'] => value === 'light' || value === 'dark'
+      (value): value is AppSettings['appTheme'] =>
+        value === 'light' || value === 'dark'
     )
   }
   for (const warning of warnings) recordStorageRecoveryWarning(warning)
@@ -335,7 +396,10 @@ export async function migrateSettings(dataDirectory: string): Promise<void> {
   await writeJson(settingsPath, migrated)
 }
 
-export function writeSettings(dataDirectory: string, settings: AppSettings): Promise<void> {
+export function writeSettings(
+  dataDirectory: string,
+  settings: AppSettings
+): Promise<void> {
   return writeJson(join(dataDirectory, 'settings.json'), settings)
 }
 
@@ -366,7 +430,9 @@ function supportedEbookIndex(index: LibraryIndex | null): LibraryIndex | null {
   return { ...index, files }
 }
 
-export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIndex | null> {
+export async function readLibraryIndex(
+  dataDirectory: string
+): Promise<LibraryIndex | null> {
   const path = join(dataDirectory, 'library-index.json')
   let details
   try {
@@ -385,7 +451,9 @@ export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIn
     return libraryIndexCache.index
   }
 
-  const index = supportedEbookIndex(await readJson<LibraryIndex | null>(path, null))
+  const index = supportedEbookIndex(
+    await readJson<LibraryIndex | null>(path, null)
+  )
   libraryIndexCache = {
     path,
     size: details.size,
@@ -396,11 +464,20 @@ export async function readLibraryIndex(dataDirectory: string): Promise<LibraryIn
   return index
 }
 
-export async function readLibraryIndexBackup(dataDirectory: string): Promise<LibraryIndex | null> {
-  return supportedEbookIndex(await readJson<LibraryIndex | null>(join(dataDirectory, 'library-index.backup.json'), null))
+export async function readLibraryIndexBackup(
+  dataDirectory: string
+): Promise<LibraryIndex | null> {
+  return supportedEbookIndex(
+    await readJson<LibraryIndex | null>(
+      join(dataDirectory, 'library-index.backup.json'),
+      null
+    )
+  )
 }
 
-export async function readLibraryIndexBackupDate(dataDirectory: string): Promise<string | null> {
+export async function readLibraryIndexBackupDate(
+  dataDirectory: string
+): Promise<string | null> {
   try {
     const details = await stat(join(dataDirectory, 'library-index.backup.json'))
     return details.isFile() ? details.mtime.toISOString() : null
@@ -424,12 +501,17 @@ export async function writeLibraryIndex(
       backupCandidate = await readJson<LibraryIndex | null>(indexPath, null)
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error
-      console.warn('The existing library index is corrupt; replacing it without creating a backup.')
+      console.warn(
+        'The existing library index is corrupt; replacing it without creating a backup.'
+      )
       backupCandidate = null
     }
   }
   if (backupCandidate) {
-    await writeJson(join(dataDirectory, 'library-index.backup.json'), backupCandidate)
+    await writeJson(
+      join(dataDirectory, 'library-index.backup.json'),
+      backupCandidate
+    )
   }
   await writeJson(indexPath, index)
   const details = await stat(indexPath)
@@ -472,13 +554,17 @@ function isLibraryOperation(value: unknown): value is LibraryOperation {
   return (
     typeof operation.id === 'string' &&
     ['merge-epubs', 'repair-epub'].includes(operation.kind ?? '') &&
-    ['running', 'completed', 'failed', 'interrupted'].includes(operation.status ?? '') &&
+    ['running', 'completed', 'failed', 'interrupted'].includes(
+      operation.status ?? ''
+    ) &&
     Array.isArray(operation.inputFiles) &&
     operation.inputFiles.every((path) => typeof path === 'string') &&
     typeof operation.outputPath === 'string' &&
     (operation.progress === null ||
-      (typeof operation.progress === 'number' && Number.isFinite(operation.progress) &&
-        operation.progress >= 0 && operation.progress <= 100)) &&
+      (typeof operation.progress === 'number' &&
+        Number.isFinite(operation.progress) &&
+        operation.progress >= 0 &&
+        operation.progress <= 100)) &&
     typeof operation.message === 'string' &&
     typeof operation.error === 'string' &&
     typeof operation.startedAt === 'string' &&
@@ -487,13 +573,22 @@ function isLibraryOperation(value: unknown): value is LibraryOperation {
 }
 
 function isLegacyConversionOperation(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null || !('kind' in value)) return false
+  if (typeof value !== 'object' || value === null || !('kind' in value))
+    return false
   return value.kind === 'epub-to-azw3' || value.kind === 'azw3-to-epub'
 }
 
-export async function readLibraryOperations(dataDirectory: string): Promise<LibraryOperation[]> {
-  const saved = await readJsonWithQuarantine(join(dataDirectory, 'library-operations.json'), [], isJsonArray)
-  const nonLegacySaved = saved.filter((operation) => !isLegacyConversionOperation(operation))
+export async function readLibraryOperations(
+  dataDirectory: string
+): Promise<LibraryOperation[]> {
+  const saved = await readJsonWithQuarantine(
+    join(dataDirectory, 'library-operations.json'),
+    [],
+    isJsonArray
+  )
+  const nonLegacySaved = saved.filter(
+    (operation) => !isLegacyConversionOperation(operation)
+  )
   const operations = nonLegacySaved.filter(isLibraryOperation)
   if (operations.length !== nonLegacySaved.length) {
     console.warn('Invalid entries in library operation history were ignored.')
@@ -501,21 +596,41 @@ export async function readLibraryOperations(dataDirectory: string): Promise<Libr
   return operations.slice(0, 30)
 }
 
-export function writeLibraryOperations(dataDirectory: string, operations: LibraryOperation[]): Promise<void> {
-  return writeJson(join(dataDirectory, 'library-operations.json'), operations.slice(0, 30))
+export function writeLibraryOperations(
+  dataDirectory: string,
+  operations: LibraryOperation[]
+): Promise<void> {
+  return writeJson(
+    join(dataDirectory, 'library-operations.json'),
+    operations.slice(0, 30)
+  )
 }
 
-function serializeDownloadHistoryWrite<T>(operation: () => Promise<T>): Promise<T> {
+function serializeDownloadHistoryWrite<T>(
+  operation: () => Promise<T>
+): Promise<T> {
   const result = downloadHistoryWriteTail.then(operation)
-  downloadHistoryWriteTail = result.then(() => undefined, () => undefined)
+  downloadHistoryWriteTail = result.then(
+    () => undefined,
+    () => undefined
+  )
   return result
 }
 
-export async function readDiscoveryQueue(dataDirectory: string): Promise<DiscoveryQueueItem[]> {
-  return readJsonWithQuarantine(join(dataDirectory, 'discovery-queue.json'), [], isDiscoveryQueueArray)
+export async function readDiscoveryQueue(
+  dataDirectory: string
+): Promise<DiscoveryQueueItem[]> {
+  return readJsonWithQuarantine(
+    join(dataDirectory, 'discovery-queue.json'),
+    [],
+    isDiscoveryQueueArray
+  )
 }
 
-export function writeDiscoveryQueue(dataDirectory: string, items: DiscoveryQueueItem[]): Promise<void> {
+export function writeDiscoveryQueue(
+  dataDirectory: string,
+  items: DiscoveryQueueItem[]
+): Promise<void> {
   return writeJson(join(dataDirectory, 'discovery-queue.json'), items)
 }
 
@@ -523,16 +638,28 @@ export function discoveryQueueChaptersPath(
   dataDirectory: string,
   queueItemId: string
 ): string {
-  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
-  return join(dataDirectory, 'download-artifacts', queueItemId, 'queue-chapters.json')
+  if (!/^[\da-f-]{36}$/i.test(queueItemId))
+    throw new Error('Invalid download queue identifier.')
+  return join(
+    dataDirectory,
+    'download-artifacts',
+    queueItemId,
+    'queue-chapters.json'
+  )
 }
 
 export function discoveryQueueSelectionPath(
   dataDirectory: string,
   queueItemId: string
 ): string {
-  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
-  return join(dataDirectory, 'download-artifacts', queueItemId, 'queue-selection.json')
+  if (!/^[\da-f-]{36}$/i.test(queueItemId))
+    throw new Error('Invalid download queue identifier.')
+  return join(
+    dataDirectory,
+    'download-artifacts',
+    queueItemId,
+    'queue-selection.json'
+  )
 }
 
 export async function readDiscoveryQueueItemChapters(
@@ -548,15 +675,16 @@ export async function readDiscoveryQueueItemChapters(
   if (!chapters) return null
 
   const savedSelection = await readJson<string[] | null>(selectionPath, null)
-  if (savedSelection !== null && (
-    !Array.isArray(savedSelection) ||
-    savedSelection.some((id) => typeof id !== 'string')
-  )) {
+  if (
+    savedSelection !== null &&
+    (!Array.isArray(savedSelection) ||
+      savedSelection.some((id) => typeof id !== 'string'))
+  ) {
     throw new Error('The saved queue chapter selection is invalid.')
   }
-  const selectedIds = savedSelection ?? chapters
-    .filter((chapter) => chapter.selected)
-    .map((chapter) => chapter.id)
+  const selectedIds =
+    savedSelection ??
+    chapters.filter((chapter) => chapter.selected).map((chapter) => chapter.id)
   if (savedSelection === null) {
     await writeJson(selectionPath, selectedIds)
     await writeJson(
@@ -579,10 +707,18 @@ export function writeDiscoveryQueueItemChapters(
   const selectedIds = chapters
     .filter((chapter) => chapter.selected)
     .map((chapter) => chapter.id)
-  const chapterData = chapters.map(({ selected: _selected, ...chapter }) => chapter)
+  const chapterData = chapters.map(
+    ({ selected: _selected, ...chapter }) => chapter
+  )
   return Promise.all([
-    writeJson(discoveryQueueChaptersPath(dataDirectory, queueItemId), chapterData),
-    writeJson(discoveryQueueSelectionPath(dataDirectory, queueItemId), selectedIds)
+    writeJson(
+      discoveryQueueChaptersPath(dataDirectory, queueItemId),
+      chapterData
+    ),
+    writeJson(
+      discoveryQueueSelectionPath(dataDirectory, queueItemId),
+      selectedIds
+    )
   ]).then(() => undefined)
 }
 
@@ -591,14 +727,18 @@ export function writeDiscoveryQueueItemSelection(
   queueItemId: string,
   selectedChapterIds: string[]
 ): Promise<void> {
-  return writeJson(
-    discoveryQueueSelectionPath(dataDirectory, queueItemId),
-    [...new Set(selectedChapterIds)]
-  )
+  return writeJson(discoveryQueueSelectionPath(dataDirectory, queueItemId), [
+    ...new Set(selectedChapterIds)
+  ])
 }
 
-function chapterArtifactPath(dataDirectory: string, queueItemId: string, chapterUrl: string): string {
-  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+function chapterArtifactPath(
+  dataDirectory: string,
+  queueItemId: string,
+  chapterUrl: string
+): string {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId))
+    throw new Error('Invalid download queue identifier.')
   const filename = `${createHash('sha256').update(chapterUrl).digest('hex')}.json`
   return join(dataDirectory, 'download-artifacts', queueItemId, filename)
 }
@@ -610,16 +750,34 @@ export function chapterArtifactReference(
   return chapterArtifactPath('', queueItemId, chapterUrl)
 }
 
+export async function chapterArtifactFileExists(
+  dataDirectory: string,
+  queueItemId: string,
+  chapterUrl: string
+): Promise<boolean> {
+  try {
+    const details = await lstat(
+      chapterArtifactPath(dataDirectory, queueItemId, chapterUrl)
+    )
+    return details.isFile() && !details.isSymbolicLink()
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return false
+    throw error
+  }
+}
+
 function chapterImageArtifactPath(
   chapterPath: string,
   imageHash: string
 ): string {
-  if (!/^[\da-f]{64}$/i.test(imageHash)) throw new Error('Invalid chapter image identifier.')
+  if (!/^[\da-f]{64}$/i.test(imageHash))
+    throw new Error('Invalid chapter image identifier.')
   return join(`${chapterPath}.images`, `image-${imageHash}.bin`)
 }
 
 function coverArtifactPath(dataDirectory: string, queueItemId: string): string {
-  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
+  if (!/^[\da-f-]{36}$/i.test(queueItemId))
+    throw new Error('Invalid download queue identifier.')
   return join(dataDirectory, 'download-artifacts', queueItemId, 'cover.json')
 }
 
@@ -638,7 +796,10 @@ interface StoredChapterArtifactV2 {
   images: StoredChapterImage[]
 }
 
-export interface ChapterArtifactImageFile extends Omit<StoredChapterImage, 'sha256'> {
+export interface ChapterArtifactImageFile extends Omit<
+  StoredChapterImage,
+  'sha256'
+> {
   path: string
   sha256: string
 }
@@ -651,77 +812,18 @@ export interface ChapterArtifactDescriptor {
   images: ChapterArtifactImageFile[]
 }
 
+export class ArtifactValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ArtifactValidationError'
+  }
+}
+
 function isValidChapterBlocks(
   value: unknown,
   imageCount: number
 ): value is ChapterContentBlock[] {
-  if (!Array.isArray(value)) return false
-  return value.every(
-    (block) => {
-      if (!isRecord(block)) return false
-      const inlineIsValid =
-        block.inline === undefined || isValidChapterInlineNodes(block.inline)
-      if (block.type === 'paragraph' || block.type === 'blockquote') {
-        return typeof block.text === 'string' && inlineIsValid
-      }
-      if (block.type === 'heading') {
-        return (
-          (block.level === 2 || block.level === 3 || block.level === 4) &&
-          typeof block.text === 'string' &&
-          inlineIsValid
-        )
-      }
-      if (block.type === 'list') {
-        return (
-          typeof block.ordered === 'boolean' &&
-          Array.isArray(block.items) &&
-          block.items.every(
-            (item) =>
-              isRecord(item) &&
-              typeof item.text === 'string' &&
-              (item.inline === undefined || isValidChapterInlineNodes(item.inline))
-          )
-        )
-      }
-      if (block.type === 'scene-break') return true
-      return (
-        block.type === 'image' &&
-        typeof block.imageIndex === 'number' &&
-        Number.isInteger(block.imageIndex) &&
-        block.imageIndex >= 0 &&
-        block.imageIndex < imageCount &&
-        typeof block.alt === 'string' &&
-        block.alt.length <= 1000
-      )
-    }
-  )
-}
-
-function isValidChapterInlineNodes(
-  value: unknown,
-  depth = 0
-): value is ChapterInlineNode[] {
-  if (!Array.isArray(value) || depth > 32) return false
-  return value.every((node) => {
-    if (!isRecord(node)) return false
-    if (node.type === 'text') return typeof node.text === 'string'
-    if (node.type === 'break') return true
-    if (node.type === 'emphasis' || node.type === 'strong') {
-      return isValidChapterInlineNodes(node.children, depth + 1)
-    }
-    if (node.type !== 'link' || typeof node.href !== 'string') return false
-    try {
-      const url = new URL(node.href)
-      return (
-        (url.protocol === 'http:' || url.protocol === 'https:') &&
-        !url.username &&
-        !url.password &&
-        isValidChapterInlineNodes(node.children, depth + 1)
-      )
-    } catch {
-      return false
-    }
-  })
+  return chapterContentBlocksSchema(imageCount).safeParse(value).success
 }
 
 function chapterBlockText(block: ChapterContentBlock): string[] {
@@ -729,7 +831,8 @@ function chapterBlockText(block: ChapterContentBlock): string[] {
     block.type === 'paragraph' ||
     block.type === 'heading' ||
     block.type === 'blockquote'
-  ) return [block.text]
+  )
+    return [block.text]
   if (block.type === 'list') return block.items.map((item) => item.text)
   return []
 }
@@ -775,8 +878,11 @@ function isValidChapterImage(value: unknown): value is ChapterImage {
     typeof value.sourceUrl !== 'string' ||
     !isEpubImageMediaType(value.mediaType) ||
     typeof value.dataBase64 !== 'string' ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.dataBase64)
-  ) return false
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      value.dataBase64
+    )
+  )
+    return false
   let source: URL
   try {
     source = new URL(value.sourceUrl)
@@ -821,7 +927,8 @@ export async function readChapterArtifact(
           !isEpubImageMediaType(image.mediaType) ||
           typeof image.sha256 !== 'string' ||
           !/^[\da-f]{64}$/i.test(image.sha256)
-        ) return false
+        )
+          return false
         try {
           const source = new URL(image.sourceUrl)
           return (
@@ -846,7 +953,9 @@ export async function readChapterArtifact(
       images?.length ?? 0
     )
     if (!validImageMetadata || !validContent || !hasContent) {
-      throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact is invalid and must be fetched again.'
+      )
     }
 
     let totalImageBytes = 0
@@ -860,7 +969,7 @@ export async function readChapterArtifact(
         totalImageBytes > MAX_CHAPTER_IMAGE_BYTES ||
         createHash('sha256').update(data).digest('hex') !== image.sha256
       ) {
-        throw new Error(
+        throw new ArtifactValidationError(
           'A saved chapter artifact contains invalid image data and must be fetched again.'
         )
       }
@@ -891,28 +1000,38 @@ export async function readChapterArtifact(
     typeof legacyArtifact.title !== 'string' ||
     typeof legacyArtifact.url !== 'string' ||
     !Array.isArray(legacyArtifact.paragraphs) ||
-    legacyArtifact.paragraphs.some((paragraph) => typeof paragraph !== 'string') ||
+    legacyArtifact.paragraphs.some(
+      (paragraph) => typeof paragraph !== 'string'
+    ) ||
     !Array.isArray(legacyImages) ||
     legacyImages.length > MAX_CHAPTER_IMAGES
   ) {
-    throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+    throw new ArtifactValidationError(
+      'A saved chapter artifact is invalid and must be fetched again.'
+    )
   }
   let totalImageBytes = 0
   for (const image of legacyImages) {
     if (!isValidChapterImage(image)) {
-      throw new Error('A saved chapter artifact contains invalid image data and must be fetched again.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact contains invalid image data and must be fetched again.'
+      )
     }
     const imageBytes = Buffer.byteLength(image.dataBase64, 'base64')
     totalImageBytes += imageBytes
     if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
-      throw new Error('A saved chapter artifact exceeds its image size limit and must be fetched again.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact exceeds its image size limit and must be fetched again.'
+      )
     }
   }
   if (
     legacyArtifact.blocks !== undefined &&
     !isValidChapterBlocks(legacyArtifact.blocks, legacyImages.length)
   ) {
-    throw new Error('A saved chapter artifact has invalid content blocks and must be fetched again.')
+    throw new ArtifactValidationError(
+      'A saved chapter artifact has invalid content blocks and must be fetched again.'
+    )
   }
   if (
     !hasReadableChapterContent(
@@ -921,7 +1040,9 @@ export async function readChapterArtifact(
       legacyImages.length
     )
   ) {
-    throw new Error('A saved chapter artifact contains no readable content.')
+    throw new ArtifactValidationError(
+      'A saved chapter artifact contains no readable content.'
+    )
   }
   return legacyArtifact
 }
@@ -929,7 +1050,8 @@ export async function readChapterArtifact(
 export async function readChapterArtifactDescriptor(
   dataDirectory: string,
   queueItemId: string,
-  chapterUrl: string
+  chapterUrl: string,
+  options: { verifyImages?: boolean } = {}
 ): Promise<ChapterArtifactDescriptor | null> {
   const path = chapterArtifactPath(dataDirectory, queueItemId, chapterUrl)
   const stored = await readJson<unknown>(path, null)
@@ -939,16 +1061,30 @@ export async function readChapterArtifactDescriptor(
     stored.artifactVersion !== 2 ||
     !Array.isArray(stored.images)
   ) {
-    const legacy = await readChapterArtifact(dataDirectory, queueItemId, chapterUrl)
+    const legacy = await readChapterArtifact(
+      dataDirectory,
+      queueItemId,
+      chapterUrl
+    )
     if (!legacy) return null
     await writeChapterArtifact(dataDirectory, queueItemId, legacy)
-    return readChapterArtifactDescriptor(dataDirectory, queueItemId, chapterUrl)
+    return readChapterArtifactDescriptor(
+      dataDirectory,
+      queueItemId,
+      chapterUrl,
+      options
+    )
   }
 
   const artifact = stored as Partial<StoredChapterArtifactV2>
   const artifactImages = artifact.images
-  if (!Array.isArray(artifactImages) || artifactImages.length > MAX_CHAPTER_IMAGES) {
-    throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+  if (
+    !Array.isArray(artifactImages) ||
+    artifactImages.length > MAX_CHAPTER_IMAGES
+  ) {
+    throw new ArtifactValidationError(
+      'A saved chapter artifact is invalid and must be fetched again.'
+    )
   }
   if (
     typeof artifact.title !== 'string' ||
@@ -958,7 +1094,9 @@ export async function readChapterArtifactDescriptor(
       : !Array.isArray(artifact.paragraphs) ||
         artifact.paragraphs.some((paragraph) => typeof paragraph !== 'string'))
   ) {
-    throw new Error('A saved chapter artifact is invalid and must be fetched again.')
+    throw new ArtifactValidationError(
+      'A saved chapter artifact is invalid and must be fetched again.'
+    )
   }
   if (
     !hasReadableChapterContent(
@@ -967,14 +1105,18 @@ export async function readChapterArtifactDescriptor(
       artifactImages.length
     )
   ) {
-    throw new Error('A saved chapter artifact contains no readable content.')
+    throw new ArtifactValidationError(
+      'A saved chapter artifact contains no readable content.'
+    )
   }
 
   const images: ChapterArtifactImageFile[] = []
   let totalImageBytes = 0
   for (const value of artifactImages as unknown[]) {
     if (!isRecord(value)) {
-      throw new Error('A saved chapter artifact contains invalid image metadata.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact contains invalid image metadata.'
+      )
     }
     const sourceUrl = value.sourceUrl
     const mediaType = value.mediaType
@@ -985,20 +1127,26 @@ export async function readChapterArtifactDescriptor(
       typeof sha256 !== 'string' ||
       !/^[\da-f]{64}$/i.test(sha256)
     ) {
-      throw new Error('A saved chapter artifact contains invalid image metadata.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact contains invalid image metadata.'
+      )
     }
     let source: URL
     try {
       source = new URL(sourceUrl)
     } catch {
-      throw new Error('A saved chapter artifact contains invalid image metadata.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact contains invalid image metadata.'
+      )
     }
     if (
       (source.protocol !== 'http:' && source.protocol !== 'https:') ||
       source.username ||
       source.password
     ) {
-      throw new Error('A saved chapter artifact contains invalid image metadata.')
+      throw new ArtifactValidationError(
+        'A saved chapter artifact contains invalid image metadata.'
+      )
     }
 
     const imagePath = chapterImageArtifactPath(path, sha256)
@@ -1009,20 +1157,26 @@ export async function readChapterArtifactDescriptor(
       details.size > MAX_IMAGE_BYTES ||
       totalImageBytes > MAX_CHAPTER_IMAGE_BYTES
     ) {
-      throw new Error('A saved chapter artifact exceeds its image size limit.')
-    }
-    const hash = createHash('sha256')
-    for await (const value of createReadStream(imagePath)) {
-      const chunk: unknown = value
-      if (!Buffer.isBuffer(chunk)) {
-        throw new Error('A saved chapter artifact contains invalid image data.')
-      }
-      hash.update(chunk)
-    }
-    if (hash.digest('hex') !== sha256) {
-      throw new Error(
-        'A saved chapter artifact contains invalid image data and must be fetched again.'
+      throw new ArtifactValidationError(
+        'A saved chapter artifact exceeds its image size limit.'
       )
+    }
+    if (options.verifyImages !== false) {
+      const hash = createHash('sha256')
+      for await (const value of createReadStream(imagePath)) {
+        const chunk: unknown = value
+        if (!Buffer.isBuffer(chunk)) {
+          throw new ArtifactValidationError(
+            'A saved chapter artifact contains invalid image data.'
+          )
+        }
+        hash.update(chunk)
+      }
+      if (hash.digest('hex') !== sha256) {
+        throw new ArtifactValidationError(
+          'A saved chapter artifact contains invalid image data and must be fetched again.'
+        )
+      }
     }
     images.push({
       sourceUrl,
@@ -1041,10 +1195,18 @@ export async function readChapterArtifactDescriptor(
   }
 }
 
-export async function readCoverArtifact(dataDirectory: string, queueItemId: string): Promise<ChapterImage | null> {
-  const cover = await readJson<ChapterImage | null>(coverArtifactPath(dataDirectory, queueItemId), null)
+export async function readCoverArtifact(
+  dataDirectory: string,
+  queueItemId: string
+): Promise<ChapterImage | null> {
+  const cover = await readJson<ChapterImage | null>(
+    coverArtifactPath(dataDirectory, queueItemId),
+    null
+  )
   if (cover !== null && !isValidChapterImage(cover)) {
-    throw new Error('The saved cover artifact is invalid and must be fetched again.')
+    throw new Error(
+      'The saved cover artifact is invalid and must be fetched again.'
+    )
   }
   return cover
 }
@@ -1054,7 +1216,10 @@ export function writeCoverArtifact(
   queueItemId: string,
   cover: ChapterImage
 ): Promise<void> {
-  if (!isValidChapterImage(cover)) throw new Error('The cover image cannot be saved because its data is invalid.')
+  if (!isValidChapterImage(cover))
+    throw new Error(
+      'The cover image cannot be saved because its data is invalid.'
+    )
   return writeJson(coverArtifactPath(dataDirectory, queueItemId), cover)
 }
 
@@ -1070,18 +1235,24 @@ export function writeChapterArtifact(
       !Array.isArray(chapter.paragraphs) ||
       chapter.paragraphs.some((paragraph) => typeof paragraph !== 'string')
     ) {
-      throw new Error('The chapter cannot be saved because its content is invalid.')
+      throw new ArtifactValidationError(
+        'The chapter cannot be saved because its content is invalid.'
+      )
     }
 
     const images = chapter.images ?? []
     if (!Array.isArray(images) || images.length > MAX_CHAPTER_IMAGES) {
-      throw new Error('The chapter cannot be saved because its image list is invalid.')
+      throw new ArtifactValidationError(
+        'The chapter cannot be saved because its image list is invalid.'
+      )
     }
     if (
       chapter.blocks !== undefined &&
       !isValidChapterBlocks(chapter.blocks, images.length)
     ) {
-      throw new Error('The chapter cannot be saved because its content blocks are invalid.')
+      throw new ArtifactValidationError(
+        'The chapter cannot be saved because its content blocks are invalid.'
+      )
     }
     if (
       !hasReadableChapterContent(
@@ -1090,7 +1261,9 @@ export function writeChapterArtifact(
         images.length
       )
     ) {
-      throw new Error('The chapter cannot be saved because it contains no readable content.')
+      throw new ArtifactValidationError(
+        'The chapter cannot be saved because it contains no readable content.'
+      )
     }
 
     const path = chapterArtifactPath(dataDirectory, queueItemId, chapter.url)
@@ -1098,12 +1271,16 @@ export function writeChapterArtifact(
     let totalImageBytes = 0
     for (const image of images) {
       if (!isValidChapterImage(image)) {
-        throw new Error('The chapter cannot be saved because an image is invalid.')
+        throw new ArtifactValidationError(
+          'The chapter cannot be saved because an image is invalid.'
+        )
       }
       const data = Buffer.from(image.dataBase64, 'base64')
       totalImageBytes += data.length
       if (totalImageBytes > MAX_CHAPTER_IMAGE_BYTES) {
-        throw new Error('The chapter cannot be saved because its images exceed the size limit.')
+        throw new ArtifactValidationError(
+          'The chapter cannot be saved because its images exceed the size limit.'
+        )
       }
       const sha256 = createHash('sha256').update(data).digest('hex')
       await atomicWriteFile(chapterImageArtifactPath(path, sha256), data)
@@ -1127,9 +1304,16 @@ export function writeChapterArtifact(
   })()
 }
 
-export async function removeChapterArtifacts(dataDirectory: string, queueItemId: string): Promise<void> {
-  if (!/^[\da-f-]{36}$/i.test(queueItemId)) throw new Error('Invalid download queue identifier.')
-  await rm(join(dataDirectory, 'download-artifacts', queueItemId), { recursive: true, force: true })
+export async function removeChapterArtifacts(
+  dataDirectory: string,
+  queueItemId: string
+): Promise<void> {
+  if (!/^[\da-f-]{36}$/i.test(queueItemId))
+    throw new Error('Invalid download queue identifier.')
+  await rm(join(dataDirectory, 'download-artifacts', queueItemId), {
+    recursive: true,
+    force: true
+  })
 }
 
 export async function archiveDownloadJobs(
@@ -1144,7 +1328,9 @@ export async function archiveDownloadJobs(
       else history.push(entry)
     }
     history.sort((left, right) =>
-      (right.startedAt || right.updatedAt).localeCompare(left.startedAt || left.updatedAt)
+      (right.startedAt || right.updatedAt).localeCompare(
+        left.startedAt || left.updatedAt
+      )
     )
     const retained = history.slice(0, 50)
     await writeJson(join(dataDirectory, 'download-history.json'), retained)
@@ -1163,17 +1349,24 @@ export async function writeLibraryCorrection(
   if (!index) throw new Error('Scan the library before correcting a file.')
 
   const file = index.files.find((candidate) => candidate.id === fileId)
-  if (!file) throw new Error('The selected library file is no longer indexed. Rescan the library.')
+  if (!file)
+    throw new Error(
+      'The selected library file is no longer indexed. Rescan the library.'
+    )
 
   const corrections = index.corrections ?? {}
   const saved = corrections[fileId] ?? {}
-  if (correction.novelTitle !== undefined) saved.novelTitle = correction.novelTitle.trim()
-  if (correction.chapterNumbers !== undefined) saved.chapterNumbers = [...new Set(correction.chapterNumbers)]
+  if (correction.novelTitle !== undefined)
+    saved.novelTitle = correction.novelTitle.trim()
+  if (correction.chapterNumbers !== undefined)
+    saved.chapterNumbers = [...new Set(correction.chapterNumbers)]
   corrections[fileId] = saved
   index.corrections = corrections
   if (saved.novelTitle) file.novelTitle = saved.novelTitle
   if (saved.chapterNumbers) {
-    file.chapterNumbers = [...saved.chapterNumbers].sort((left, right) => left - right)
+    file.chapterNumbers = [...saved.chapterNumbers].sort(
+      (left, right) => left - right
+    )
     file.coverageConfidence = 'user-corrected'
   }
   await writeLibraryIndex(dataDirectory, index)

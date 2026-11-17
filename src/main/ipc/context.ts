@@ -1,3 +1,3 @@
-import type { ipcContext } from '../index'
+import type { MainIpcDependencies } from '../app/mainProcess'
 
-export type IpcContext = typeof ipcContext
+export type IpcContext = MainIpcDependencies

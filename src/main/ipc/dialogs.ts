@@ -1,36 +1,21 @@
 import type { IpcContext } from './context'
+import { dialog } from 'electron'
+import { lstat, realpath, stat } from 'node:fs/promises'
+import { z } from 'zod'
+import { chooseLibraryRoot } from '../services/dialogCommands'
 
 type DialogsIpcContext = Pick<
   IpcContext,
   | 'approvedOutputDirectories'
-  | 'dialog'
-  | 'handleTypedIpc'
+  | 'handle'
   | 'isNodeError'
-  | 'lstat'
   | 'mainWindow'
-  | 'realpath'
-  | 'resolve'
   | 'settingsService'
-  | 'stat'
-  | 'z'
 >
-import type { AppSettings } from '../../shared/contracts'
-
 export function registerDialogsIpcHandlers(context: DialogsIpcContext): void {
-  const {
-    approvedOutputDirectories,
-    dialog,
-    handleTypedIpc,
-    isNodeError,
-    lstat,
-    realpath,
-    resolve,
-    settingsService,
-    stat,
-    z
-  } = context
+  const { approvedOutputDirectories, handle, settingsService } = context
 
-  handleTypedIpc('dialog:choose-output-directory', z.tuple([]), async () => {
+  handle('typed', 'dialog:choose-output-directory', z.tuple([]), async () => {
     if (!context.mainWindow)
       throw new Error('The application window is not available.')
     const result = await dialog.showOpenDialog(context.mainWindow, {
@@ -48,43 +33,11 @@ export function registerDialogsIpcHandlers(context: DialogsIpcContext): void {
     return directory
   })
 
-  handleTypedIpc('dialog:choose-library-root', z.tuple([]), async () => {
-    if (!context.mainWindow)
-      throw new Error('The application window is not available.')
-    const result = await dialog.showOpenDialog(context.mainWindow, {
-      title: 'Choose historical library root',
-      properties: ['openDirectory']
-    })
-    if (result.canceled || result.filePaths.length === 0) return null
+  handle('typed', 'dialog:choose-library-root', z.tuple([]), () =>
+    chooseLibraryRoot(context)
+  )
 
-    const directory = await realpath(result.filePaths[0])
-    const details = await lstat(directory)
-    if (!details.isDirectory() || details.isSymbolicLink())
-      throw new Error('The selected library root is not a folder.')
-
-    const settings = await settingsService.updateWith(async (current) => {
-      const patch: Partial<AppSettings> = { libraryRoot: directory }
-      const downloaded = resolve(directory, 'Downloaded')
-      try {
-        const downloadedDetails = await lstat(downloaded)
-        if (
-          downloadedDetails.isDirectory() &&
-          !downloadedDetails.isSymbolicLink() &&
-          !current.outputDirectory
-        ) {
-          patch.outputDirectory = await realpath(downloaded)
-        }
-      } catch (error) {
-        if (!(isNodeError(error) && error.code === 'ENOENT')) throw error
-      }
-      return patch
-    })
-    if (settings.outputDirectory)
-      approvedOutputDirectories.add(settings.outputDirectory)
-    return directory
-  })
-
-  handleTypedIpc('dialog:choose-tracker-csv', z.tuple([]), async () => {
+  handle('typed', 'dialog:choose-tracker-csv', z.tuple([]), async () => {
     if (!context.mainWindow)
       throw new Error('The application window is not available.')
     const result = await dialog.showOpenDialog(context.mainWindow, {
