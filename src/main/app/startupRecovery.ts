@@ -179,10 +179,6 @@ export async function recoverStartupState(
       )
       queueStorageMigrationNeeded = true
     }
-    if (item.completedChapterUrls.length > 0) {
-      item.completedChapterUrls = []
-      queueStorageMigrationNeeded = true
-    }
   }
   if (queueStorageMigrationNeeded) await persistDiscoveryQueue()
   for (const item of discoveryQueue) releaseQueueItemChapters(item)

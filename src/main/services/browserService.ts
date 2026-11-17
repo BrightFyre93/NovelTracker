@@ -2,18 +2,84 @@ import { mkdir, rm } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import type { BrowserContext, Page } from 'playwright'
 import type { BrowserSessionInfo } from '../../shared/contracts'
-import { BROWSER_NAVIGATION_TIMEOUT_MS, BROWSER_PROFILE_DIRECTORY_NAME } from '../../shared/constants'
+import {
+  BROWSER_NAVIGATION_TIMEOUT_MS,
+  BROWSER_PROFILE_DIRECTORY_NAME,
+  MAX_BROWSER_TABS
+} from '../../shared/constants'
 import {
   OperationCancelledError,
   TransientNetworkError,
   VerificationRequiredError
 } from '../../shared/errors'
-import { validateHttpUrl } from './scraper'
+import { validateHttpUrl, withDomainRequestSlot } from './scraper'
 
 let browserContext: BrowserContext | null = null
 let browserContextPromise: Promise<BrowserContext> | null = null
 let verificationPage: Page | null = null
 let currentProfileDirectory = ''
+let browserOperationActive = false
+const browserOperationWaiters = new Set<() => void>()
+
+function createBrowserOperationRelease(): () => void {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const nextWaiter = browserOperationWaiters.values().next().value
+    if (nextWaiter) nextWaiter()
+    else browserOperationActive = false
+  }
+}
+
+async function acquireBrowserOperationSlot(signal?: AbortSignal): Promise<() => void> {
+  if (signal?.aborted) throw new OperationCancelledError('Browser-assisted page retrieval was cancelled.')
+  if (!browserOperationActive) {
+    browserOperationActive = true
+    return createBrowserOperationRelease()
+  }
+
+  await new Promise<void>((resolveWait, rejectWait) => {
+    const cleanup = (): void => {
+      browserOperationWaiters.delete(onAvailable)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const onAvailable = (): void => {
+      cleanup()
+      resolveWait()
+    }
+    const onAbort = (): void => {
+      cleanup()
+      rejectWait(new OperationCancelledError('Browser-assisted page retrieval was cancelled.'))
+    }
+    browserOperationWaiters.add(onAvailable)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+  })
+
+  return createBrowserOperationRelease()
+}
+
+async function withBrowserOperation<T>(
+  url: string,
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>
+): Promise<T> {
+  const releaseBrowser = await acquireBrowserOperationSlot(signal)
+  try {
+    return await withDomainRequestSlot(url, signal, operation)
+  } finally {
+    releaseBrowser()
+  }
+}
+
+function ensureBrowserTabAvailable(context: BrowserContext): void {
+  if (context.pages().length >= MAX_BROWSER_TABS) {
+    throw new Error(
+      `The browser tab limit of ${MAX_BROWSER_TABS} is reached. Close another tab and retry.`
+    )
+  }
+}
 
 function profileDirectory(dataDirectory: string): string {
   const root = resolve(dataDirectory)
@@ -80,11 +146,14 @@ export async function openVerificationBrowser(
 ): Promise<BrowserSessionInfo> {
   const url = validateHttpUrl(value)
   const context = await getBrowserContext(dataDirectory)
-  if (!verificationPage || verificationPage.isClosed()) {
-    verificationPage = await context.newPage()
-  }
-  await navigate(verificationPage, url)
-  return { title: await verificationPage.title() }
+  return withBrowserOperation(url, undefined, async () => {
+    if (!verificationPage || verificationPage.isClosed()) {
+      ensureBrowserTabAvailable(context)
+      verificationPage = await context.newPage()
+    }
+    await navigate(verificationPage, url)
+    return { title: await verificationPage.title() }
+  })
 }
 
 export async function readBrowserPage(
@@ -100,41 +169,45 @@ export async function readBrowserPage(
   }
   if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
 
-  const visibleVerificationPage =
-    verificationPage && !verificationPage.isClosed() ? verificationPage : null
-  const visiblePageUrl = visibleVerificationPage?.url() ?? ''
-  if (
-    visibleVerificationPage &&
-    visiblePageUrl.startsWith('http') &&
-    validateHttpUrl(visiblePageUrl) === url
-  ) {
-    await visibleVerificationPage.locator('body').waitFor({ state: 'attached', timeout: BROWSER_NAVIGATION_TIMEOUT_MS })
-    await visibleVerificationPage.waitForTimeout(750)
+  return withBrowserOperation(url, signal, async () => {
     if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
-    return {
-      html: await visibleVerificationPage.content(),
-      finalUrl: validateHttpUrl(visibleVerificationPage.url())
+    const visibleVerificationPage =
+      verificationPage && !verificationPage.isClosed() ? verificationPage : null
+    const visiblePageUrl = visibleVerificationPage?.url() ?? ''
+    if (
+      visibleVerificationPage &&
+      visiblePageUrl.startsWith('http') &&
+      validateHttpUrl(visiblePageUrl) === url
+    ) {
+      await visibleVerificationPage.locator('body').waitFor({ state: 'attached', timeout: BROWSER_NAVIGATION_TIMEOUT_MS })
+      await visibleVerificationPage.waitForTimeout(750)
+      if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
+      return {
+        html: await visibleVerificationPage.content(),
+        finalUrl: validateHttpUrl(visibleVerificationPage.url())
+      }
     }
-  }
 
-  const page = await context.newPage()
-  const abort = (): void => {
-    void page.close()
-  }
-  signal?.addEventListener('abort', abort, { once: true })
-  try {
-    await navigate(page, url)
-    if (signal?.aborted) throw new OperationCancelledError('EPUB creation was cancelled.')
-    return { html: await page.content(), finalUrl: validateHttpUrl(page.url()) }
-  } catch (error) {
-    if (signal?.aborted) {
-      throw new OperationCancelledError('Browser-assisted page retrieval was cancelled.')
+    ensureBrowserTabAvailable(context)
+    const page = await context.newPage()
+    const abort = (): void => {
+      void page.close()
     }
-    throw error
-  } finally {
-    signal?.removeEventListener('abort', abort)
-    if (!page.isClosed()) await page.close()
-  }
+    signal?.addEventListener('abort', abort, { once: true })
+    try {
+      await navigate(page, url)
+      if (signal?.aborted) throw new OperationCancelledError('Browser-assisted page retrieval was cancelled.')
+      return { html: await page.content(), finalUrl: validateHttpUrl(page.url()) }
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new OperationCancelledError('Browser-assisted page retrieval was cancelled.')
+      }
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', abort)
+      if (!page.isClosed()) await page.close()
+    }
+  })
 }
 
 export async function clearBrowserSession(dataDirectory: string): Promise<void> {

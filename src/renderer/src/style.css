@@ -898,37 +898,47 @@ input {
 }
 
 .queue-item-buttons {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .queue-item-buttons .p-button {
-  padding: 5px 8px;
-  font-size: 10px;
+  width: 30px;
+  height: 30px;
+  justify-content: center;
+  padding: 0;
+  font-size: 11px;
 }
 
 .queue-item-buttons .p-button .p-button-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
   font-weight: 600;
 }
 
 .queue-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(210px, auto);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  gap: 10px 14px;
-  padding: 13px 0;
+  gap: 3px 10px;
+  padding: 6px 0;
   border-top: 1px solid #edf0f5;
 }
 
 .queue-item-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
-  gap: 4px 14px;
+  gap: 3px;
 }
 
 .queue-item-heading {
   display: flex;
-  grid-column: 1 / -1;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
@@ -937,18 +947,89 @@ input {
 .queue-item-heading strong {
   overflow: hidden;
   min-width: 0;
+  max-width: 35%;
   color: #283548;
-  font-size: 12px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .queue-item-heading > span {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: #7a8798;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.queue-item-source-group {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 2px;
+  max-width: min(45vw, 680px);
+  min-width: 0;
+}
+
+.queue-item-source-url {
+  overflow: hidden;
+  min-width: 0;
+  color: #718198;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+}
+
+.queue-item-source-group .p-button {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+}
+
+.queue-item-failures-button {
+  justify-self: start;
+  padding: 1px 5px;
+  font-size: 11px;
+}
+
+.queue-item-failure-details {
+  display: flex;
+  grid-column: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 5px 8px;
+  border-left: 2px solid #d5a548;
+  background: #f8f6ef;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.queue-item-failure-details > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.queue-item-failure-details strong {
+  color: #455266;
+}
+
+.queue-item-failure-url,
+.queue-item-failure-error {
+  overflow-wrap: anywhere;
+}
+
+.queue-item-failure-error {
+  color: #9b4c37;
+}
+
+.queue-item-failure-status {
+  color: #8a641c;
 }
 
 .queue-item-select,
@@ -969,14 +1050,13 @@ input {
 .queue-item-detail-column > span {
   overflow: hidden;
   color: #7a8798;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .queue-item-detail-grid {
   display: grid;
-  grid-column: 1 / -1;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 14px;
   min-width: 0;
@@ -984,15 +1064,37 @@ input {
 
 .queue-item-detail-column {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 12px;
   min-width: 0;
+}
+
+.queue-item-parser-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.queue-item-parser-controls .configuration-select {
+  width: auto;
+  min-height: 23px;
+  padding: 2px 5px;
+  font-size: 11px;
+}
+
+.queue-item-parser-controls .p-button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
 }
 
 .queue-item-summary > .queue-item-error,
 .queue-item-summary > .queue-item-change,
 .queue-item-summary > .queue-item-output {
-  grid-column: 1 / -1;
+  grid-column: 1;
 }
 
 .queue-item-detail-column > .queue-remaining-chapters {
@@ -1017,9 +1119,11 @@ input {
 }
 
 .queue-item-summary > .queue-item-output {
+  overflow: hidden;
+  max-width: min(60vw, 800px);
   color: #315f9f;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .queue-item-detail-column > .queue-item-rechecking {
@@ -1037,16 +1141,25 @@ input {
 }
 
 .queue-item-detail-column > div.queue-item-rechecking .queue-item-progress {
-  grid-column: 1;
+  width: 100%;
 }
 
 .queue-item-actions {
   display: flex;
   justify-content: flex-end;
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.queue-item > .history-status {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
 }
 
 .queue-item-progress {
-  grid-column: 1 / -1;
+  grid-column: 1;
+  grid-row: 3;
   width: 100%;
 }
 
@@ -1681,6 +1794,7 @@ html[data-theme='dark'] .queue-list-controls,
 html[data-theme='dark'] .queue-status-group-heading,
 html[data-theme='dark'] .queue-item-summary > span,
 html[data-theme='dark'] .queue-item-detail-column > span,
+html[data-theme='dark'] .queue-item-parser-controls,
 html[data-theme='dark'] .queue-item-heading > span,
 html[data-theme='dark'] .queue-item-select,
 html[data-theme='dark'] .library-multi-file-filter,
@@ -1876,9 +1990,28 @@ html[data-theme='dark'] .chapter-order {
 html[data-theme='dark'] .chapter-url,
 html[data-theme='dark'] .chapter-archive-status,
 html[data-theme='dark'] .queue-item-summary strong,
+html[data-theme='dark'] .queue-item-source-url,
 html[data-theme='dark'] .novel-choice,
 html[data-theme='dark'] .library-file-row {
   color: #c4cfdd;
+}
+
+html[data-theme='dark'] .queue-item-failure-details {
+  border-color: #81672f;
+  background: #282719;
+  color: #b7c4d5;
+}
+
+html[data-theme='dark'] .queue-item-failure-details strong {
+  color: #d7e0ed;
+}
+
+html[data-theme='dark'] .queue-item-failure-error {
+  color: #f0a08e;
+}
+
+html[data-theme='dark'] .queue-item-failure-status {
+  color: #f0ca78;
 }
 
 html[data-theme='dark'] .count-pill,
@@ -1998,12 +2131,12 @@ html[data-theme='dark'] .p-message {
   }
 
   .queue-item {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .queue-item-summary {
     grid-column: 1 / -1;
-    grid-template-columns: minmax(0, 1fr);
+    grid-row: auto;
   }
 
   .queue-item-detail-grid {
@@ -2012,12 +2145,23 @@ html[data-theme='dark'] .p-message {
 
   .queue-item-actions {
     grid-column: 1 / -1;
+    grid-row: auto;
     justify-content: flex-start;
+  }
+
+  .queue-item > .history-status {
+    grid-column: 1 / -1;
+    grid-row: auto;
+    justify-self: start;
   }
 
   .queue-item-buttons,
   .queue-header-actions {
     justify-content: flex-start;
+  }
+
+  .queue-item-buttons {
+    flex-wrap: wrap;
   }
 
   .queue-header-actions {

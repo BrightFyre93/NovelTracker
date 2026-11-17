@@ -36,8 +36,23 @@ export interface EpubNovelMetadata {
   cover?: ChapterImage
 }
 
+export type ChapterInlineNode =
+  | { type: 'text'; text: string }
+  | { type: 'emphasis'; children: ChapterInlineNode[] }
+  | { type: 'strong'; children: ChapterInlineNode[] }
+  | { type: 'link'; href: string; children: ChapterInlineNode[] }
+  | { type: 'break' }
+
 export type ChapterContentBlock =
-  | { type: 'paragraph'; text: string }
+  | { type: 'paragraph'; text: string; inline?: ChapterInlineNode[] }
+  | { type: 'heading'; level: 2 | 3 | 4; text: string; inline?: ChapterInlineNode[] }
+  | { type: 'blockquote'; text: string; inline?: ChapterInlineNode[] }
+  | {
+      type: 'list'
+      ordered: boolean
+      items: Array<{ text: string; inline?: ChapterInlineNode[] }>
+    }
+  | { type: 'scene-break' }
   | { type: 'image'; imageIndex: number; alt: string }
 
 export interface ChapterContent {

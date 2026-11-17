@@ -141,6 +141,22 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
   )
 
   handleResultIpc(
+    'discovery-queue:failed-chapters',
+    z.tuple([
+      z.custom<string>(
+        (value): value is string => typeof value === 'string',
+        'Invalid discovery queue item.'
+      )
+    ]),
+    (_event, id) => {
+      const item = discoveryQueue.find((candidate) => candidate.id === id)
+      if (!item)
+        throw new Error('The selected discovery queue item no longer exists.')
+      return item.failedChapters.map((chapter) => ({ ...chapter }))
+    }
+  )
+
+  handleResultIpc(
     'discovery-queue:add',
     z.tuple([
       z.custom<DiscoveryQueueInput[]>(
@@ -371,24 +387,45 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
       z.custom<string>(
         (value): value is string => typeof value === 'string',
         'Invalid discovery queue item.'
-      )
+      ),
+      z.enum(['automatic', 'generic-html', 'novelfull']).optional()
     ]),
-    async (_event, rawId) => {
+    async (_event, rawId, parserMode) => {
       const item = discoveryQueue.find((candidate) => candidate.id === rawId)
       if (!item)
         throw new Error('The selected discovery queue item no longer exists.')
-      if (item.status !== 'needs-review' && item.status !== 'ready') {
-        throw new Error('Only reviewed discovery items can be refreshed.')
+      const canRefreshReviewedItem =
+        item.status === 'needs-review' || item.status === 'ready'
+      const canRetryFailedItemWithParser =
+        parserMode !== undefined &&
+        !item.downloadOptions &&
+        (item.status === 'failed' || item.status === 'cancelled')
+      if (!canRefreshReviewedItem && !canRetryFailedItemWithParser) {
+        throw new Error(
+          'Only reviewed discovery items can be refreshed; failed or cancelled scans require a parser selection.'
+        )
       }
       const settings = await readSettings(dataDirectory())
       await mutateItem(item.id, (draft) => {
-        if (draft.status !== 'needs-review' && draft.status !== 'ready') {
-          throw new Error('Only reviewed discovery items can be refreshed.')
+        const canRefreshReviewedDraft =
+          draft.status === 'needs-review' || draft.status === 'ready'
+        const canRetryFailedDraft =
+          parserMode !== undefined &&
+          !draft.downloadOptions &&
+          (draft.status === 'failed' || draft.status === 'cancelled')
+        if (!canRefreshReviewedDraft && !canRetryFailedDraft) {
+          throw new Error(
+            'Only reviewed discovery items can be refreshed; failed or cancelled scans require a parser selection.'
+          )
         }
-        draft.siteExtractionMode = siteExtractionModeForUrl(
-          draft.sourceUrl,
-          settings.siteExtractionPreferences
-        )
+        draft.siteExtractionMode =
+          parserMode ??
+          draft.siteExtractionMode ??
+          siteExtractionModeForUrl(
+            draft.sourceUrl,
+            settings.siteExtractionPreferences
+          )
+        draft.error = ''
         transitionQueueItem(draft, 'discovering')
         draft.updatedAt = new Date().toISOString()
       })
@@ -788,11 +825,11 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
           filename: input.filename ?? '',
           sourceUrl,
           outputDirectory: input.outputDirectory,
-          epubCss: settings.epubCss
+          epubCss: settings.epubCss,
+          omitHttp404Chapters: settings.omitHttp404Chapters
         }
         queueItem.targetOutputPath = outputPath
         queueItem.queuedAt = now
-        queueItem.completedChapterUrls = []
         queueItem.failedChapters = []
         queueItem.outputPath = ''
         queueItem.downloadHistoryId = historyId
@@ -1069,7 +1106,6 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
       item.queuedAt = new Date().toISOString()
       item.error = ''
       item.failedChapters = []
-      item.completedChapterUrls = []
       item.progress = {
         current: selectedChapters.length,
         total: selectedChapters.length,
@@ -1140,7 +1176,6 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
       transitionQueueItem(item, 'queued')
       item.queuedAt = new Date().toISOString()
       item.error = ''
-      item.completedChapterUrls = []
       item.progress = {
         current: Math.min(item.progress?.current ?? 0, selectedChapters.length),
         total: selectedChapters.length,

@@ -4,6 +4,7 @@ export interface AppSettings {
   outputDirectory: string
   scanOldFolder: boolean
   scanOldCompletedFolder: boolean
+  omitHttp404Chapters: boolean
   maxSimultaneousDownloads: number
   maxDownloadRetryAttempts: number
   httpConnectTimeoutMs: number
@@ -22,6 +23,7 @@ export type SettingsUpdatePatch = Partial<
     AppSettings,
     | 'scanOldFolder'
     | 'scanOldCompletedFolder'
+    | 'omitHttp404Chapters'
     | 'maxSimultaneousDownloads'
     | 'maxDownloadRetryAttempts'
     | 'httpConnectTimeoutMs'
@@ -36,7 +38,7 @@ export type SettingsUpdatePatch = Partial<
   >
 >
 
-export type SiteExtractionMode = 'automatic' | 'generic-html'
+export type SiteExtractionMode = 'automatic' | 'generic-html' | 'novelfull'
 
 export interface SiteExtractionPreference {
   hostname: string

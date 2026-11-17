@@ -3,7 +3,8 @@ import type { DiscoveryResult } from './epub'
 import type {
   AppSettings,
   SettingsUpdatePatch,
-  BrowserSessionInfo
+  BrowserSessionInfo,
+  SiteExtractionMode
 } from './settings'
 import type {
   DownloadHistoryEntry,
@@ -12,6 +13,7 @@ import type {
   QueueEpubOverrides,
   DiscoveryQueueItem,
   DiscoveryQueueItemSummary,
+  FailedQueueChapter,
   DiscoveryQueueSnapshot,
   DiscoveryQueueUpdate,
   ChapterSelectionUpdate,
@@ -51,6 +53,7 @@ export interface NovelTrackerApi {
   getDiscoveryQueue(): Promise<DiscoveryQueueItemSummary[]>
   getDiscoveryQueueSnapshot(): Promise<DiscoveryQueueSnapshot>
   getDiscoveryQueueItem(id: string): Promise<Result<DiscoveryQueueItem>>
+  getFailedQueueChapters(id: string): Promise<Result<FailedQueueChapter[]>>
   addDiscoveryQueueItems(
     items: DiscoveryQueueInput[]
   ): Promise<Result<DiscoveryQueueItem[]>>
@@ -58,7 +61,10 @@ export interface NovelTrackerApi {
   retryAllFailedDiscoveries(): Promise<Result<number>>
   forceRetryDiscoveryQueueItem(id: string): Promise<Result<void>>
   retryDiscoveryQueueItemWithBrowser(id: string): Promise<Result<void>>
-  refreshDiscoveryQueueItem(id: string): Promise<Result<void>>
+  refreshDiscoveryQueueItem(
+    id: string,
+    parserMode?: SiteExtractionMode
+  ): Promise<Result<void>>
   acceptQueueRecommendations(id: string): Promise<Result<void>>
   enqueueEpubFromSnapshot(
     queueItemId: string,

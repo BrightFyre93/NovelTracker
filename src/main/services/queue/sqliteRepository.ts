@@ -24,9 +24,22 @@ import type {
 } from './repository'
 
 const QUEUE_JSON_MIGRATION = 'queue-json-v1'
+type LegacyQueueItem = DiscoveryQueueItem & {
+  completedChapterUrls?: unknown
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function withoutLegacyCompletedChapterUrls(
+  item: DiscoveryQueueItem
+): DiscoveryQueueItem {
+  const {
+    completedChapterUrls: _completedChapterUrls,
+    ...currentItem
+  } = item as LegacyQueueItem
+  return currentItem
 }
 
 function parseStoredQueueItem(
@@ -60,7 +73,7 @@ function parseStoredQueueItem(
   ) {
     throw new Error(`The saved SQLite queue item ${itemId} is invalid.`)
   }
-  return items[0]
+  return withoutLegacyCompletedChapterUrls(items[0])
 }
 
 function serializeQueueItem(
@@ -72,8 +85,7 @@ function serializeQueueItem(
     ...item,
     sequence,
     status,
-    chapters: [],
-    completedChapterUrls: []
+    chapters: []
   })
   if (serialized === undefined) {
     throw new Error(`Queue item ${item.id} could not be serialized.`)
@@ -232,7 +244,7 @@ async function readLegacyQueue(
       join(backupDirectory, 'queue-selection.json.pre-sqlite.bak')
     )
   }
-  return items
+  return items.map(withoutLegacyCompletedChapterUrls)
 }
 
 class SqliteQueueRepository
@@ -553,7 +565,6 @@ class SqliteQueueRepository
         writeQueueItem(insert, item, ordinal)
         if (chapters !== null) writeChapterSet(database, item.id, chapters)
         item.chapters = []
-        item.completedChapterUrls = []
       }
       database
         .prepare(

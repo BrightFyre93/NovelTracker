@@ -24,6 +24,7 @@ import {
   summarizeLibraryIndexOverview
 } from '../../../shared/libraryIndexSummary'
 import { normalizeNovelTitleForGrouping } from '../../../shared/novelTitle'
+import { samePath } from '../pathUtils'
 
 export interface LibraryIndexRepository {
   read(): Promise<LibraryIndex | null>
@@ -56,6 +57,26 @@ export interface LibraryIndexRepository {
     fileId: string,
     correction: LibraryFileCorrection
   ): Promise<LibraryFileRecord>
+  upsertFile(file: LibraryFileRecord, libraryRoot: string): Promise<void>
+}
+
+export function applyLibraryFileCorrection(
+  file: LibraryFileRecord,
+  correction: LibraryFileCorrection | undefined
+): LibraryFileRecord {
+  if (!correction) return file
+  return {
+    ...file,
+    ...(correction.novelTitle ? { novelTitle: correction.novelTitle } : {}),
+    ...(correction.chapterNumbers
+      ? {
+          chapterNumbers: [...correction.chapterNumbers].sort(
+            (left, right) => left - right
+          ),
+          coverageConfidence: 'user-corrected' as const
+        }
+      : {})
+  }
 }
 
 export function createJsonLibraryIndexRepository(
@@ -137,6 +158,41 @@ export function createJsonLibraryIndexRepository(
         )
       }
       return file
+    },
+    upsertFile: async (file, libraryRoot) => {
+      const previous = await readLibraryIndex(dataDirectory())
+      if (previous && !samePath(previous.libraryRoot, libraryRoot)) {
+        throw new Error(
+          'The saved library index belongs to a different folder. Scan the configured library folder before indexing this EPUB.'
+        )
+      }
+
+      const correctedFile = applyLibraryFileCorrection(
+        file,
+        previous?.corrections[file.id]
+      )
+      const files = [...(previous?.files ?? [])]
+      const existingIndex = files.findIndex(
+        (candidate) => candidate.id === correctedFile.id
+      )
+      if (existingIndex < 0) files.push(correctedFile)
+      else files[existingIndex] = correctedFile
+
+      const index: LibraryIndex = previous
+        ? {
+            ...previous,
+            scannedAt: new Date().toISOString(),
+            files
+          }
+        : {
+            schemaVersion: 1,
+            libraryRoot,
+            scannedAt: new Date().toISOString(),
+            files,
+            corrections: {},
+            scanErrors: 0
+          }
+      await writeLibraryIndex(dataDirectory(), index, previous)
     }
   }
 }

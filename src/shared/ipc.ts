@@ -6,9 +6,11 @@ import type {
   DiscoveryQueueItemSummary,
   DiscoveryQueueSnapshot,
   DiscoveryQueueUpdate,
+  FailedQueueChapter,
   ChapterSelectionUpdate,
   AppSettings,
   SettingsUpdatePatch,
+  SiteExtractionMode,
   DownloadHistoryEntry,
   EpubMergeProgress,
   EpubRepairResponse,
@@ -186,6 +188,10 @@ export interface IpcMap {
     args: [id: string]
     result: Result<DiscoveryQueueItem>
   }
+  'discovery-queue:failed-chapters': {
+    args: [id: string]
+    result: Result<FailedQueueChapter[]>
+  }
   'discovery-queue:add': {
     args: [items: DiscoveryQueueInput[]]
     result: Result<DiscoveryQueueItem[]>
@@ -211,7 +217,7 @@ export interface IpcMap {
     result: Result<void>
   }
   'discovery-queue:refresh': {
-    args: [id: string]
+    args: [id: string, parserMode?: SiteExtractionMode]
     result: Result<void>
   }
   'discovery-queue:accept-recommendations': {

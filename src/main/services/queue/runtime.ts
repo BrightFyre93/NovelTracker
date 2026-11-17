@@ -47,6 +47,7 @@ import { transitionQueueItem } from './queueStateMachine'
 import { DiscoveryScheduler } from './discoveryScheduler'
 import { DownloadScheduler } from './downloadScheduler'
 import type { LibraryIndexRepository } from '../library/libraryIndexRepository'
+import { inspectPackagedEpubForLibrary } from '../libraryScanner'
 import type {
   QueueChapterDownloadState,
   QueueChapterDownloadStatus,
@@ -82,7 +83,7 @@ interface QueueRuntimeDependencies {
   settingsService: Pick<SettingsService, 'get' | 'current'>
   libraryIndexRepository: Pick<
     LibraryIndexRepository,
-    'readRecommendationFiles'
+    'readRecommendationFiles' | 'upsertFile'
   >
   chapterStateRepository: QueueChapterStateRepository
   isShuttingDown: () => boolean
@@ -590,11 +591,39 @@ export function createQueueRuntime(
       reason: string
     ): void => {
       missingSelectedChapterUrls.add(chapter.url)
+      const previous = item.failedChapters.find(
+        (failed) => failed.url === chapter.url
+      )
       item.failedChapters = [
         ...item.failedChapters.filter((failed) => failed.url !== chapter.url),
-        { url: chapter.url, title: chapter.title, error: reason }
+        {
+          url: chapter.url,
+          title: chapter.title,
+          error: reason,
+          ...(previous?.httpStatus === undefined
+            ? {}
+            : { httpStatus: previous.httpStatus }),
+          ...(previous?.omitted ? { omitted: true } : {})
+        }
       ]
       item.error = `${missingSelectedChapterUrls.size} selected chapter(s) are unavailable; saving the available chapters.`
+    }
+
+    const updateChapterIssueSummary = (): void => {
+      const omittedCount = item.failedChapters.filter(
+        (chapter) => chapter.omitted
+      ).length
+      const failedCount = item.failedChapters.length - omittedCount
+      item.error = [
+        failedCount > 0
+          ? `${failedCount} chapter(s) failed. Retry failed chapters to continue.`
+          : '',
+        omittedCount > 0
+          ? `${omittedCount} selected chapter(s) omitted after HTTP 404 under the saved policy.`
+          : ''
+      ]
+        .filter(Boolean)
+        .join(' ')
     }
   
     const persistChapterProgress = (): Promise<void> => {
@@ -830,14 +859,26 @@ export function createQueueRuntime(
                 (failed) => failed.url !== chapter.url
               )
             } else {
-              await updateChapterState(chapter, index, 'Failed', {
-                lastHttpStatus:
-                  lastError instanceof HttpStatusError
-                    ? lastError.status
-                    : null,
-                lastError: errorMessage(lastError),
-                artifactRef: null
-              })
+              const httpStatus =
+                lastError instanceof HttpStatusError
+                  ? lastError.status
+                  : null
+              const omitted404 =
+                httpStatus === 404 &&
+                options.omitHttp404Chapters === true
+              const issueMessage = omitted404
+                ? 'HTTP 404; omitted under the saved chapter policy.'
+                : errorMessage(lastError)
+              await updateChapterState(
+                chapter,
+                index,
+                omitted404 ? 'Skipped' : 'Failed',
+                {
+                  lastHttpStatus: httpStatus,
+                  lastError: issueMessage,
+                  artifactRef: null
+                }
+              )
               item.failedChapters = [
                 ...item.failedChapters.filter(
                   (failed) => failed.url !== chapter.url
@@ -845,10 +886,12 @@ export function createQueueRuntime(
                 {
                   url: chapter.url,
                   title: chapter.title,
-                  error: errorMessage(lastError)
+                  error: issueMessage,
+                  ...(httpStatus === null ? {} : { httpStatus }),
+                  ...(omitted404 ? { omitted: true } : {})
                 }
               ]
-              item.error = `${item.failedChapters.length} chapter(s) failed. Retry failed chapters to continue.`
+              updateChapterIssueSummary()
             }
           } finally {
             activeChapterRequests -= 1
@@ -945,10 +988,20 @@ export function createQueueRuntime(
             ? 'partially-completed'
             : 'failed'
         transitionQueueItem(item, finalStatus)
+        updateChapterIssueSummary()
+        const omittedCount = item.failedChapters.filter(
+          (chapter) => chapter.omitted
+        ).length
+        const failedCount = item.failedChapters.length - omittedCount
         item.progress = {
           current: completedSelectedChapterCount,
           total: selectedChapters.length,
-          message: `${item.failedChapters.length} chapter(s) failed`
+          message: [
+            failedCount > 0 ? `${failedCount} chapter(s) failed` : '',
+            omittedCount > 0 ? `${omittedCount} chapter(s) omitted` : ''
+          ]
+            .filter(Boolean)
+            .join(' · ')
         }
         await persistDownloadState(item)
         return
@@ -1116,6 +1169,27 @@ export function createQueueRuntime(
       )
       packagingStarted = false
       outputPackaged = true
+      let libraryIndexWarning = ''
+      try {
+        const settings = await settingsService.get()
+        const inspection = await inspectPackagedEpubForLibrary(
+          result.outputPath,
+          settings.libraryRoot,
+          settings
+        )
+        if (inspection.file) {
+          await libraryIndexRepository.upsertFile(
+            inspection.file,
+            inspection.libraryRoot
+          )
+        } else {
+          libraryIndexWarning =
+            `EPUB saved, but not added to the library index because ${inspection.skippedReason}.`
+        }
+      } catch (error) {
+        libraryIndexWarning =
+          `EPUB saved, but could not be added to the library index: ${errorMessage(error)}`
+      }
       const finalStatus = incompleteOutput
         ? 'partially-completed'
         : 'completed'
@@ -1124,9 +1198,14 @@ export function createQueueRuntime(
       item.saveAvailableChaptersOnly = false
       item.outputPath = result.outputPath
       item.targetOutputPath = result.outputPath.toLowerCase()
-      item.error = incompleteOutput
-        ? `${omittedChapterCount} selected chapter(s) were omitted. Retry to fetch them and create a complete EPUB.`
-        : ''
+      item.error = [
+        incompleteOutput
+          ? `${omittedChapterCount} selected chapter(s) were omitted. Retry to fetch them and create a complete EPUB.`
+          : '',
+        libraryIndexWarning
+      ]
+        .filter(Boolean)
+        .join(' ')
       item.progress = {
         current: chapters.length,
         total: selectedChapters.length,
@@ -1134,7 +1213,6 @@ export function createQueueRuntime(
           ? `Saved ${chapters.length} of ${selectedChapters.length} selected chapters (incomplete)`
           : 'Completed'
       }
-      item.completedChapterUrls = []
       item.failedChapters = incompleteOutput
         ? item.failedChapters.filter((failed) =>
             missingSelectedChapterUrls.has(failed.url)

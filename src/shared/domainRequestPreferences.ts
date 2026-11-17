@@ -19,11 +19,9 @@ export function getDomainRequestDelayMs(
       ? preferences.get(hostname)
       : preferences.find((preference) => preference.hostname === hostname)
           ?.delayMs
-  return (
-    configuredDelay ??
-    DOMAIN_REQUEST_DELAYS_MS[hostname] ??
-    DEFAULT_DOMAIN_REQUEST_DELAY_MS
-  )
+  const policyMinimum =
+    DOMAIN_REQUEST_DELAYS_MS[hostname] ?? DEFAULT_DOMAIN_REQUEST_DELAY_MS
+  return Math.max(configuredDelay ?? policyMinimum, policyMinimum)
 }
 
 export function normalizeDomainRequestDelays(value: unknown): DomainRequestDelayPreference[] {

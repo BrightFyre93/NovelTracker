@@ -54,6 +54,7 @@ const settings = ref<AppSettings>({
   outputDirectory: '',
   scanOldFolder: false,
   scanOldCompletedFolder: false,
+  omitHttp404Chapters: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   maxDownloadRetryAttempts: DEFAULT_DOWNLOAD_RETRY_ATTEMPTS,
   httpConnectTimeoutMs: DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
@@ -83,6 +84,7 @@ const themeDraft = ref<AppSettings['appTheme']>('light')
 const epubCssDraft = ref(DEFAULT_EPUB_CSS)
 const scanOldFolderDraft = ref(false)
 const scanOldCompletedFolderDraft = ref(false)
+const omitHttp404ChaptersDraft = ref(false)
 const concurrencyOptions = Array.from(
   { length: MAX_SIMULTANEOUS_DOWNLOADS - MIN_SIMULTANEOUS_DOWNLOADS + 1 },
   (_, index) => MIN_SIMULTANEOUS_DOWNLOADS + index
@@ -126,6 +128,9 @@ const libraryScanOptionsDirty = computed(() =>
   scanOldFolderDraft.value !== settings.value.scanOldFolder ||
   scanOldCompletedFolderDraft.value !== settings.value.scanOldCompletedFolder
 )
+const omitHttp404ChaptersDirty = computed(() =>
+  omitHttp404ChaptersDraft.value !== settings.value.omitHttp404Chapters
+)
 const freshnessValid = computed(() =>
   Number.isInteger(freshnessHoursDraft.value) &&
   freshnessHoursDraft.value >= MIN_DISCOVERY_FRESHNESS_HOURS &&
@@ -152,6 +157,7 @@ const savingSiteExtractionPreferences = ref(false)
 const savingTheme = ref(false)
 const savingEpubCss = ref(false)
 const savingLibraryScanOptions = ref(false)
+const savingOmitHttp404Chapters = ref(false)
 
 onMounted(async () => {
   try {
@@ -167,6 +173,7 @@ onMounted(async () => {
     siteExtractionPreferencesDraft.value = settings.value.siteExtractionPreferences.map((preference) => ({ ...preference }))
     scanOldFolderDraft.value = settings.value.scanOldFolder
     scanOldCompletedFolderDraft.value = settings.value.scanOldCompletedFolder
+    omitHttp404ChaptersDraft.value = settings.value.omitHttp404Chapters
     themeDraft.value = settings.value.appTheme
     epubCssDraft.value = settings.value.epubCss
   } catch (reason) {
@@ -498,6 +505,28 @@ async function saveEpubCss(css = epubCssDraft.value): Promise<void> {
   }
 }
 
+async function saveOmitHttp404Chapters(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  savingOmitHttp404Chapters.value = true
+  try {
+    const result = await window.novelTracker.updateSettings({
+      omitHttp404Chapters: omitHttp404ChaptersDraft.value
+    })
+    if (!result.ok) {
+      error.value = result.error
+      return
+    }
+    settings.value = result.value
+    omitHttp404ChaptersDraft.value = result.value.omitHttp404Chapters
+    success.value = 'HTTP 404 chapter policy saved. It applies to newly queued EPUB jobs.'
+  } catch (reason) {
+    error.value = toMessage(reason)
+  } finally {
+    savingOmitHttp404Chapters.value = false
+  }
+}
+
 async function resetEpubCss(): Promise<void> {
   epubCssDraft.value = DEFAULT_EPUB_CSS
   await saveEpubCss(DEFAULT_EPUB_CSS)
@@ -607,6 +636,22 @@ async function resetEpubCss(): Promise<void> {
           />
         </div>
         <div class="configuration-setting">
+          <label class="configuration-toggle" for="omit-http-404-chapters">
+            <input id="omit-http-404-chapters" v-model="omitHttp404ChaptersDraft" type="checkbox" />
+            <span>
+              <strong>Allow HTTP 404 chapters to be omitted</strong>
+              <small class="help-text">Off by default. When enabled, a 404 is recorded with its chapter URL and status, but no partial EPUB is created automatically. Use “Save available chapters” to explicitly package an incomplete EPUB. Applies to newly queued jobs only.</small>
+            </span>
+          </label>
+          <Button
+            label="Save 404 policy"
+            size="small"
+            :loading="savingOmitHttp404Chapters"
+            :disabled="savingOmitHttp404Chapters || !omitHttp404ChaptersDirty"
+            @click="saveOmitHttp404Chapters"
+          />
+        </div>
+        <div class="configuration-setting">
           <span class="field-label">HTTP timeouts</span>
           <div class="configuration-inline-control">
             <label for="http-connect-timeout">Connect</label>
@@ -689,7 +734,7 @@ async function resetEpubCss(): Promise<void> {
           <strong>Per-domain request delay</strong>
           <p class="help-text">
             Set the minimum spacing between request starts for each hostname. Unlisted domains use the built-in default of
-            {{ DEFAULT_DOMAIN_REQUEST_DELAY_MS }} ms; saved entries override built-in site values. HTTP 429 cooldowns always apply.
+            {{ DEFAULT_DOMAIN_REQUEST_DELAY_MS }} ms. Faster values are bounded by built-in site safety intervals; slower values are honored. HTTP 429 cooldowns always apply.
           </p>
         </div>
         <div class="site-extraction-preference-form">
@@ -761,7 +806,7 @@ async function resetEpubCss(): Promise<void> {
       <div class="site-extraction-settings">
         <div>
           <strong>Per-site chapter-list parser</strong>
-          <p class="help-text">Automatic uses the built-in site detector. Use Generic HTML only when automatic discovery does not fit a site's chapter-list page. These preferences are saved locally.</p>
+          <p class="help-text">Automatic uses the built-in site detector. Generic HTML is available for other chapter-list pages; NovelFull is available only for compatible NovelFull URLs. These preferences are saved locally.</p>
         </div>
         <div class="site-extraction-preference-form">
           <input
@@ -775,6 +820,7 @@ async function resetEpubCss(): Promise<void> {
           <select v-model="sitePreferenceModeDraft" class="configuration-select" aria-label="Chapter-list parser">
             <option value="automatic">Automatic</option>
             <option value="generic-html">Generic HTML</option>
+            <option value="novelfull">NovelFull</option>
           </select>
           <Button label="Add / update site" size="small" :disabled="savingSiteExtractionPreferences" @click="addSiteExtractionPreference" />
         </div>
@@ -784,6 +830,7 @@ async function resetEpubCss(): Promise<void> {
             <select v-model="preference.mode" class="configuration-select" aria-label="Saved chapter-list parser">
               <option value="automatic">Automatic</option>
               <option value="generic-html">Generic HTML</option>
+              <option value="novelfull">NovelFull</option>
             </select>
             <Button
               icon="pi pi-trash"

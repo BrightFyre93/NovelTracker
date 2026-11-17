@@ -460,6 +460,12 @@ const settingsUpdatePatchSchema: z.ZodType<SettingsUpdatePatch> = z
         (value): value is boolean => typeof value === 'boolean',
         'The Old Completed-folder scan option must be enabled or disabled.'
       )
+      .optional(),
+    omitHttp404Chapters: z
+      .custom<boolean>(
+        (value): value is boolean => typeof value === 'boolean',
+        'The HTTP 404 chapter omission policy must be enabled or disabled.'
+      )
       .optional()
   })
   .strict()

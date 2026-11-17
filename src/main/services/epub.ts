@@ -12,6 +12,7 @@ import type {
   ChapterContent,
   ChapterContentBlock,
   ChapterImage,
+  ChapterInlineNode,
   EpubMergeProgress,
   EpubNovelMetadata
 } from '../../shared/contracts'
@@ -182,7 +183,23 @@ function makeXhtml(
 ): string {
   const content: ChapterContentBlock[] = blocks ?? paragraphs.map((text) => ({ type: 'paragraph', text }))
   const body = content.map((block) => {
-    if (block.type === 'paragraph') return `<p>${escapeXml(block.text)}</p>`
+    if (block.type === 'paragraph') {
+      return `<p>${renderInlineContent(block.inline, block.text)}</p>`
+    }
+    if (block.type === 'heading') {
+      return `<h${block.level}>${renderInlineContent(block.inline, block.text)}</h${block.level}>`
+    }
+    if (block.type === 'blockquote') {
+      return `<blockquote><p>${renderInlineContent(block.inline, block.text)}</p></blockquote>`
+    }
+    if (block.type === 'list') {
+      const tagName = block.ordered ? 'ol' : 'ul'
+      const items = block.items
+        .map((item) => `<li>${renderInlineContent(item.inline, item.text)}</li>`)
+        .join('\n')
+      return `<${tagName}>${items}</${tagName}>`
+    }
+    if (block.type === 'scene-break') return '<hr/>'
     const href = imageHrefs[block.imageIndex]
     if (!href) throw new Error('Chapter content references a missing image.')
     return `<figure><img src="../${escapeXml(href)}" alt="${escapeXml(block.alt)}"/></figure>`
@@ -199,6 +216,37 @@ function makeXhtml(
     ${body}
   </body>
 </html>`
+}
+
+function renderInlineContent(
+  nodes: ChapterInlineNode[] | undefined,
+  fallbackText: string
+): string {
+  if (!nodes) return escapeXml(fallbackText)
+  return nodes.map((node) => {
+    if (node.type === 'text') return escapeXml(node.text)
+    if (node.type === 'break') return '<br/>'
+    const children = renderInlineContent(node.children, '')
+    if (node.type === 'emphasis' || node.type === 'strong') {
+      const tagName = node.type === 'emphasis' ? 'em' : 'strong'
+      return `<${tagName}>${children}</${tagName}>`
+    }
+
+    let href: URL
+    try {
+      href = new URL(node.href)
+    } catch {
+      throw new Error('Chapter content contains an invalid link.')
+    }
+    if (
+      (href.protocol !== 'http:' && href.protocol !== 'https:') ||
+      href.username ||
+      href.password
+    ) {
+      throw new Error('Chapter content contains an unsafe link.')
+    }
+    return `<a href="${escapeXml(href.href)}">${children}</a>`
+  }).join('')
 }
 
 function makeNovelInfoXhtml(

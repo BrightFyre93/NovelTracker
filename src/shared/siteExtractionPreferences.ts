@@ -1,4 +1,4 @@
-import { MAX_SITE_EXTRACTION_PREFERENCES } from './constants'
+import { MAX_SITE_EXTRACTION_PREFERENCES, NOVELFULL_HOSTS } from './constants'
 import type { SiteExtractionMode, SiteExtractionPreference } from './contracts'
 
 export function normalizeHostname(value: string): string {
@@ -41,8 +41,13 @@ export function normalizeSiteExtractionPreferences(
     const preference = candidate as Record<string, unknown>
     const hostname = normalizeSiteHostname(preference.hostname)
     const mode = preference.mode
-    if (mode !== 'automatic' && mode !== 'generic-html') {
+    if (mode !== 'automatic' && mode !== 'generic-html' && mode !== 'novelfull') {
       throw new Error(`The extraction mode for ${hostname} is not supported.`)
+    }
+    if (mode === 'novelfull' && !NOVELFULL_HOSTS.has(hostname)) {
+      throw new Error(
+        `The NovelFull parser is not compatible with ${hostname}.`
+      )
     }
     if (seen.has(hostname))
       throw new Error(
@@ -52,6 +57,18 @@ export function normalizeSiteExtractionPreferences(
     preferences.push({ hostname, mode })
   }
   return preferences
+}
+
+export function isSiteExtractionModeCompatible(
+  value: string,
+  mode: SiteExtractionMode
+): boolean {
+  if (mode !== 'novelfull') return true
+  try {
+    return NOVELFULL_HOSTS.has(normalizeHostname(new URL(value).hostname))
+  } catch {
+    return false
+  }
 }
 
 export function siteExtractionModeForUrl(

@@ -42,6 +42,7 @@ import type {
   ChapterImage,
   ChapterContent,
   ChapterContentBlock,
+  ChapterInlineNode,
   DiscoveryQueueItem,
   QueueChapter,
   DownloadHistoryEntry,
@@ -55,6 +56,7 @@ const EMPTY_SETTINGS: AppSettings = {
   outputDirectory: '',
   scanOldFolder: false,
   scanOldCompletedFolder: false,
+  omitHttp404Chapters: false,
   maxSimultaneousDownloads: DEFAULT_MAX_SIMULTANEOUS_DOWNLOADS,
   maxDownloadRetryAttempts: DEFAULT_DOWNLOAD_RETRY_ATTEMPTS,
   httpConnectTimeoutMs: DEFAULT_HTTP_CONNECT_TIMEOUT_MS,
@@ -245,6 +247,12 @@ export async function readSettings(dataDirectory: string): Promise<AppSettings> 
       'scanOldCompletedFolder',
       'Old Completed-folder scan option',
       defaults.scanOldCompletedFolder,
+      (value): value is boolean => typeof value === 'boolean'
+    ),
+    omitHttp404Chapters: setting(
+      'omitHttp404Chapters',
+      'HTTP 404 chapter omission policy',
+      defaults.omitHttp404Chapters,
       (value): value is boolean => typeof value === 'boolean'
     ),
     maxSimultaneousDownloads: setting(
@@ -649,17 +657,81 @@ function isValidChapterBlocks(
 ): value is ChapterContentBlock[] {
   if (!Array.isArray(value)) return false
   return value.every(
-    (block) =>
-      isRecord(block) &&
-      ((block.type === 'paragraph' && typeof block.text === 'string') ||
-        (block.type === 'image' &&
-          typeof block.imageIndex === 'number' &&
-          Number.isInteger(block.imageIndex) &&
-          block.imageIndex >= 0 &&
-          block.imageIndex < imageCount &&
-          typeof block.alt === 'string' &&
-          block.alt.length <= 1000))
+    (block) => {
+      if (!isRecord(block)) return false
+      const inlineIsValid =
+        block.inline === undefined || isValidChapterInlineNodes(block.inline)
+      if (block.type === 'paragraph' || block.type === 'blockquote') {
+        return typeof block.text === 'string' && inlineIsValid
+      }
+      if (block.type === 'heading') {
+        return (
+          (block.level === 2 || block.level === 3 || block.level === 4) &&
+          typeof block.text === 'string' &&
+          inlineIsValid
+        )
+      }
+      if (block.type === 'list') {
+        return (
+          typeof block.ordered === 'boolean' &&
+          Array.isArray(block.items) &&
+          block.items.every(
+            (item) =>
+              isRecord(item) &&
+              typeof item.text === 'string' &&
+              (item.inline === undefined || isValidChapterInlineNodes(item.inline))
+          )
+        )
+      }
+      if (block.type === 'scene-break') return true
+      return (
+        block.type === 'image' &&
+        typeof block.imageIndex === 'number' &&
+        Number.isInteger(block.imageIndex) &&
+        block.imageIndex >= 0 &&
+        block.imageIndex < imageCount &&
+        typeof block.alt === 'string' &&
+        block.alt.length <= 1000
+      )
+    }
   )
+}
+
+function isValidChapterInlineNodes(
+  value: unknown,
+  depth = 0
+): value is ChapterInlineNode[] {
+  if (!Array.isArray(value) || depth > 32) return false
+  return value.every((node) => {
+    if (!isRecord(node)) return false
+    if (node.type === 'text') return typeof node.text === 'string'
+    if (node.type === 'break') return true
+    if (node.type === 'emphasis' || node.type === 'strong') {
+      return isValidChapterInlineNodes(node.children, depth + 1)
+    }
+    if (node.type !== 'link' || typeof node.href !== 'string') return false
+    try {
+      const url = new URL(node.href)
+      return (
+        (url.protocol === 'http:' || url.protocol === 'https:') &&
+        !url.username &&
+        !url.password &&
+        isValidChapterInlineNodes(node.children, depth + 1)
+      )
+    } catch {
+      return false
+    }
+  })
+}
+
+function chapterBlockText(block: ChapterContentBlock): string[] {
+  if (
+    block.type === 'paragraph' ||
+    block.type === 'heading' ||
+    block.type === 'blockquote'
+  ) return [block.text]
+  if (block.type === 'list') return block.items.map((item) => item.text)
+  return []
 }
 
 function hasReadableChapterContent(
@@ -671,7 +743,7 @@ function hasReadableChapterContent(
     return blocks.some(
       (block) =>
         block.type === 'image' ||
-        (block.type === 'paragraph' && block.text.trim().length > 0)
+        chapterBlockText(block).some((text) => text.trim().length > 0)
     )
   }
   return (
@@ -802,9 +874,7 @@ export async function readChapterArtifact(
     const blocks = stored.blocks
     const paragraphs =
       blocks !== undefined
-        ? blocks.flatMap((block) =>
-            block.type === 'paragraph' ? [block.text] : []
-          )
+        ? blocks.flatMap(chapterBlockText)
         : stored.paragraphs!
     return {
       title: stored.title!,

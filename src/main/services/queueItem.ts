@@ -52,7 +52,6 @@ export function createQueueItem(input: NewQueueItem): DiscoveryQueueItem {
     downloadOptions: input.downloadOptions ?? null,
     downloadStartedAt: input.downloadStartedAt ?? '',
     queuedAt: input.queuedAt ?? '',
-    completedChapterUrls: input.completedChapterUrls ?? [],
     failedChapters: input.failedChapters ?? [],
     outputPath: input.outputPath ?? '',
     downloadHistoryId: input.downloadHistoryId ?? '',
@@ -68,7 +67,7 @@ export function createQueueItem(input: NewQueueItem): DiscoveryQueueItem {
 
 type QueueItemWithoutChapterData = Omit<
   DiscoveryQueueItem,
-  'chapters' | 'completedChapterUrls'
+  'chapters'
 >
 
 function copyQueueItemFields(
@@ -77,7 +76,6 @@ function copyQueueItemFields(
 ): QueueItemWithoutChapterData {
   const {
     chapters: _chapters,
-    completedChapterUrls: _completedChapterUrls,
     ...fields
   } = item
   return {
@@ -103,7 +101,6 @@ function copyQueueItemFields(
 export function copyQueueItem(item: DiscoveryQueueItem): DiscoveryQueueItem {
   return {
     ...copyQueueItemFields(item),
-    completedChapterUrls: [...item.completedChapterUrls],
     chapters: item.chapters.map((chapter) => ({ ...chapter }))
   }
 }
@@ -136,7 +133,6 @@ export function copyQueueItemForPersistence(
 ): DiscoveryQueueItem {
   return {
     ...copyQueueItemFields(item),
-    completedChapterUrls: [],
     chapters: []
   }
 }

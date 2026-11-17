@@ -5,7 +5,10 @@ import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressBar from 'primevue/progressbar'
 import { getDomainRequestDelayMs } from '../../../shared/domainRequestPreferences'
-import { normalizeSiteHostname } from '../../../shared/siteExtractionPreferences'
+import {
+  isSiteExtractionModeCompatible,
+  normalizeSiteHostname
+} from '../../../shared/siteExtractionPreferences'
 import { useTrackerNovelSearch } from '../composables/useTrackerNovelSearch'
 import type {
   DomainRequestDelayPreference,
@@ -15,8 +18,10 @@ import type {
   DiscoveryQueueStatus,
   DiscoveryQueueUpdate,
   DiscoveryQueueSnapshot,
+  FailedQueueChapter,
   QueueEpubOverrides,
-  TrackerNovel
+  TrackerNovel,
+  SiteExtractionMode
 } from '../../../shared/contracts'
 import { toMessage } from '../../../shared/errors'
 
@@ -74,6 +79,7 @@ const adding = ref(false)
 const maxDownloads = ref(2)
 const outputDirectory = ref('')
 const domainRequestDelays = ref<DomainRequestDelayPreference[]>([])
+const parserModeDrafts = ref<Record<string, SiteExtractionMode>>({})
 const retryingId = ref('')
 const retryingAllDiscoveries = ref(false)
 const browserOpeningId = ref('')
@@ -88,6 +94,9 @@ const clearing = ref(false)
 const clearingCompleted = ref(false)
 const error = ref('')
 const notice = ref('')
+const expandedFailedChapterId = ref('')
+const failedChapterDetails = ref<FailedQueueChapter[]>([])
+const loadingFailedChapterId = ref('')
 let removeQueueListener: (() => void) | undefined
 let queueRevision = 0
 let queueSnapshotLoaded = false
@@ -457,6 +466,78 @@ function sourceHost(sourceUrl: string): string {
     return new URL(sourceUrl).hostname
   } catch {
     return sourceUrl
+  }
+}
+
+function sourceUrlForItem(item: DiscoveryQueueItemSummary): string {
+  return item.downloadOptions?.sourceUrl || item.sourceUrl
+}
+
+function parserModeForItem(item: DiscoveryQueueItemSummary): SiteExtractionMode {
+  return parserModeDrafts.value[item.id] ?? item.siteExtractionMode ?? 'automatic'
+}
+
+function isParserModeDirty(item: DiscoveryQueueItemSummary): boolean {
+  return parserModeForItem(item) !== (item.siteExtractionMode ?? 'automatic')
+}
+
+function updateParserModeDraft(item: DiscoveryQueueItemSummary, event: Event): void {
+  if (!(event.currentTarget instanceof HTMLSelectElement)) return
+  const value = event.currentTarget.value
+  if (value !== 'automatic' && value !== 'generic-html' && value !== 'novelfull') return
+  parserModeDrafts.value = { ...parserModeDrafts.value, [item.id]: value }
+}
+
+function effectiveRequestDelay(item: DiscoveryQueueItemSummary): string {
+  try {
+    const hostname = normalizeSiteHostname(new URL(sourceUrlForItem(item)).hostname)
+    return `${getDomainRequestDelayMs(hostname, domainRequestDelays.value).toLocaleString()} ms`
+  } catch {
+    return 'unknown'
+  }
+}
+
+async function copySourceUrl(item: DiscoveryQueueItemSummary): Promise<void> {
+  error.value = ''
+  notice.value = ''
+  try {
+    await navigator.clipboard.writeText(sourceUrlForItem(item))
+    notice.value = `Copied the source URL for ${item.title}.`
+  } catch (reason) {
+    error.value = `Could not copy the source URL: ${toMessage(reason)}`
+  }
+}
+
+async function toggleFailedChapterDetails(
+  item: DiscoveryQueueItemSummary
+): Promise<void> {
+  if (expandedFailedChapterId.value === item.id) {
+    expandedFailedChapterId.value = ''
+    return
+  }
+
+  error.value = ''
+  expandedFailedChapterId.value = item.id
+  failedChapterDetails.value = []
+  loadingFailedChapterId.value = item.id
+  try {
+    const result = await window.novelTracker.getFailedQueueChapters(item.id)
+    if (expandedFailedChapterId.value !== item.id) return
+    if (!result.ok) {
+      error.value = result.error
+      expandedFailedChapterId.value = ''
+      return
+    }
+    failedChapterDetails.value = result.value
+  } catch (reason) {
+    if (expandedFailedChapterId.value === item.id) {
+      error.value = toMessage(reason)
+      expandedFailedChapterId.value = ''
+    }
+  } finally {
+    if (loadingFailedChapterId.value === item.id) {
+      loadingFailedChapterId.value = ''
+    }
   }
 }
 
@@ -923,13 +1004,22 @@ async function acceptSafeSuggestions(): Promise<void> {
   }
 }
 
-async function refreshItem(item: DiscoveryQueueItemSummary): Promise<void> {
+async function refreshItem(
+  item: DiscoveryQueueItemSummary,
+  parserMode?: SiteExtractionMode
+): Promise<void> {
   error.value = ''
   notice.value = ''
   refreshingId.value = item.id
   try {
-    const result = await window.novelTracker.refreshDiscoveryQueueItem(item.id)
-    if (!result.ok) error.value = result.error
+    const result = await window.novelTracker.refreshDiscoveryQueueItem(item.id, parserMode)
+    if (!result.ok) {
+      error.value = result.error
+    } else if (parserMode !== undefined) {
+      const remainingDrafts = { ...parserModeDrafts.value }
+      delete remainingDrafts[item.id]
+      parserModeDrafts.value = remainingDrafts
+    }
   } catch (reason) {
     error.value = toMessage(reason)
   } finally {
@@ -1281,8 +1371,26 @@ async function clearCompletedQueueItems(): Promise<void> {
               </label>
               <strong>{{ item.title }}</strong>
               <span>
-                {{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(item.sourceUrl) }}
+                {{ item.origin === 'tracker' ? 'Tracker' : 'Manual URL' }} · {{ sourceHost(sourceUrlForItem(item)) }}
                 <template v-if="item.separateJob"> · Separate job</template>
+              </span>
+              <span class="queue-item-source-group">
+                <span
+                  class="queue-item-source-url"
+                  :title="sourceUrlForItem(item)"
+                >
+                  {{ sourceUrlForItem(item) }}
+                </span>
+                <Button
+                  icon="pi pi-copy"
+                  severity="secondary"
+                  text
+                  rounded
+                  size="small"
+                  :aria-label="`Copy source URL for ${item.title}`"
+                  title="Copy full source URL"
+                  @click="copySourceUrl(item)"
+                />
               </span>
             </div>
             <div class="queue-item-detail-grid">
@@ -1300,6 +1408,44 @@ async function clearCompletedQueueItems(): Promise<void> {
                   {{ item.recommendationSummary }}
                 </span>
                 <span v-if="item.discoveredAt">Discovered {{ new Date(item.discoveredAt).toLocaleString() }}</span>
+                <span v-if="item.parserName">Discovery parser: {{ item.parserName }} · Host request interval: {{ effectiveRequestDelay(item) }}</span>
+                <div
+                  v-if="item.status === 'needs-review' || item.status === 'ready' || (
+                    ['failed', 'cancelled'].includes(item.status) && !item.downloadOptions
+                  )"
+                  class="queue-item-parser-controls"
+                >
+                  <label :for="`parser-mode-${item.id}`">Discovery parser</label>
+                  <select
+                    :id="`parser-mode-${item.id}`"
+                    class="configuration-select"
+                    :value="parserModeForItem(item)"
+                    :aria-label="`Discovery parser for ${item.title}`"
+                    :disabled="Boolean(refreshingId) || Boolean(downloadActionId)"
+                    @change="updateParserModeDraft(item, $event)"
+                  >
+                    <option value="automatic">Automatic</option>
+                    <option value="generic-html">Generic HTML</option>
+                    <option
+                      v-if="isSiteExtractionModeCompatible(sourceUrlForItem(item), 'novelfull')"
+                      value="novelfull"
+                    >
+                      NovelFull
+                    </option>
+                  </select>
+                  <Button
+                    icon="pi pi-check"
+                    severity="secondary"
+                    text
+                    rounded
+                    size="small"
+                    :aria-label="`Apply discovery parser for ${item.title}`"
+                    title="Apply parser and rediscover"
+                    :loading="refreshingId === item.id"
+                    :disabled="!isParserModeDirty(item) || Boolean(refreshingId) || Boolean(retryingId) || Boolean(removingId) || clearing || batchQueueing || Boolean(downloadActionId)"
+                    @click="refreshItem(item, parserModeForItem(item))"
+                  />
+                </div>
               </div>
               <div class="queue-item-detail-column">
                 <span v-if="item.downloadOptions && ['queued', 'downloading', 'paused'].includes(item.status) && chaptersRemaining(item) !== null" class="queue-remaining-chapters">
@@ -1332,7 +1478,7 @@ async function clearCompletedQueueItems(): Promise<void> {
                     :aria-label="`${item.title} chapter discovery progress`"
                   />
                 </div>
-                <span v-else-if="item.progress">
+                <span v-else-if="item.progress && item.status !== 'completed'">
                   <template
                     v-if="item.downloadOptions && (
                       ['queued', 'downloading', 'paused'].includes(item.status) ||
@@ -1348,11 +1494,45 @@ async function clearCompletedQueueItems(): Promise<void> {
               </div>
             </div>
             <span v-if="item.discoveryChanges" class="queue-item-change">{{ item.discoveryChanges }}</span>
-            <span v-if="item.outputPath" class="queue-item-output">{{ item.outputPath }}</span>
-            <span v-if="item.failedChapterCount" class="queue-item-error">
-              {{ item.failedChapterCount.toLocaleString() }} chapter{{ item.failedChapterCount === 1 ? '' : 's' }} failed
+            <span
+              v-if="item.outputPath"
+              class="queue-item-output"
+              :title="item.outputPath"
+            >
+              {{ item.outputPath }}
             </span>
-            <span v-else-if="item.error" class="queue-item-error">{{ item.error }}</span>
+            <Button
+              v-if="item.failedChapterCount"
+              :label="`${item.failedChapterCount.toLocaleString()} failed or omitted chapter${item.failedChapterCount === 1 ? '' : 's'} · ${expandedFailedChapterId === item.id ? 'hide' : 'details'}`"
+              icon="pi pi-exclamation-triangle"
+              severity="warning"
+              text
+              size="small"
+              class="queue-item-failures-button"
+              :aria-expanded="expandedFailedChapterId === item.id"
+              :aria-controls="`failed-chapters-${item.id}`"
+              @click="toggleFailedChapterDetails(item)"
+            />
+            <span v-if="item.error" class="queue-item-error">{{ item.error }}</span>
+            <div
+              v-if="expandedFailedChapterId === item.id"
+              :id="`failed-chapters-${item.id}`"
+              class="queue-item-failure-details"
+            >
+              <span v-if="loadingFailedChapterId === item.id">Loading failed chapter details…</span>
+              <span v-else-if="failedChapterDetails.length === 0">No failed or omitted chapters remain.</span>
+              <div v-for="(chapter, index) in failedChapterDetails" :key="`${chapter.url}-${index}`">
+                <strong>{{ chapter.title || `Chapter ${index + 1}` }}</strong>
+                <span class="queue-item-failure-url">{{ chapter.url }}</span>
+                <span v-if="chapter.omitted" class="queue-item-failure-status">
+                  Omitted under job policy · HTTP {{ chapter.httpStatus ?? 'unknown' }}
+                </span>
+                <span v-else-if="chapter.httpStatus" class="queue-item-failure-status">
+                  HTTP {{ chapter.httpStatus }}
+                </span>
+                <span class="queue-item-failure-error">{{ chapter.error }}</span>
+              </div>
+            </div>
           </div>
       <span class="history-status" :class="`status-${item.status}`">
         <i v-if="item.status === 'discovering' && item.downloadOptions" class="pi pi-spin pi-spinner" aria-hidden="true"></i>
@@ -1364,6 +1544,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'needs-review' || item.status === 'ready'"
             label="Queue EPUB"
             icon="pi pi-bolt"
+            title="Queue EPUB"
             size="small"
             :loading="downloadActionId === item.id"
             :disabled="!outputDirectory || Boolean(downloadActionId) || batchQueueing || batchAccepting || !hasQueueableChapters(item)"
@@ -1373,6 +1554,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'needs-review'"
             label="Suggest"
             icon="pi pi-check"
+            title="Accept suggestions"
             size="small"
             severity="secondary"
             outlined
@@ -1382,6 +1564,8 @@ async function clearCompletedQueueItems(): Promise<void> {
           <Button
             v-if="item.status === 'needs-review' || item.status === 'ready'"
             label="Review"
+            icon="pi pi-eye"
+            title="Review chapters"
             size="small"
             severity="secondary"
             outlined
@@ -1392,6 +1576,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'needs-review' || item.status === 'ready'"
             label="Refresh"
             icon="pi pi-refresh"
+            title="Refresh discovery"
             size="small"
             severity="secondary"
             text
@@ -1402,6 +1587,8 @@ async function clearCompletedQueueItems(): Promise<void> {
           <Button
             v-else-if="['failed', 'cancelled'].includes(item.status) && !item.downloadOptions"
             label="Retry scan"
+            icon="pi pi-refresh"
+            title="Retry scan"
             size="small"
             severity="secondary"
             outlined
@@ -1413,6 +1600,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'discovering' && !item.downloadOptions"
             label="Force retry"
             icon="pi pi-refresh"
+            title="Force retry discovery"
             size="small"
             severity="secondary"
             outlined
@@ -1427,6 +1615,8 @@ async function clearCompletedQueueItems(): Promise<void> {
               size="small"
               severity="secondary"
               text
+              class="queue-item-browser-action"
+              title="Open verification browser"
               :loading="browserOpeningId === item.id"
               :disabled="Boolean(browserOpeningId) || Boolean(browserRetryingId) || Boolean(retryingId) || Boolean(downloadActionId)"
               @click="openItemInBrowser(item)"
@@ -1434,6 +1624,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             <Button
               label="Retry in browser"
               icon="pi pi-globe"
+              title="Retry using browser"
               size="small"
               severity="secondary"
               outlined
@@ -1446,6 +1637,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'discovering'"
             label="Cancel discovery"
             icon="pi pi-times"
+            title="Cancel discovery"
             size="small"
             severity="danger"
             text
@@ -1457,6 +1649,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'packaging-failed'"
             label="Retry packaging"
             icon="pi pi-box"
+            title="Retry packaging"
             size="small"
             severity="warning"
             outlined
@@ -1468,6 +1661,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
             label="Retry"
             icon="pi pi-refresh"
+            title="Retry download"
             size="small"
             severity="secondary"
             outlined
@@ -1479,6 +1673,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'failed' && item.recoveryReason === 'missing-history'"
             label="Restore & retry"
             icon="pi pi-refresh"
+            title="Restore saved job and retry"
             size="small"
             severity="warning"
             outlined
@@ -1490,6 +1685,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
             label="Save available chapters"
             icon="pi pi-save"
+            title="Save available chapters"
             size="small"
             severity="secondary"
             outlined
@@ -1501,6 +1697,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.downloadOptions && item.failedChapterCount === 0 && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
             label="Repackage offline"
             icon="pi pi-box"
+            title="Repackage offline"
             size="small"
             severity="secondary"
             outlined
@@ -1515,6 +1712,8 @@ async function clearCompletedQueueItems(): Promise<void> {
             size="small"
             severity="secondary"
             text
+            class="queue-item-browser-action"
+            title="Open verification browser"
             :loading="browserOpeningId === item.id"
             :disabled="Boolean(browserOpeningId) || Boolean(browserRetryingId) || Boolean(downloadActionId)"
             @click="openItemInBrowser(item)"
@@ -1523,6 +1722,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'queued' || item.status === 'downloading'"
             label="Pause"
             icon="pi pi-pause"
+            title="Pause download"
             size="small"
             severity="secondary"
             text
@@ -1580,6 +1780,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'paused'"
             label="Resume"
             icon="pi pi-play"
+            title="Resume download"
             size="small"
             severity="secondary"
             outlined
@@ -1591,6 +1792,7 @@ async function clearCompletedQueueItems(): Promise<void> {
             v-if="item.status === 'queued' || item.status === 'downloading' || item.status === 'paused'"
             label="Cancel"
             icon="pi pi-times"
+            title="Cancel download"
             size="small"
             severity="danger"
             text
@@ -1601,6 +1803,7 @@ async function clearCompletedQueueItems(): Promise<void> {
           <Button
             label="Remove"
             icon="pi pi-times"
+            title="Remove from queue"
             size="small"
             severity="danger"
             text

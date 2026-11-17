@@ -82,6 +82,7 @@ export interface QueueDownloadOptions {
   sourceUrl: string
   outputDirectory: string
   epubCss: string
+  omitHttp404Chapters?: boolean
 }
 
 export interface QueuedEpubJob {
@@ -107,6 +108,8 @@ export interface FailedQueueChapter {
   url: string
   title: string
   error: string
+  httpStatus?: number | null
+  omitted?: boolean
 }
 
 export interface QueueChapterSummary {
@@ -145,7 +148,6 @@ export interface DiscoveryQueueItem {
   downloadOptions: QueueDownloadOptions | null
   downloadStartedAt: string
   queuedAt: string
-  completedChapterUrls: string[]
   failedChapters: FailedQueueChapter[]
   outputPath: string
   downloadHistoryId: string
@@ -158,7 +160,7 @@ export interface DiscoveryQueueItem {
 
 export type DiscoveryQueueItemSummary = Omit<
   DiscoveryQueueItem,
-  'chapters' | 'completedChapterUrls'
+  'chapters'
 > & {
   failedChapterCount: number
 }

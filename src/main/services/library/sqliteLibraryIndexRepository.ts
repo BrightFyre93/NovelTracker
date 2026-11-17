@@ -27,13 +27,17 @@ import {
 import { backupLegacyJsonFile } from '../../infra/jsonMigrationBackup'
 import { withSqliteTransaction } from '../../infra/sqliteDatabase'
 import type { SqliteDatabase } from '../../infra/sqliteDatabase'
+import { samePath } from '../pathUtils'
 import {
   clearLibraryIndexCache,
   readLibraryIndex,
   readLibraryIndexBackup,
   readLibraryIndexBackupDate
 } from '../localStore'
-import type { LibraryIndexRepository } from './libraryIndexRepository'
+import {
+  applyLibraryFileCorrection,
+  type LibraryIndexRepository
+} from './libraryIndexRepository'
 
 const LIBRARY_JSON_MIGRATION = 'library-json-v1'
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -893,6 +897,171 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
         updateIndexMetadata(database, index)
       } else {
         replaceIndex(database, index)
+      }
+    })
+  }
+
+  async upsertFile(
+    file: LibraryFileRecord,
+    libraryRoot: string
+  ): Promise<void> {
+    await this.ensureInitialized()
+    const database = await this.database.open()
+    const previous = readIndex(database)
+    if (previous && !samePath(previous.libraryRoot, libraryRoot)) {
+      throw new Error(
+        'The saved library index belongs to a different folder. Scan the configured library folder before indexing this EPUB.'
+      )
+    }
+
+    const indexedFile = applyLibraryFileCorrection(
+      file,
+      previous?.corrections[file.id]
+    )
+    const novelId = normalizeNovelTitleForGrouping(indexedFile.novelTitle)
+    if (!novelId) {
+      throw new Error('The EPUB has no usable title for the library index.')
+    }
+    const savedAt = new Date().toISOString()
+    const oldFile = database
+      .prepare('SELECT ordinal, novel_id FROM library_files WHERE id = ?')
+      .get(indexedFile.id)
+    const ordinal =
+      typeof oldFile?.ordinal === 'number'
+        ? oldFile.ordinal
+        : getNumber(
+            database
+              .prepare(
+                'SELECT COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal FROM library_files'
+              )
+              .get()?.next_ordinal,
+            'next file ordinal'
+          )
+    const oldNovelId =
+      typeof oldFile?.novel_id === 'string' ? oldFile.novel_id : null
+    const insertTitleKeys =
+      indexedFile.chapterTitleKeys ??
+      indexedFile.chapterTitles
+        .map(normalizeNovelTitleForMatching)
+        .filter((titleKey) => titleKey.length > 0)
+
+    withSqliteTransaction(database, () => {
+      if (previous) {
+        this.writeBackup(database, previous)
+        database
+          .prepare(
+            'UPDATE library_index_metadata SET scanned_at = ? WHERE id = 1'
+          )
+          .run(savedAt)
+      } else {
+        database
+          .prepare(
+            `INSERT INTO library_index_metadata
+             (id, library_root, scanned_at, scan_errors, reused_files, inspected_files)
+             VALUES (1, ?, ?, 0, NULL, NULL)`
+          )
+          .run(libraryRoot, savedAt)
+      }
+
+      database
+        .prepare(
+          `INSERT INTO library_novels (id, display_title, normalized_title)
+           VALUES (?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             display_title = excluded.display_title,
+             normalized_title = excluded.normalized_title`
+        )
+        .run(novelId, indexedFile.novelTitle, novelId)
+      const alias = normalizeNovelTitleForMatching(indexedFile.novelTitle)
+      if (alias) {
+        database
+          .prepare(
+            'INSERT OR IGNORE INTO library_novel_aliases (novel_id, alias_key) VALUES (?, ?)'
+          )
+          .run(novelId, alias)
+      }
+
+      database
+        .prepare(
+          `INSERT INTO library_files (
+             id, ordinal, path, relative_path, filename, format, folder_state, size,
+             modified_at, novel_id, novel_title, author, language,
+             filename_range_start, filename_range_end, coverage_confidence,
+             cover_path, inspection_error
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             ordinal = excluded.ordinal,
+             path = excluded.path,
+             relative_path = excluded.relative_path,
+             filename = excluded.filename,
+             format = excluded.format,
+             folder_state = excluded.folder_state,
+             size = excluded.size,
+             modified_at = excluded.modified_at,
+             novel_id = excluded.novel_id,
+             novel_title = excluded.novel_title,
+             author = excluded.author,
+             language = excluded.language,
+             filename_range_start = excluded.filename_range_start,
+             filename_range_end = excluded.filename_range_end,
+             coverage_confidence = excluded.coverage_confidence,
+             cover_path = excluded.cover_path,
+             inspection_error = excluded.inspection_error`
+        )
+        .run(
+          indexedFile.id,
+          ordinal,
+          indexedFile.path,
+          indexedFile.relativePath,
+          indexedFile.filename,
+          indexedFile.format,
+          indexedFile.folderState,
+          indexedFile.size,
+          indexedFile.modifiedAt,
+          novelId,
+          indexedFile.novelTitle,
+          indexedFile.author,
+          indexedFile.language,
+          indexedFile.filenameRange?.start ?? null,
+          indexedFile.filenameRange?.end ?? null,
+          indexedFile.coverageConfidence,
+          indexedFile.coverPath,
+          indexedFile.inspectionError
+        )
+      database
+        .prepare('DELETE FROM library_chapters WHERE file_id = ?')
+        .run(indexedFile.id)
+      const insertChapter = database.prepare(
+        `INSERT INTO library_chapters
+         (file_id, ordinal, chapter_number, title_key)
+         VALUES (?, ?, ?, ?)`
+      )
+      const chapterCount = Math.max(
+        indexedFile.chapterNumbers.length,
+        insertTitleKeys.length
+      )
+      for (let chapterOrdinal = 0; chapterOrdinal < chapterCount; chapterOrdinal += 1) {
+        const chapterNumber =
+          indexedFile.chapterNumbers[chapterOrdinal] ?? null
+        const titleKey = insertTitleKeys[chapterOrdinal] ?? null
+        if (chapterNumber === null && titleKey === null) continue
+        insertChapter.run(
+          indexedFile.id,
+          chapterOrdinal,
+          chapterNumber,
+          titleKey
+        )
+      }
+
+      if (oldNovelId && oldNovelId !== novelId) {
+        database
+          .prepare(
+            `DELETE FROM library_novels
+             WHERE id = ? AND NOT EXISTS (
+               SELECT 1 FROM library_files WHERE novel_id = ?
+             )`
+          )
+          .run(oldNovelId, oldNovelId)
       }
     })
   }

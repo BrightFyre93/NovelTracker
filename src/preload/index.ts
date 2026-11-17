@@ -8,7 +8,8 @@ import type {
   LibraryFileCorrection,
   LibraryOperation,
   LibraryProgress,
-  NovelTrackerApi
+  NovelTrackerApi,
+  SiteExtractionMode
 } from '../shared/contracts'
 import type {
   IpcChannel,
@@ -58,6 +59,8 @@ const api: NovelTrackerApi = {
   getDiscoveryQueue: () => invokeIpc('discovery-queue:list'),
   getDiscoveryQueueSnapshot: () => invokeIpc('discovery-queue:snapshot'),
   getDiscoveryQueueItem: (id: string) => invokeIpc('discovery-queue:item', id),
+  getFailedQueueChapters: (id: string) =>
+    invokeIpc('discovery-queue:failed-chapters', id),
   addDiscoveryQueueItems: (items: DiscoveryQueueInput[]) =>
     invokeIpc('discovery-queue:add', items),
   retryDiscoveryQueueItem: (id: string) =>
@@ -67,8 +70,8 @@ const api: NovelTrackerApi = {
     invokeIpc('discovery-queue:force-retry', id),
   retryDiscoveryQueueItemWithBrowser: (id: string) =>
     invokeIpc('discovery-queue:retry-browser', id),
-  refreshDiscoveryQueueItem: (id: string) =>
-    invokeIpc('discovery-queue:refresh', id),
+  refreshDiscoveryQueueItem: (id: string, parserMode?: SiteExtractionMode) =>
+    invokeIpc('discovery-queue:refresh', id, parserMode),
   acceptQueueRecommendations: (id: string) =>
     invokeIpc('discovery-queue:accept-recommendations', id),
   enqueueEpubFromSnapshot: (queueItemId, overrides) =>

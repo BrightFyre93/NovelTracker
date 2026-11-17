@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { lstat, opendir, realpath } from 'node:fs/promises'
-import { extname, relative, resolve } from 'node:path'
+import { extname, isAbsolute, relative, resolve } from 'node:path'
 import type {
   LibraryFileRecord,
   LibraryIndex,
@@ -32,12 +32,102 @@ export interface LibraryScanOptions {
   scanOldCompletedFolder: boolean
 }
 
+export type PackagedEpubInspection =
+  | { file: LibraryFileRecord; libraryRoot: string }
+  | { file: null; skippedReason: string }
+
 function checkCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw new OperationCancelledError('Library scan cancelled.')
 }
 
 function fileId(relativePath: string): string {
   return createHash('sha256').update(relativePath.toLowerCase()).digest('hex')
+}
+
+export async function inspectPackagedEpubForLibrary(
+  path: string,
+  libraryRoot: string,
+  options: LibraryScanOptions
+): Promise<PackagedEpubInspection> {
+  if (!libraryRoot.trim()) {
+    return {
+      file: null,
+      skippedReason: 'no library folder is configured'
+    }
+  }
+
+  const root = await realpath(libraryRoot)
+  const requestedPath = resolve(path)
+  const filePath = await realpath(requestedPath)
+  const details = await lstat(requestedPath)
+  if (!details.isFile() || details.isSymbolicLink()) {
+    return {
+      file: null,
+      skippedReason: 'the output is not a regular file'
+    }
+  }
+  if (!samePath(requestedPath, filePath)) {
+    return {
+      file: null,
+      skippedReason: 'the output is reached through a symbolic link'
+    }
+  }
+
+  const relativePath = relative(root, filePath)
+  const pathParts = relativePath.split(/[\\/]/)
+  if (
+    !relativePath ||
+    relativePath === '..' ||
+    pathParts[0] === '..' ||
+    isAbsolute(relativePath)
+  ) {
+    return {
+      file: null,
+      skippedReason: 'the output is outside the configured library folder'
+    }
+  }
+
+  const folderState = LIBRARY_FOLDERS.find(
+    (folder) => folder.toLocaleLowerCase() === pathParts[0]?.toLocaleLowerCase()
+  )
+  if (!folderState) {
+    return {
+      file: null,
+      skippedReason: 'the output is not inside a folder scanned by the library'
+    }
+  }
+  if (
+    (folderState === 'Old' && !options.scanOldFolder) ||
+    (folderState === 'Old Completed' && !options.scanOldCompletedFolder)
+  ) {
+    return {
+      file: null,
+      skippedReason: `the ${folderState} folder is excluded from library scans`
+    }
+  }
+  if (extname(filePath).toLowerCase() !== '.epub') {
+    return {
+      file: null,
+      skippedReason: 'only EPUB files are added automatically'
+    }
+  }
+  if (details.size > MAX_EPUB_INPUT_BYTES) {
+    throw new Error(
+      `EPUB exceeds the ${MAX_EPUB_INPUT_BYTES / (1024 * 1024)} MB inspection limit.`
+    )
+  }
+
+  return {
+    file: await inspectEpub(
+      filePath,
+      relativePath,
+      folderState,
+      details.size,
+      details.mtime.toISOString(),
+      fileId(relativePath)
+    ),
+    libraryRoot: root
+  }
 }
 
 function normalizedRelativePath(relativePath: string): string {
