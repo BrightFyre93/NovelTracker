@@ -1185,8 +1185,8 @@ footer {
 }
 
 .configuration-setting {
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 13px;
   border: 1px solid #e7ecf2;
@@ -1228,7 +1228,18 @@ footer {
 }
 
 .configuration-setting > .p-button {
-  justify-self: start;
+  align-self: flex-end;
+  margin-top: auto;
+}
+
+.configuration-setting--compact {
+  align-self: start;
+}
+
+.configuration-section-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .site-extraction-settings {
@@ -1289,12 +1300,14 @@ footer {
 }
 
 .site-extraction-settings > .p-button {
-  justify-self: start;
+  justify-self: end;
 }
 
 .configuration-toggle {
+  display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: start;
+  column-gap: 8px;
   cursor: pointer;
 }
 

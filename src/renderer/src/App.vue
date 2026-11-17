@@ -675,12 +675,20 @@ function updateChapterSelection(id: string, event: Event): void {
           autocomplete="url"
           @keydown.enter="discover"
         />
-        <Button label="Discover chapters" icon="pi pi-search" :loading="busy" :disabled="busy || !url.trim()" @click="discover" />
+        <Button
+          icon="pi pi-search"
+          title="Discover chapters"
+          aria-label="Discover chapters"
+          :loading="busy"
+          :disabled="busy || !url.trim()"
+          @click="discover"
+        />
       </div>
       <div class="browser-assist-actions">
         <Button
-          label="Open verification browser"
           icon="pi pi-external-link"
+          title="Open verification browser"
+          aria-label="Open verification browser"
           severity="secondary"
           outlined
           :loading="browserBusy && !busy"
@@ -688,8 +696,9 @@ function updateChapterSelection(id: string, event: Event): void {
           @click="openBrowserForVerification"
         />
         <Button
-          :label="browserAssistOpen && browserAssistUrl === url.trim() ? 'Discover using browser' : 'Open browser for discovery'"
           icon="pi pi-globe"
+          :title="browserAssistOpen && browserAssistUrl === url.trim() ? 'Discover using browser' : 'Open browser for discovery'"
+          :aria-label="browserAssistOpen && browserAssistUrl === url.trim() ? 'Discover using browser' : 'Open browser for discovery'"
           severity="secondary"
           outlined
           :loading="browserBusy && busy"
@@ -698,15 +707,17 @@ function updateChapterSelection(id: string, event: Event): void {
         />
         <Button
           v-if="browserDiscoveryRunning"
-          label="Cancel browser discovery"
           icon="pi pi-times"
+          title="Cancel browser discovery"
+          aria-label="Cancel browser discovery"
           severity="danger"
           text
           @click="cancelBrowserDiscovery"
         />
         <Button
-          label="Clear browser session"
           icon="pi pi-trash"
+          title="Clear browser session"
+          aria-label="Clear browser session"
           severity="secondary"
           text
           :disabled="busy || browserBusy"
@@ -718,7 +729,16 @@ function updateChapterSelection(id: string, event: Event): void {
         <template v-if="browserAssistOpen"> Browser ready<template v-if="browserPageTitle">: {{ browserPageTitle }}</template>.</template>
       </p>
       <div class="tracker-picker-toggle">
-        <Button label="Browse tracker CSV" icon="pi pi-list" severity="secondary" text size="small" :disabled="busy" @click="openTrackerPicker" />
+        <Button
+          icon="pi pi-list"
+          title="Browse tracker CSV"
+          aria-label="Browse tracker CSV"
+          severity="secondary"
+          text
+          size="small"
+          :disabled="busy"
+          @click="openTrackerPicker"
+        />
       </div>
       <div v-if="trackerVisible" class="tracker-picker">
         <div class="tracker-picker-heading">
@@ -726,7 +746,15 @@ function updateChapterSelection(id: string, event: Event): void {
             <h4>Add from Tracker</h4>
             <p>Browsing is local and read-only. Network requests start only when you choose Discover chapters.</p>
           </div>
-          <Button icon="pi pi-times" aria-label="Close tracker picker" severity="secondary" text rounded @click="trackerVisible = false" />
+          <Button
+            icon="pi pi-times"
+            title="Close tracker picker"
+            aria-label="Close tracker picker"
+            severity="secondary"
+            text
+            rounded
+            @click="trackerVisible = false"
+          />
         </div>
         <InputText v-model="trackerSearch" class="full-input" placeholder="Search title, author, or alternate name" />
         <div v-if="trackerLoading" class="help-text">Reading the configured CSV…</div>
@@ -744,7 +772,9 @@ function updateChapterSelection(id: string, event: Event): void {
               </select>
               <span v-else class="help-text">No source URL</span>
               <Button
-                :label="novel.sources.length ? 'Use' : 'Use details'"
+                icon="pi pi-check"
+                :title="novel.sources.length ? 'Use selected tracker source' : 'Use tracker details'"
+                :aria-label="novel.sources.length ? 'Use selected tracker source' : 'Use tracker details'"
                 size="small"
                 severity="secondary"
                 outlined
@@ -795,10 +825,46 @@ function updateChapterSelection(id: string, event: Event): void {
             <p>{{ parserName }} · {{ chapters.length.toLocaleString() }} chapters · source order</p>
           </div>
           <div class="toolbar-actions">
-            <Button label="First only" severity="secondary" text size="small" :disabled="busy || chapters.length === 0" @click="selectBoundaryChapter('first')" />
-            <Button label="Last only" severity="secondary" text size="small" :disabled="busy || chapters.length === 0" @click="selectBoundaryChapter('last')" />
-            <Button label="Select all" severity="secondary" text size="small" :disabled="busy" @click="toggleAll(true)" />
-            <Button label="Clear" severity="secondary" text size="small" :disabled="busy" @click="toggleAll(false)" />
+            <Button
+              icon="pi pi-angle-double-up"
+              title="Select first chapter only"
+              aria-label="Select first chapter only"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy || chapters.length === 0"
+              @click="selectBoundaryChapter('first')"
+            />
+            <Button
+              icon="pi pi-angle-double-down"
+              title="Select last chapter only"
+              aria-label="Select last chapter only"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy || chapters.length === 0"
+              @click="selectBoundaryChapter('last')"
+            />
+            <Button
+              icon="pi pi-check-square"
+              title="Select all chapters"
+              aria-label="Select all chapters"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy"
+              @click="toggleAll(true)"
+            />
+            <Button
+              icon="pi pi-times"
+              title="Clear chapter selection"
+              aria-label="Clear chapter selection"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy"
+              @click="toggleAll(false)"
+            />
           </div>
         </div>
         <div class="chapter-filter-row">
@@ -873,8 +939,9 @@ function updateChapterSelection(id: string, event: Event): void {
             </div>
           </div>
           <Button
-            label="Configuration"
             icon="pi pi-cog"
+            title="Open Configuration"
+            aria-label="Open Configuration"
             severity="secondary"
             outlined
             :disabled="busy"
@@ -884,8 +951,9 @@ function updateChapterSelection(id: string, event: Event): void {
         <div class="create-row">
           <p class="help-text">If an EPUB with this name already exists, it will be overwritten.</p>
           <Button
-            label="Add to EPUB queue"
             icon="pi pi-book"
+            title="Add to EPUB queue"
+            aria-label="Add to EPUB queue"
             :loading="busy"
             :disabled="busy || selectedCount === 0 || !title.trim() || !outputDirectory || !hasCurrentDiscovery"
             @click="createEpub"
@@ -945,7 +1013,9 @@ function updateChapterSelection(id: string, event: Event): void {
         {{ libraryCancelError }}
       </Message>
       <Button
-        :label="libraryProgress?.stage === 'save' ? 'Saving index…' : 'Cancel scan'"
+        icon="pi pi-times"
+        :title="libraryProgress?.stage === 'save' ? 'Saving index' : 'Cancel scan'"
+        :aria-label="libraryProgress?.stage === 'save' ? 'Saving index' : 'Cancel scan'"
         severity="secondary"
         outlined
         :disabled="libraryCancelling || libraryProgress?.stage === 'save'"

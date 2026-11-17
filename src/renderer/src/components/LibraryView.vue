@@ -706,22 +706,23 @@ function chapterRangeLabel(start: number, end: number): string {
         </div>
         <div class="library-actions">
           <Button
-            label="Configuration"
             icon="pi pi-cog"
+            title="Open Configuration"
+            aria-label="Open Configuration"
             severity="secondary"
             outlined
             @click="emit('openConfiguration')"
           />
           <Button
-            label="Scan / rescan"
             icon="pi pi-refresh"
+            aria-label="Scan or rescan library"
             title="Scan for added or removed files, reusing cached metadata for unchanged files. This does not modify library files; use Rebuild index to reinspect everything."
             :disabled="busy || !libraryRoot"
             @click="scan()"
           />
           <Button
-            label="Rebuild index"
             icon="pi pi-sync"
+            aria-label="Rebuild library index"
             severity="secondary"
             outlined
             title="Reinspect files without reusing the cached index. The current index is backed up first."
@@ -729,13 +730,14 @@ function chapterRangeLabel(start: number, end: number): string {
             @click="scan(true)"
           />
           <Button
-            v-if="backupDate"
-            label="Restore backup"
             icon="pi pi-history"
+            :aria-label="backupDate ? 'Restore library index backup' : 'No library index backup available'"
             severity="secondary"
             outlined
-            :title="`Last index backup saved: ${new Date(backupDate).toLocaleString()}`"
-            :disabled="busy"
+            :title="backupDate
+              ? `Restore library index backup. Last saved: ${new Date(backupDate).toLocaleString()}`
+              : 'No library index backup is available to restore.'"
+            :disabled="busy || !backupDate"
             :loading="restoringBackup"
             @click="restoreBackup"
           />
@@ -871,8 +873,9 @@ function chapterRangeLabel(start: number, end: number): string {
           <div class="merge-filename-row">
             <InputText v-model="mergeFilename" class="full-input" aria-label="Merged EPUB filename" placeholder="Combined EPUB filename" />
             <Button
-              label="Create merged EPUB"
               icon="pi pi-clone"
+              title="Create merged EPUB"
+              aria-label="Create merged EPUB"
               :loading="merging"
               :disabled="busy || mergeFileIds.length < 2 || !outputDirectory"
               @click="mergeSelectedEpubs"
@@ -991,12 +994,29 @@ function chapterRangeLabel(start: number, end: number): string {
               <strong>{{ selectedFile.relativePath }}</strong>
             </div>
             <div class="toolbar-actions">
-              <Button label="Open" severity="secondary" text size="small" @click="openFile(selectedFile, false)" />
-              <Button label="Show in folder" severity="secondary" text size="small" @click="openFile(selectedFile, true)" />
+              <Button
+                icon="pi pi-external-link"
+                title="Open file"
+                aria-label="Open file"
+                severity="secondary"
+                text
+                size="small"
+                @click="openFile(selectedFile, false)"
+              />
+              <Button
+                icon="pi pi-folder-open"
+                title="Show in folder"
+                aria-label="Show in folder"
+                severity="secondary"
+                text
+                size="small"
+                @click="openFile(selectedFile, true)"
+              />
               <Button
                 v-if="selectedFile.format === 'EPUB'"
-                label="Check / repair"
                 icon="pi pi-wrench"
+                title="Check or repair EPUB"
+                aria-label="Check or repair EPUB"
                 severity="secondary"
                 text
                 size="small"
@@ -1006,8 +1026,9 @@ function chapterRangeLabel(start: number, end: number): string {
               />
               <Button
                 v-if="selectedFile.format === 'EPUB'"
-                :label="mergeFileIds.includes(selectedFile.id) ? 'Remove from merge' : 'Add to merge'"
                 :icon="mergeFileIds.includes(selectedFile.id) ? 'pi pi-minus-circle' : 'pi pi-plus-circle'"
+                :title="mergeFileIds.includes(selectedFile.id) ? 'Remove from merge' : 'Add to merge'"
+                :aria-label="mergeFileIds.includes(selectedFile.id) ? 'Remove from merge' : 'Add to merge'"
                 severity="secondary"
                 text
                 size="small"
@@ -1041,7 +1062,16 @@ function chapterRangeLabel(start: number, end: number): string {
               />
             </div>
           </div>
-          <Button label="Save correction" severity="secondary" outlined size="small" :disabled="busy" @click="saveCorrection" />
+          <Button
+            icon="pi pi-save"
+            title="Save correction"
+            aria-label="Save correction"
+            severity="secondary"
+            outlined
+            size="small"
+            :disabled="busy"
+            @click="saveCorrection"
+          />
         </div>
       </section>
     </div>

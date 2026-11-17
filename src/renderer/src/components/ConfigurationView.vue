@@ -555,17 +555,41 @@ async function resetEpubCss(): Promise<void> {
         <div class="library-path">
           <span class="field-label">Historical library root</span>
           <span class="library-path-value">{{ settings.libraryRoot || 'Not configured' }}</span>
-          <Button label="Choose library" severity="secondary" outlined size="small" @click="chooseLibraryRoot" />
+          <Button
+            icon="pi pi-folder-open"
+            title="Choose library folder"
+            aria-label="Choose library folder"
+            severity="secondary"
+            outlined
+            size="small"
+            @click="chooseLibraryRoot"
+          />
         </div>
         <div class="library-path">
           <span class="field-label">Novel tracker CSV · read-only</span>
           <span class="library-path-value">{{ settings.trackerCsvPath || 'Not configured' }}</span>
-          <Button label="Choose CSV" severity="secondary" outlined size="small" @click="chooseTrackerCsv" />
+          <Button
+            icon="pi pi-file"
+            title="Choose tracker CSV"
+            aria-label="Choose tracker CSV"
+            severity="secondary"
+            outlined
+            size="small"
+            @click="chooseTrackerCsv"
+          />
         </div>
         <div class="library-path">
           <span class="field-label">EPUB output folder</span>
           <span class="library-path-value">{{ settings.outputDirectory || 'Not configured' }}</span>
-          <Button label="Choose output" severity="secondary" outlined size="small" @click="chooseOutputDirectory" />
+          <Button
+            icon="pi pi-folder"
+            title="Choose EPUB output folder"
+            aria-label="Choose EPUB output folder"
+            severity="secondary"
+            outlined
+            size="small"
+            @click="chooseOutputDirectory"
+          />
         </div>
       </div>
     </section>
@@ -584,7 +608,9 @@ async function resetEpubCss(): Promise<void> {
             <option v-for="limit in concurrencyOptions" :key="limit" :value="limit">{{ limit }} active novel{{ limit === 1 ? '' : 's' }}</option>
           </select>
           <Button
-            label="Save concurrency"
+            icon="pi pi-save"
+            title="Save concurrency settings"
+            aria-label="Save concurrency settings"
             size="small"
             :loading="savingConcurrency"
             :disabled="savingConcurrency || !concurrencyDirty"
@@ -598,7 +624,9 @@ async function resetEpubCss(): Promise<void> {
           </select>
           <small class="help-text">Controls how many chapter lists are discovered at once. Same-site requests still share the site's rate limit.</small>
           <Button
-            label="Save discovery concurrency"
+            icon="pi pi-save"
+            title="Save discovery concurrency settings"
+            aria-label="Save discovery concurrency settings"
             size="small"
             :loading="savingDiscoveryConcurrency"
             :disabled="savingDiscoveryConcurrency || !discoveryConcurrencyDirty"
@@ -612,7 +640,9 @@ async function resetEpubCss(): Promise<void> {
           </select>
           <small class="help-text">Independent of novel downloads. Same-site requests still share the site's rate limit and a two-request host cap.</small>
           <Button
-            label="Save chapter concurrency"
+            icon="pi pi-save"
+            title="Save chapter concurrency settings"
+            aria-label="Save chapter concurrency settings"
             size="small"
             :loading="savingChapterConcurrency"
             :disabled="savingChapterConcurrency || !chapterConcurrencyDirty"
@@ -628,14 +658,16 @@ async function resetEpubCss(): Promise<void> {
           </select>
           <small class="help-text">Includes the initial request. Transient failures are retried up to this total; permanent errors are not retried.</small>
           <Button
-            label="Save retry attempts"
+            icon="pi pi-save"
+            title="Save retry settings"
+            aria-label="Save retry settings"
             size="small"
             :loading="savingRetryAttempts"
             :disabled="savingRetryAttempts || !retryAttemptsDirty"
             @click="saveRetryAttempts"
           />
         </div>
-        <div class="configuration-setting">
+        <div class="configuration-setting configuration-setting--compact">
           <label class="configuration-toggle" for="omit-http-404-chapters">
             <input id="omit-http-404-chapters" v-model="omitHttp404ChaptersDraft" type="checkbox" />
             <span>
@@ -644,7 +676,9 @@ async function resetEpubCss(): Promise<void> {
             </span>
           </label>
           <Button
-            label="Save 404 policy"
+            icon="pi pi-save"
+            title="Save HTTP 404 chapter policy"
+            aria-label="Save HTTP 404 chapter policy"
             size="small"
             :loading="savingOmitHttp404Chapters"
             :disabled="savingOmitHttp404Chapters || !omitHttp404ChaptersDirty"
@@ -681,7 +715,9 @@ async function resetEpubCss(): Promise<void> {
           </div>
           <small class="help-text">Response/read timeout resets whenever data arrives. Allowed range: 1–120 seconds for each timeout.</small>
           <Button
-            label="Save HTTP timeouts"
+            icon="pi pi-save"
+            title="Save HTTP timeout settings"
+            aria-label="Save HTTP timeout settings"
             size="small"
             :loading="savingRequestTimeouts"
             :disabled="savingRequestTimeouts || !requestTimeoutsDirty || !requestTimeoutsValid"
@@ -707,7 +743,9 @@ async function resetEpubCss(): Promise<void> {
             Default is 24 hours. Queued EPUBs refresh before downloading when their chapter list is at least this old (1–720 hours).
           </small>
           <Button
-            label="Save refresh interval"
+            icon="pi pi-save"
+            title="Save chapter-list refresh interval"
+            aria-label="Save chapter-list refresh interval"
             size="small"
             :loading="savingFreshness"
             :disabled="savingFreshness || !freshnessDirty || !freshnessValid"
@@ -721,7 +759,9 @@ async function resetEpubCss(): Promise<void> {
             <option value="dark">Dark</option>
           </select>
           <Button
-            label="Save theme"
+            icon="pi pi-save"
+            title="Save appearance settings"
+            aria-label="Save appearance settings"
             size="small"
             :loading="savingTheme"
             :disabled="savingTheme || !themeDirty"
@@ -757,7 +797,9 @@ async function resetEpubCss(): Promise<void> {
             :disabled="savingDomainRequestDelays"
           />
           <Button
-            label="Add / update domain"
+            icon="pi pi-plus"
+            title="Add or update domain delay"
+            aria-label="Add or update domain delay"
             size="small"
             :disabled="savingDomainRequestDelays"
             @click="addDomainRequestDelay"
@@ -789,6 +831,7 @@ async function resetEpubCss(): Promise<void> {
               text
               rounded
               size="small"
+              :title="`Remove request delay for ${preference.hostname}`"
               :aria-label="`Remove request delay for ${preference.hostname}`"
               :disabled="savingDomainRequestDelays"
               @click="removeDomainRequestDelay(preference.hostname)"
@@ -796,7 +839,9 @@ async function resetEpubCss(): Promise<void> {
           </div>
         </div>
         <Button
-          label="Save domain delays"
+          icon="pi pi-save"
+          title="Save domain request delays"
+          aria-label="Save domain request delays"
           size="small"
           :loading="savingDomainRequestDelays"
           :disabled="savingDomainRequestDelays || !domainRequestDelaysDirty"
@@ -822,7 +867,14 @@ async function resetEpubCss(): Promise<void> {
             <option value="generic-html">Generic HTML</option>
             <option value="novelfull">NovelFull</option>
           </select>
-          <Button label="Add / update site" size="small" :disabled="savingSiteExtractionPreferences" @click="addSiteExtractionPreference" />
+          <Button
+            icon="pi pi-plus"
+            title="Add or update site preference"
+            aria-label="Add or update site preference"
+            size="small"
+            :disabled="savingSiteExtractionPreferences"
+            @click="addSiteExtractionPreference"
+          />
         </div>
         <div v-if="siteExtractionPreferencesDraft.length" class="site-extraction-preference-list">
           <div v-for="preference in siteExtractionPreferencesDraft" :key="preference.hostname" class="site-extraction-preference-row">
@@ -838,6 +890,7 @@ async function resetEpubCss(): Promise<void> {
               text
               rounded
               size="small"
+              :title="`Remove extraction preference for ${preference.hostname}`"
               :aria-label="`Remove extraction preference for ${preference.hostname}`"
               :disabled="savingSiteExtractionPreferences"
               @click="removeSiteExtractionPreference(preference.hostname)"
@@ -845,7 +898,9 @@ async function resetEpubCss(): Promise<void> {
           </div>
         </div>
         <Button
-          label="Save site preferences"
+          icon="pi pi-save"
+          title="Save site preferences"
+          aria-label="Save site preferences"
           size="small"
           :loading="savingSiteExtractionPreferences"
           :disabled="savingSiteExtractionPreferences || !siteExtractionPreferencesDirty"
@@ -877,13 +932,17 @@ async function resetEpubCss(): Promise<void> {
           </span>
         </label>
       </div>
-      <Button
-        label="Save scan preference"
-        size="small"
-        :loading="savingLibraryScanOptions"
-        :disabled="savingLibraryScanOptions || !libraryScanOptionsDirty"
-        @click="saveLibraryScanOptions"
-      />
+      <div class="configuration-section-actions">
+        <Button
+          icon="pi pi-save"
+          title="Save library scan preferences"
+          aria-label="Save library scan preferences"
+          size="small"
+          :loading="savingLibraryScanOptions"
+          :disabled="savingLibraryScanOptions || !libraryScanOptionsDirty"
+          @click="saveLibraryScanOptions"
+        />
+      </div>
     </section>
 
     <section class="card library-settings" aria-labelledby="configuration-epub-heading">
@@ -908,7 +967,9 @@ async function resetEpubCss(): Promise<void> {
           <span>{{ epubCssDraft.length.toLocaleString() }} / {{ MAX_EPUB_CSS_LENGTH.toLocaleString() }} characters</span>
           <div>
             <Button
-              label="Reset to default"
+              icon="pi pi-refresh"
+              title="Reset stylesheet to default"
+              aria-label="Reset stylesheet to default"
               severity="secondary"
               outlined
               size="small"
@@ -916,7 +977,9 @@ async function resetEpubCss(): Promise<void> {
               @click="resetEpubCss"
             />
             <Button
-              label="Save stylesheet"
+              icon="pi pi-save"
+              title="Save EPUB stylesheet"
+              aria-label="Save EPUB stylesheet"
               size="small"
               :loading="savingEpubCss"
               :disabled="savingEpubCss || !epubCssDirty"

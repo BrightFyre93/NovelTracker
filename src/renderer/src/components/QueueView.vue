@@ -1105,8 +1105,9 @@ async function clearCompletedQueueItems(): Promise<void> {
         <h3 id="queue-intake-heading">Queue sources for discovery</h3>
       </div>
       <Button
-        :label="trackerVisible ? 'Hide Tracker' : 'Add from Tracker'"
         :icon="trackerVisible ? 'pi pi-chevron-up' : 'pi pi-list'"
+        :title="trackerVisible ? 'Hide tracker selection' : 'Add from tracker'"
+        :aria-label="trackerVisible ? 'Hide tracker selection' : 'Add from tracker'"
         severity="secondary"
         outlined
         :loading="trackerLoading"
@@ -1189,8 +1190,9 @@ async function clearCompletedQueueItems(): Promise<void> {
     <div class="queue-add-row">
       <span class="help-text">{{ selectedTrackerIds.length }} tracker novels selected</span>
       <Button
-        label="Add selected to queue"
         icon="pi pi-plus"
+        title="Add selected novels and URLs to queue"
+        aria-label="Add selected novels and URLs to queue"
         :loading="adding"
         :disabled="adding || (selectedTrackerIds.length === 0 && !manualUrls.trim())"
         @click="addToQueue"
@@ -1212,25 +1214,23 @@ async function clearCompletedQueueItems(): Promise<void> {
           {{ activeDownloadCount }}/{{ maxDownloads }}
         </span>
         <Button
-          :label="String(batchQueueableItems.length)"
           icon="pi pi-bolt"
           size="small"
           text
           rounded
-          aria-label="Queue all ready items and safe suggestions"
-          title="Queue ready items and review suggestions with certain archive coverage"
+          :aria-label="`Queue all ${batchQueueableItems.length} ready items and safe suggestions`"
+          :title="`Queue ${batchQueueableItems.length} ready items and review suggestions with certain archive coverage`"
           :loading="batchQueueing"
           :disabled="!outputDirectory || batchQueueableItems.length === 0 || batchQueueing || batchAccepting || Boolean(downloadActionId)"
           @click="queueAllRecommendedEpubs"
         />
         <Button
-          :label="String(batchAcceptableItems.length)"
           icon="pi pi-check"
           severity="secondary"
           text
           rounded
-          aria-label="Accept all safe suggestions"
-          title="Accept all safe suggestions"
+          :aria-label="`Accept all ${batchAcceptableItems.length} safe suggestions`"
+          :title="`Accept ${batchAcceptableItems.length} safe suggestions`"
           size="small"
           :loading="batchAccepting"
           :disabled="batchAcceptableItems.length === 0 || batchAccepting || batchQueueing || Boolean(downloadActionId)"
@@ -1248,8 +1248,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           @click="refreshQueue"
         />
         <Button
-          label="Clear completed"
           icon="pi pi-check-circle"
+          title="Clear completed queue items"
+          aria-label="Clear completed queue items"
           severity="secondary"
           text
           size="small"
@@ -1286,7 +1287,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           </label>
           <Button
             v-if="selectedQueueStatuses.length"
-            label="Clear filters"
+            icon="pi pi-times"
+            title="Clear status filters"
+            aria-label="Clear status filters"
             severity="secondary"
             text
             size="small"
@@ -1297,16 +1300,18 @@ async function clearCompletedQueueItems(): Promise<void> {
       </details>
       <Button
         v-if="queueGroups.length"
-        :label="allVisibleQueueSectionsCollapsed ? 'Expand all' : 'Collapse all'"
         :icon="allVisibleQueueSectionsCollapsed ? 'pi pi-window-maximize' : 'pi pi-window-minimize'"
+        :title="allVisibleQueueSectionsCollapsed ? 'Expand all queue sections' : 'Collapse all queue sections'"
+        :aria-label="allVisibleQueueSectionsCollapsed ? 'Expand all queue sections' : 'Collapse all queue sections'"
         severity="secondary"
         text
         size="small"
         @click="toggleAllQueueSections"
       />
       <Button
-        label="Select eligible"
         icon="pi pi-check-square"
+        title="Select all eligible queue items"
+        aria-label="Select all eligible queue items"
         severity="secondary"
         text
         size="small"
@@ -1314,27 +1319,30 @@ async function clearCompletedQueueItems(): Promise<void> {
         @click="selectVisibleQueueableItems"
       />
       <Button
-        :label="`Queue selected (${selectedQueueableItems.length})`"
         icon="pi pi-bolt"
+        :title="`Queue ${selectedQueueableItems.length} selected items`"
+        :aria-label="`Queue ${selectedQueueableItems.length} selected items`"
         size="small"
         :disabled="!outputDirectory || !selectedQueueableItems.length || batchQueueing || batchAccepting || Boolean(downloadActionId)"
         @click="queueSelectedEpubs"
       />
       <Button
         v-if="failedDiscoveryCount > 0"
-        :label="`Retry all failed scans (${failedDiscoveryCount.toLocaleString()})`"
         icon="pi pi-refresh"
         severity="secondary"
         outlined
         size="small"
         title="Retry every failed chapter discovery; the discovery scheduler still limits simultaneous requests."
+        :aria-label="`Retry all ${failedDiscoveryCount.toLocaleString()} failed scans`"
         :loading="retryingAllDiscoveries"
         :disabled="retryingAllDiscoveries || Boolean(retryingId) || Boolean(refreshingId) || Boolean(removingId) || clearing || batchQueueing || batchAccepting || Boolean(downloadActionId)"
         @click="retryAllFailedScans"
       />
       <Button
         v-if="selectedQueueItemIds.length"
-        label="Clear selection"
+        icon="pi pi-times"
+        title="Clear queue selection"
+        aria-label="Clear queue selection"
         severity="secondary"
         text
         size="small"
@@ -1503,12 +1511,13 @@ async function clearCompletedQueueItems(): Promise<void> {
             </span>
             <Button
               v-if="item.failedChapterCount"
-              :label="`${item.failedChapterCount.toLocaleString()} failed or omitted chapter${item.failedChapterCount === 1 ? '' : 's'} · ${expandedFailedChapterId === item.id ? 'hide' : 'details'}`"
               icon="pi pi-exclamation-triangle"
               severity="warning"
               text
               size="small"
               class="queue-item-failures-button"
+              :title="`${expandedFailedChapterId === item.id ? 'Hide' : 'Show'} failed or omitted chapter details`"
+              :aria-label="`${expandedFailedChapterId === item.id ? 'Hide' : 'Show'} ${item.failedChapterCount.toLocaleString()} failed or omitted chapter details for ${item.title}`"
               :aria-expanded="expandedFailedChapterId === item.id"
               :aria-controls="`failed-chapters-${item.id}`"
               @click="toggleFailedChapterDetails(item)"
@@ -1542,9 +1551,9 @@ async function clearCompletedQueueItems(): Promise<void> {
         <div class="queue-item-buttons">
           <Button
             v-if="item.status === 'needs-review' || item.status === 'ready'"
-            label="Queue EPUB"
             icon="pi pi-bolt"
             title="Queue EPUB"
+            :aria-label="`Queue EPUB for ${item.title}`"
             size="small"
             :loading="downloadActionId === item.id"
             :disabled="!outputDirectory || Boolean(downloadActionId) || batchQueueing || batchAccepting || !hasQueueableChapters(item)"
@@ -1552,9 +1561,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'needs-review'"
-            label="Suggest"
             icon="pi pi-check"
             title="Accept suggestions"
+            :aria-label="`Accept chapter suggestions for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1563,9 +1572,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'needs-review' || item.status === 'ready'"
-            label="Review"
             icon="pi pi-eye"
             title="Review chapters"
+            :aria-label="`Review chapters for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1574,9 +1583,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'needs-review' || item.status === 'ready'"
-            label="Refresh"
             icon="pi pi-refresh"
             title="Refresh discovery"
+            :aria-label="`Refresh discovery for ${item.title}`"
             size="small"
             severity="secondary"
             text
@@ -1586,9 +1595,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-else-if="['failed', 'cancelled'].includes(item.status) && !item.downloadOptions"
-            label="Retry scan"
             icon="pi pi-refresh"
             title="Retry scan"
+            :aria-label="`Retry chapter scan for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1598,9 +1607,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'discovering' && !item.downloadOptions"
-            label="Force retry"
             icon="pi pi-refresh"
             title="Force retry discovery"
+            :aria-label="`Force retry discovery for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1610,21 +1619,21 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <template v-if="['failed', 'cancelled'].includes(item.status) && !item.downloadOptions">
             <Button
-              label="Open verification browser"
               icon="pi pi-external-link"
               size="small"
               severity="secondary"
               text
               class="queue-item-browser-action"
               title="Open verification browser"
+              :aria-label="`Open verification browser for ${item.title}`"
               :loading="browserOpeningId === item.id"
               :disabled="Boolean(browserOpeningId) || Boolean(browserRetryingId) || Boolean(retryingId) || Boolean(downloadActionId)"
               @click="openItemInBrowser(item)"
             />
             <Button
-              label="Retry in browser"
               icon="pi pi-globe"
               title="Retry using browser"
+              :aria-label="`Retry ${item.title} using browser`"
               size="small"
               severity="secondary"
               outlined
@@ -1635,9 +1644,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           </template>
           <Button
             v-if="item.status === 'discovering'"
-            label="Cancel discovery"
             icon="pi pi-times"
             title="Cancel discovery"
+            :aria-label="`Cancel discovery for ${item.title}`"
             size="small"
             severity="danger"
             text
@@ -1647,9 +1656,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'packaging-failed'"
-            label="Retry packaging"
             icon="pi pi-box"
             title="Retry packaging"
+            :aria-label="`Retry packaging for ${item.title}`"
             size="small"
             severity="warning"
             outlined
@@ -1659,9 +1668,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
-            label="Retry"
             icon="pi pi-refresh"
             title="Retry download"
+            :aria-label="`Retry download for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1671,9 +1680,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'failed' && item.recoveryReason === 'missing-history'"
-            label="Restore & retry"
             icon="pi pi-refresh"
             title="Restore saved job and retry"
+            :aria-label="`Restore saved job and retry ${item.title}`"
             size="small"
             severity="warning"
             outlined
@@ -1683,9 +1692,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
-            label="Save available chapters"
             icon="pi pi-save"
             title="Save available chapters"
+            :aria-label="`Save available chapters for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1695,9 +1704,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.downloadOptions && item.failedChapterCount === 0 && ['failed', 'partially-completed', 'cancelled'].includes(item.status)"
-            label="Repackage offline"
             icon="pi pi-box"
             title="Repackage offline"
+            :aria-label="`Repackage ${item.title} offline`"
             size="small"
             severity="secondary"
             outlined
@@ -1707,22 +1716,22 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.downloadOptions && ['failed', 'partially-completed', 'paused', 'cancelled'].includes(item.status)"
-            label="Open verification browser"
             icon="pi pi-external-link"
             size="small"
             severity="secondary"
             text
             class="queue-item-browser-action"
             title="Open verification browser"
+            :aria-label="`Open verification browser for ${item.title}`"
             :loading="browserOpeningId === item.id"
             :disabled="Boolean(browserOpeningId) || Boolean(browserRetryingId) || Boolean(downloadActionId)"
             @click="openItemInBrowser(item)"
           />
           <Button
             v-if="item.status === 'queued' || item.status === 'downloading'"
-            label="Pause"
             icon="pi pi-pause"
             title="Pause download"
+            :aria-label="`Pause download for ${item.title}`"
             size="small"
             severity="secondary"
             text
@@ -1778,9 +1787,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           </template>
           <Button
             v-if="item.status === 'paused'"
-            label="Resume"
             icon="pi pi-play"
             title="Resume download"
+            :aria-label="`Resume download for ${item.title}`"
             size="small"
             severity="secondary"
             outlined
@@ -1790,9 +1799,9 @@ async function clearCompletedQueueItems(): Promise<void> {
           />
           <Button
             v-if="item.status === 'queued' || item.status === 'downloading' || item.status === 'paused'"
-            label="Cancel"
             icon="pi pi-times"
             title="Cancel download"
+            :aria-label="`Cancel download for ${item.title}`"
             size="small"
             severity="danger"
             text
@@ -1801,9 +1810,9 @@ async function clearCompletedQueueItems(): Promise<void> {
             @click="runDownloadAction(item, 'cancel')"
           />
           <Button
-            label="Remove"
             icon="pi pi-times"
             title="Remove from queue"
+            :aria-label="`Remove ${item.title} from queue`"
             size="small"
             severity="danger"
             text
@@ -1823,7 +1832,9 @@ async function clearCompletedQueueItems(): Promise<void> {
     </div>
     <Button
       v-if="visibleQueueItems(group).length < group.items.length"
-      :label="`Show ${Math.min(QUEUE_ITEMS_PER_PAGE, group.items.length - visibleQueueItems(group).length)} more of ${group.items.length - visibleQueueItems(group).length} remaining`"
+      icon="pi pi-chevron-down"
+      :title="`Show ${Math.min(QUEUE_ITEMS_PER_PAGE, group.items.length - visibleQueueItems(group).length)} more queue items`"
+      :aria-label="`Show ${Math.min(QUEUE_ITEMS_PER_PAGE, group.items.length - visibleQueueItems(group).length)} more queue items`"
       severity="secondary"
       text
       size="small"
