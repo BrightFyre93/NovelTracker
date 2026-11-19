@@ -445,8 +445,102 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
     notifyDiscoveryQueueChanged()
   }
 
+  function requireReviewItem(id: string): DiscoveryQueueItem {
+    const item = discoveryQueue.find((candidate) => candidate.id === id)
+    if (!item || (item.status !== 'needs-review' && item.status !== 'ready')) {
+      throw new Error(
+        'The selected discovery queue item is no longer ready for review.'
+      )
+    }
+    return item
+  }
+
+  async function reverseChapterOrder(id: string): Promise<void> {
+    const item = requireReviewItem(id)
+    await withChapters(item, async () => {
+      const libraryFiles =
+        (await libraryIndexRepository.readRecommendationFiles(item)) ?? []
+      await mutateItem(item.id, (draft) => {
+        if (draft.status !== 'needs-review' && draft.status !== 'ready') {
+          throw new Error(
+            'The selected discovery queue item is no longer ready for review.'
+          )
+        }
+        const reversed = [...draft.chapters].reverse()
+        // Coverage and gaps depend on the order, so work them out again.
+        const recommendation = recommendArchiveCoverage(
+          { ...draft, chapters: reversed },
+          libraryFiles
+        )
+        draft.chapters = recommendation.chapters
+        draft.recommendationSummary = recommendation.summary
+        draft.chapterOrderReversed = !draft.chapterOrderReversed
+        updateQueueChapterSummary(draft)
+        draft.updatedAt = new Date().toISOString()
+      })
+    })
+    notifyDiscoveryQueueChanged()
+  }
+
+  async function updateChapterUrl(
+    id: string,
+    chapterId: string,
+    rawUrl: string
+  ): Promise<void> {
+    let url: string
+    try {
+      const parsed = new URL(rawUrl.trim())
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('unsupported protocol')
+      }
+      if (parsed.username || parsed.password) {
+        throw new Error('credentials are not allowed')
+      }
+      url = parsed.toString()
+    } catch {
+      throw new Error('Enter a valid http or https chapter URL.')
+    }
+    if (url.length > 2048) throw new Error('The chapter URL is too long.')
+    const item = requireReviewItem(id)
+    await withChapters(item, async () => {
+      await mutateItem(item.id, (draft) => {
+        if (draft.status !== 'needs-review' && draft.status !== 'ready') {
+          throw new Error(
+            'The selected discovery queue item is no longer ready for review.'
+          )
+        }
+        const chapter = draft.chapters.find(
+          (candidate) => candidate.id === chapterId
+        )
+        if (!chapter) throw new Error('The selected chapter no longer exists.')
+        if (chapter.url === url) return
+        if (
+          draft.chapters.some(
+            (candidate) => candidate.id !== chapterId && candidate.url === url
+          )
+        ) {
+          throw new Error('Another chapter already uses this URL.')
+        }
+        // Keep the originally discovered URL so a refresh can apply the edit.
+        const edits = { ...(draft.chapterUrlEdits ?? {}) }
+        const originalUrl =
+          Object.keys(edits).find((key) => edits[key] === chapter.url) ??
+          chapter.url
+        if (originalUrl === url) delete edits[originalUrl]
+        else edits[originalUrl] = url
+        if (Object.keys(edits).length > 0) draft.chapterUrlEdits = edits
+        else delete draft.chapterUrlEdits
+        chapter.url = url
+        draft.updatedAt = new Date().toISOString()
+      })
+    })
+    notifyDiscoveryQueueChanged()
+  }
+
   return {
     addDiscoveryItems,
+    reverseChapterOrder,
+    updateChapterUrl,
     acceptRecommendations,
     cancelDiscovery,
     clearCompletedQueue,

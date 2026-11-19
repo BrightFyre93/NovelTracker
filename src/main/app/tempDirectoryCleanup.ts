@@ -38,7 +38,7 @@ export async function sweepStaleEpubTemporaryDirectories(): Promise<void> {
   const entries = await readdir(directory, { withFileTypes: true })
   const staleBefore = Date.now() - 6 * 60 * 60 * 1000
   const tempDirectoryPattern =
-    /^novel-tracker-(?:epub-source|epub|repair)-[\da-z-]+$/i
+    /^novel-tracker-(?:epub-source|epub|repair|merge)-[\da-z-]+$/i
 
   for (const entry of entries) {
     if (!entry.isDirectory() || !tempDirectoryPattern.test(entry.name))

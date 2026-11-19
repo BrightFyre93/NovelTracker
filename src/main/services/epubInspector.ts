@@ -36,11 +36,16 @@ async function withLegacyInspectionSlot<T>(task: () => Promise<T>): Promise<T> {
 }
 
 interface NovelTrackerSidecar {
+  /** Novel-level id, the same for every file of one novel. */
   bookId: string
+  /** File-level id of this EPUB (null in files written before it existed). */
+  fileId: string | null
   volumeIndex: number
   title: string
   author: string
   language: string
+  /** Cover image entry inside the archive, when the file has one. */
+  coverPath: string | null
   chapters: Array<{ number: number | null; title: string }>
 }
 
@@ -52,8 +57,14 @@ async function readNovelTrackerSidecar(
     autoClose: false,
     validateEntrySizes: true
   })
-  const contents = await new Promise<string | null>((resolveSidecar, rejectSidecar) => {
+  const scanned = await new Promise<{
+    contents: string | null
+    chapterEntryCount: number
+  }>((resolveSidecar, rejectSidecar) => {
     let settled = false
+    let sidecarContents: string | null = null
+    let chapterEntryCount = 0
+    let entryCount = 0
     const cleanup = (): void => {
       archive.off('entry', onEntry)
       archive.off('end', onEnd)
@@ -64,7 +75,7 @@ async function readNovelTrackerSidecar(
       if (settled) return
       settled = true
       cleanup()
-      resolveSidecar(value)
+      resolveSidecar({ contents: value, chapterEntryCount })
     }
     const fail = (error: unknown): void => {
       if (settled) return
@@ -72,9 +83,19 @@ async function readNovelTrackerSidecar(
       cleanup()
       rejectSidecar(error instanceof Error ? error : new Error(String(error)))
     }
-    const onEnd = (): void => finish(null)
+    const onEnd = (): void => finish(sidecarContents)
     const onError = (error: Error): void => fail(error)
     const onEntry = (entry: yauzl.Entry): void => {
+      entryCount += 1
+      if (entryCount > MAX_INSPECTOR_ZIP_ENTRIES) {
+        finish(null)
+        return
+      }
+      if (/^text\/chapter-\d+\.xhtml$/.test(entry.fileName)) {
+        chapterEntryCount += 1
+        archive.readEntry()
+        return
+      }
       if (entry.fileName !== 'META-INF/noveltracker.json') {
         archive.readEntry()
         return
@@ -99,7 +120,9 @@ async function readNovelTrackerSidecar(
           bytes.set(buffer)
           chunks.push(bytes)
         }
-        finish(Buffer.concat(chunks, length).toString('utf8'))
+        sidecarContents = Buffer.concat(chunks, length).toString('utf8')
+        // Keep reading the entry list so the chapter files can be counted.
+        archive.readEntry()
       })().catch(fail)
     }
     archive.on('entry', onEntry)
@@ -107,6 +130,7 @@ async function readNovelTrackerSidecar(
     archive.once('error', onError)
     archive.readEntry()
   })
+  const contents = scanned.contents
   if (!contents) return null
   try {
     const parsed: unknown = JSON.parse(contents)
@@ -136,12 +160,24 @@ async function readNovelTrackerSidecar(
       return [{ number: chapter.number, title: chapter.title }]
     })
     if (chapters.length !== record.chapters.length) return null
+    // An edited archive keeps its old sidecar: trust it only while the number of
+    // chapter files still matches.
+    if (chapters.length !== scanned.chapterEntryCount) return null
     return {
       bookId: record.bookId,
+      fileId:
+        typeof record.fileId === 'string' && /^[a-f0-9]{64}$/.test(record.fileId)
+          ? record.fileId
+          : null,
       volumeIndex,
       title: record.title,
       author: record.author,
       language: record.language,
+      coverPath:
+        typeof record.coverPath === 'string' &&
+        /^images\/[a-f0-9]{64}\.(?:jpg|png|gif)$/.test(record.coverPath)
+          ? record.coverPath
+          : null,
       chapters
     }
   } catch {
@@ -231,15 +267,22 @@ export async function inspectEpub(
       size,
       modifiedAt,
       novelTitle: sidecar.title,
-      stableBookId: sidecar.bookId,
+      // The library tracks moved files by the file-level id (not the novel id,
+      // which every range file of a novel shares).
+      ...(sidecar.fileId ? { stableBookId: sidecar.fileId } : {}),
       volumeIndex: sidecar.volumeIndex,
       author: sidecar.author,
       language: sidecar.language,
       chapterTitles,
       chapterNumbers,
       filenameRange: parseFilenameRange(relativePath),
-      coverageConfidence: chapterNumbers.length > 0 ? 'extracted-toc' : 'unknown',
-      coverPath: null,
+      coverageConfidence:
+        chapterNumbers.length > 0
+          ? 'extracted-toc'
+          : parseFilenameRange(relativePath)
+            ? 'filename'
+            : 'unknown',
+      coverPath: sidecar.coverPath,
       inspectionError: ''
     }
   }

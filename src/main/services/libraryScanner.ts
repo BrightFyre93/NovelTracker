@@ -409,6 +409,17 @@ export async function scanLibrary(
   }
   const previousCorrections = canReusePreviousIndex ? previousIndex?.corrections ?? {} : {}
   const corrections: LibraryIndex['corrections'] = {}
+  const currentFileIds = new Set(files.map((file) => file.id))
+  // A correction may only follow a file that was moved or renamed, so the
+  // previous file must be gone from a folder that this scan fully covered.
+  const onlyIfGone = (
+    candidate: LibraryFileRecord | undefined
+  ): LibraryFileRecord | undefined =>
+    candidate &&
+    fullyScannedFolders.has(candidate.folderState) &&
+    !currentFileIds.has(candidate.id)
+      ? candidate
+      : undefined
   const indexedFiles: LibraryFileRecord[] = []
   const reusedFileIds: string[] = []
   const possibleMoves: LibraryPossibleMove[] = []
@@ -477,18 +488,20 @@ export async function scanLibrary(
     }
 
     const stablePreviousFile = stableBookVolumeKey(record)
-      ? previousFilesByStableBookVolume.get(stableBookVolumeKey(record)!)
+      ? onlyIfGone(previousFilesByStableBookVolume.get(stableBookVolumeKey(record)!))
       : undefined
     const legacyKey = previousFile ? null : legacyMoveIdentity(record)
     const legacyPreviousFile = legacyKey && !repeatedLegacyIdentities.has(legacyKey)
-      ? previousFilesByLegacyIdentity.get(legacyKey)
+      ? onlyIfGone(previousFilesByLegacyIdentity.get(legacyKey))
       : undefined
     const correction = previousCorrections[file.id] ??
       (previousFile ? previousCorrections[previousFile.id] : undefined) ??
       (stablePreviousFile ? previousCorrections[stablePreviousFile.id] : undefined) ??
       (legacyPreviousFile ? previousCorrections[legacyPreviousFile.id] : undefined)
     const possibleMoveCandidates = legacyKey && repeatedLegacyIdentities.has(legacyKey)
-      ? legacyIdentityCandidates.get(legacyKey) ?? []
+      ? (legacyIdentityCandidates.get(legacyKey) ?? []).filter(
+          (candidate) => onlyIfGone(candidate) !== undefined
+        )
       : []
     const candidates = possibleMoveCandidates.flatMap((candidate) => {
       const previousCorrection = previousCorrections[candidate.id]

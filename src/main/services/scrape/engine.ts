@@ -1203,6 +1203,8 @@ function extractChapterStructure(
         selection.attr('srcset')?.split(',')[0].trim().split(/\s+/)[0] ||
         ''
       if (!source) continue
+      // Inline SVG images cannot be rendered reliably on Kindle; leave them out.
+      if (/^data:image\/svg\+xml/i.test(source)) continue
 
       let key: string
       let urlValue: string | undefined

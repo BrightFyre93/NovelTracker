@@ -240,6 +240,14 @@ export interface IpcMap {
     args: [id: string, selection: ChapterSelectionUpdate]
     result: Result<void>
   }
+  'discovery-queue:reverse-chapters': {
+    args: [id: string]
+    result: Result<void>
+  }
+  'discovery-queue:update-chapter-url': {
+    args: [id: string, chapterId: string, url: string]
+    result: Result<void>
+  }
 }
 
 export type IpcChannel = keyof IpcMap

@@ -62,6 +62,7 @@ function inlineNodesFromDom(node: AnyNode): ChapterInlineNode[] {
   const element = node as Element
   const children = element.children.flatMap(inlineNodesFromDom)
   if (element.name === 'br') return [{ type: 'break' }]
+  if (element.name === 'p') return [...children, { type: 'text', text: ' ' }]
   if (element.name === 'em' || element.name === 'i') {
     return [{ type: 'emphasis', children }]
   }
@@ -122,10 +123,41 @@ interface ParsedEpub {
   sidecar: MergeSidecar | null
 }
 
+interface MergeSidecarMetadata {
+  sourceUrl: string
+  alternativeNames: string[]
+  genres: string[]
+  source: string
+  novelStatus: string
+  description: string
+}
+
 interface MergeSidecar {
   bookId: string
   volumeIndex: number
   chapters: Array<{ number: number | null; title: string }>
+  metadata?: MergeSidecarMetadata
+}
+
+function readSidecarMetadata(value: unknown): MergeSidecarMetadata | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const strings = (candidate: unknown): string[] =>
+    Array.isArray(candidate)
+      ? candidate
+          .filter((item): item is string => typeof item === 'string')
+          .slice(0, 200)
+      : []
+  const stringValue = (candidate: unknown): string =>
+    typeof candidate === 'string' ? candidate : ''
+  return {
+    sourceUrl: stringValue(record.sourceUrl),
+    alternativeNames: strings(record.alternativeNames),
+    genres: strings(record.genres),
+    source: stringValue(record.source),
+    novelStatus: stringValue(record.novelStatus),
+    description: stringValue(record.description)
+  }
 }
 
 async function readMergeSidecar(archive: LazyMergeArchive): Promise<MergeSidecar | null> {
@@ -159,7 +191,8 @@ async function readMergeSidecar(archive: LazyMergeArchive): Promise<MergeSidecar
     return {
       bookId: value.bookId,
       volumeIndex: volume.index as number,
-      chapters
+      chapters,
+      metadata: readSidecarMetadata(value.metadata)
     }
   } catch {
     return null
@@ -371,7 +404,6 @@ async function parseEpub(
   const sourceId = createHash('sha256').update(source.path).digest('hex')
   let textBytes = 0
   let contentOrdinal = 0
-  let readableChapterOrdinal = 0
   const spineItems = entries(spine.itemref)
   const updateInterval = Math.max(1, Math.ceil(spineItems.length / 100))
   for (const [ordinal, rawSpineItem] of spineItems.entries()) {
@@ -473,13 +505,9 @@ async function parseEpub(
         `${source.filename} contains more than ${MAX_EPUB_MERGE_TEXT_BYTES / (1024 * 1024)} MB of chapter text.`
       )
     }
-    const number = sidecarChapter?.number ??
-      parseChapterNumber(title) ??
-      parseChapterNumber(chapterPath) ??
-      source.chapterNumbers[readableChapterOrdinal] ??
-      (source.filenameRange && source.filenameRange.start + readableChapterOrdinal <= source.filenameRange.end
-        ? source.filenameRange.start + readableChapterOrdinal
-        : null)
+    const number = sidecarChapter !== undefined
+      ? sidecarChapter.number
+      : parseChapterNumber(title)
     const content: ChapterContent = {
       title,
       url: `https://offline.invalid/${sourceId}/${ordinal}`,
@@ -488,17 +516,17 @@ async function parseEpub(
       blocks
     }
     await onChapter({ content, number }, sidecar)
-    readableChapterOrdinal += 1
   }
   if (spineItems.length === 0) onProgress(0, 0)
 
+  const sidecarMetadata = sidecar?.metadata
   const metadataResult: EpubNovelMetadata = {
-    description: text(metadata.description),
-    alternativeNames: [],
-    genres: [],
-    source: '',
-    novelStatus: '',
-    sourceUrl: '',
+    description: text(metadata.description) || sidecarMetadata?.description || '',
+    alternativeNames: sidecarMetadata?.alternativeNames ?? [],
+    genres: sidecarMetadata?.genres ?? [],
+    source: sidecarMetadata?.source ?? '',
+    novelStatus: sidecarMetadata?.novelStatus ?? '',
+    sourceUrl: sidecarMetadata?.sourceUrl ?? '',
     cover
   }
   return {
@@ -552,6 +580,8 @@ async function mergeEpubFilesToArtifacts(
   let primary: Pick<ParsedEpub, 'author' | 'language' | 'metadata'> | null = null
   let includeCover = false
   let lastProgressPercentage = 0
+  const sourceBookIds = new Set<string>()
+  let everySourceHasSidecar = true
 
   for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
     const source = sources[sourceIndex]
@@ -632,6 +662,8 @@ async function mergeEpubFilesToArtifacts(
         }
       }
     })
+    if (parsed.sidecar) sourceBookIds.add(parsed.sidecar.bookId)
+    else everySourceHasSidecar = false
     if (!primary) {
       includeCover = Boolean(parsed.metadata.cover)
       if (parsed.metadata.cover) {
@@ -644,6 +676,19 @@ async function mergeEpubFilesToArtifacts(
         language: parsed.language,
         metadata: metadataWithoutCover
       }
+    } else {
+      // Fill details the first source lacks from the following sources.
+      const target = primary.metadata
+      const extra = parsed.metadata
+      if (!primary.author && parsed.author) primary.author = parsed.author
+      if (!target.description) target.description = extra.description
+      if (!target.source) target.source = extra.source
+      if (!target.novelStatus) target.novelStatus = extra.novelStatus
+      if (!target.sourceUrl) target.sourceUrl = extra.sourceUrl
+      if (target.alternativeNames.length === 0) {
+        target.alternativeNames = extra.alternativeNames
+      }
+      if (target.genres.length === 0) target.genres = extra.genres
     }
   }
 
@@ -665,6 +710,13 @@ async function mergeEpubFilesToArtifacts(
     percentage: 75,
     message: `Preparing EPUB package with ${merged.length.toLocaleString()} unique chapters…`
   })
+  // Every source belongs to one novel: keep its novel id. Otherwise derive a
+  // new one from the source URL (if any) or the merged title. The file id comes
+  // from the merged file name so re-merging the same name gives the same id.
+  const sharedNovelId =
+    everySourceHasSidecar && sourceBookIds.size === 1
+      ? [...sourceBookIds][0]
+      : undefined
   const result = await writeEpubFromArtifactStore(
     {
       dataDirectory,
@@ -678,14 +730,19 @@ async function mergeEpubFilesToArtifacts(
         ...DEFAULT_EPUB_OUTPUT_OPTIONS,
         css: input.epubCss,
         language: input.language || primary.language,
-        identifierSeed: input.sources
-          .map((source) => createHash('sha256').update(source.path).digest('hex'))
-          .sort()
-          .join('\n')
+        // Sources were already normalized when they were built: keep images as is.
+        compressImages: false,
+        imageFormat: 'original',
+        identifierSeed:
+          primary.metadata.sourceUrl.trim() ||
+          `merged:${normalizedText(input.title)}`
       },
       appVersion: input.appVersion,
       includeCover,
-      metadata: primary.metadata
+      metadata: primary.metadata,
+      novelId: sharedNovelId,
+      fileIdKey: `merged:${normalizedText(filename)}`,
+      allowVolumeSplit: false
     },
     undefined,
     (progress: EpubPackagingProgress) => {

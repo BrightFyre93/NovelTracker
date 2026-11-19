@@ -34,6 +34,12 @@ export function createQueueItem(input: NewQueueItem): DiscoveryQueueItem {
       ? {}
       : { siteExtractionMode: input.siteExtractionMode }),
     chapters: input.chapters ?? [],
+    ...(input.chapterOrderReversed === undefined
+      ? {}
+      : { chapterOrderReversed: input.chapterOrderReversed }),
+    ...(input.chapterUrlEdits === undefined
+      ? {}
+      : { chapterUrlEdits: { ...input.chapterUrlEdits } }),
     chapterSummary: {
       total: chapterSummary?.total ?? 0,
       selected: chapterSummary?.selected ?? 0,
@@ -93,6 +99,9 @@ function copyQueueItemFields(
         }
       : null,
     outputPaths: (item.outputPaths ?? []).map((output) => ({ ...output })),
+    ...(item.chapterUrlEdits
+      ? { chapterUrlEdits: { ...item.chapterUrlEdits } }
+      : {}),
     failedChapters: item.failedChapters
       .slice(0, failedChapterLimit)
       .map((chapter) => ({ ...chapter })),

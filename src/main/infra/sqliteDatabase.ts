@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
 const DATABASE_FILENAME = 'novel-tracker.sqlite'
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
 
 export class SqliteDatabase {
   private database: DatabaseSync | null = null
@@ -271,6 +271,15 @@ export class SqliteDatabase {
           `)
         })
         version = 6
+      }
+      if (version === 6) {
+        withSqliteTransaction(database, () => {
+          database.exec(`
+            ALTER TABLE job_outputs ADD COLUMN fingerprint TEXT;
+            PRAGMA user_version = 7;
+          `)
+        })
+        version = 7
       }
       if (version !== SCHEMA_VERSION) {
         throw new Error(`The SQLite schema could not be upgraded to version ${SCHEMA_VERSION}.`)

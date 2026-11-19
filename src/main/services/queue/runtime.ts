@@ -220,19 +220,28 @@ export function createQueueRuntime(
           item.novelStatus = result.novelStatus
           item.detectedLanguage = result.detectedLanguage || ''
           item.parserName = result.parserName
-          const newUrls = new Set(result.chapters.map((chapter) => chapter.url))
-          const addedCount = result.chapters.filter(
+          // Re-apply the user's edits to the freshly discovered list.
+          const urlEdits = item.chapterUrlEdits ?? {}
+          const discoveredChapters = result.chapters.map((chapter) => ({
+            ...chapter,
+            url: urlEdits[chapter.url] ?? chapter.url
+          }))
+          if (item.chapterOrderReversed) discoveredChapters.reverse()
+          const newUrls = new Set(
+            discoveredChapters.map((chapter) => chapter.url)
+          )
+          const addedCount = discoveredChapters.filter(
             (chapter) => !previousByUrl.has(chapter.url)
           ).length
           const removedCount = previousChapters.filter(
             (chapter) => !newUrls.has(chapter.url)
           ).length
           const orderChanged =
-            previousChapters.length === result.chapters.length &&
+            previousChapters.length === discoveredChapters.length &&
             previousChapters.some(
-              (chapter, index) => chapter.url !== result.chapters[index].url
+              (chapter, index) => chapter.url !== discoveredChapters[index].url
             )
-          const refreshedChapters: QueueChapter[] = result.chapters.map(
+          const refreshedChapters: QueueChapter[] = discoveredChapters.map(
             (chapter) => ({
               ...chapter,
               archiveStatus: 'missing',

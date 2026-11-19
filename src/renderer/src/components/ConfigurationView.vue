@@ -790,6 +790,7 @@ async function resetEpubCss(): Promise<void> {
           <select id="app-theme" v-model="themeDraft" class="configuration-select">
             <option value="light">Light</option>
             <option value="dark">Dark</option>
+            <option value="system">Follow the system setting</option>
           </select>
           <Button
             icon="pi pi-save"
@@ -992,10 +993,6 @@ async function resetEpubCss(): Promise<void> {
           <input id="epub-filename-template" v-model="epubOutputPreferencesDraft.filenameTemplate" class="full-input" maxlength="1000" placeholder="%Title% %FirstChapter%-%LastChapter%" :disabled="savingEpubOutputPreferences" />
           <small class="help-text">Tokens: %Filename%, %Title%, %Author%, %FirstChapter%, %LastChapter%.</small>
         </div>
-        <label class="configuration-setting configuration-toggle">
-          <input v-model="epubOutputPreferencesDraft.includeNovelInfoPage" type="checkbox" />
-          <span><strong>Include Novel Information page</strong></span>
-        </label>
         <label class="configuration-setting configuration-toggle">
           <input v-model="epubOutputPreferencesDraft.includeChapterListPage" type="checkbox" />
           <span><strong>Include Chapter List page</strong></span>

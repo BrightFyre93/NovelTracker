@@ -116,17 +116,19 @@ export function createChapterProcessor(context: ChapterProcessorContext) {
         savedState.currentUrl === chapter.url &&
         savedState.artifactRef === expectedArtifactRef
       const savedArtifactExists = savedStateIsValid
-        ? await artifactStore.hasChapterFile(itemId, chapter.url)
+        ? await artifactStore.hasUsableChapter(itemId, chapter.url)
         : false
-      if (
-        !savedStateIsValid ||
-        (!savedArtifactExists && saveAvailableChaptersOnly)
-      ) {
-        const reason = `Saved chapter content is missing or invalid for "${chapter.title}".`
-        await updateChapterState(chapter, index, 'Skipped', {
-          lastError: reason,
-          artifactRef: null
-        })
+      if (!savedStateIsValid || !savedArtifactExists) {
+        const reason = `Saved chapter content is missing or damaged for "${chapter.title}". Use Retry to download it again.`
+        await updateChapterState(
+          chapter,
+          index,
+          savedStateIsValid ? 'InvalidArtifact' : 'Skipped',
+          {
+            lastError: reason,
+            artifactRef: null
+          }
+        )
         if (!saveAvailableChaptersOnly) throw new Error(reason)
         recordUnavailableChapter(chapter, reason)
         item.progress = {
@@ -161,7 +163,7 @@ export function createChapterProcessor(context: ChapterProcessorContext) {
         savedState?.state === 'Downloaded' &&
         savedState.currentUrl === chapter.url &&
         savedState.artifactRef === expectedArtifactRef &&
-        (await artifactStore.hasChapterFile(itemId, chapter.url))
+        (await artifactStore.hasUsableChapter(itemId, chapter.url))
       ) {
         savedContent = {
           title: savedState.title,

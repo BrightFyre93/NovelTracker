@@ -93,6 +93,10 @@ const api: NovelTrackerApi = {
     invokeIpc('discovery-queue:clear-completed'),
   updateDiscoveryQueueSelection: (id: string, selection: ChapterSelectionUpdate) =>
     invokeIpc('discovery-queue:update-selection', id, selection),
+  reverseDiscoveryQueueChapters: (id: string) =>
+    invokeIpc('discovery-queue:reverse-chapters', id),
+  updateDiscoveryQueueChapterUrl: (id: string, chapterId: string, url: string) =>
+    invokeIpc('discovery-queue:update-chapter-url', id, chapterId, url),
   onDiscoveryQueueUpdate: (
     listener: (update: DiscoveryQueueUpdate) => void
   ) => onIpcEvent('discovery-queue:update', listener),

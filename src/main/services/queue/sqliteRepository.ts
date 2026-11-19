@@ -595,7 +595,7 @@ function readJobOutputs(
 ): EpubOutputRecord[] {
   return database
     .prepare(
-      `SELECT volume_index, filename, path, byte_size, sha256, status
+      `SELECT volume_index, filename, path, byte_size, sha256, status, fingerprint
        FROM job_outputs WHERE item_id = ? ORDER BY volume_index`
     )
     .all(queueItemId)
@@ -608,7 +608,8 @@ function readJobOutputs(
         typeof row.byte_size !== 'number' ||
         !Number.isSafeInteger(row.byte_size) ||
         typeof row.sha256 !== 'string' ||
-        row.status !== 'published'
+        row.status !== 'published' ||
+        (row.fingerprint !== null && typeof row.fingerprint !== 'string')
       ) {
         throw new Error(`Saved EPUB output data is invalid for job ${queueItemId}.`)
       }
@@ -618,7 +619,10 @@ function readJobOutputs(
         path: row.path,
         byteSize: row.byte_size,
         sha256: row.sha256,
-        status: 'published'
+        status: 'published',
+        ...(typeof row.fingerprint === 'string'
+          ? { fingerprint: row.fingerprint }
+          : {})
       }
     })
 }
@@ -631,8 +635,8 @@ function replaceJobOutputs(
   database.prepare('DELETE FROM job_outputs WHERE item_id = ?').run(queueItemId)
   const insert = database.prepare(
     `INSERT INTO job_outputs
-     (item_id, volume_index, filename, path, byte_size, sha256, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+     (item_id, volume_index, filename, path, byte_size, sha256, status, fingerprint)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   )
   for (const output of outputs) {
     insert.run(
@@ -642,7 +646,8 @@ function replaceJobOutputs(
       output.path,
       output.byteSize,
       output.sha256,
-      output.status
+      output.status,
+      output.fingerprint ?? null
     )
   }
 }

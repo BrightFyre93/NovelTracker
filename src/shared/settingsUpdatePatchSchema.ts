@@ -54,8 +54,8 @@ export const settingsUpdatePatchSchema: z.ZodType<SettingsUpdatePatch> = z
     appTheme: z
       .custom<AppSettings['appTheme']>(
         (value): value is AppSettings['appTheme'] =>
-          value === 'light' || value === 'dark',
-        'The app theme must be light or dark.'
+          value === 'light' || value === 'dark' || value === 'system',
+        'The app theme must be light, dark, or follow the system.'
       )
       .optional(),
     discoveryFreshnessHours: integerInRange(

@@ -86,6 +86,12 @@ export interface NovelTrackerApi {
     id: string,
     selection: ChapterSelectionUpdate
   ): Promise<Result<void>>
+  reverseDiscoveryQueueChapters(id: string): Promise<Result<void>>
+  updateDiscoveryQueueChapterUrl(
+    id: string,
+    chapterId: string,
+    url: string
+  ): Promise<Result<void>>
   repackageEpub(id: string): Promise<Result<void>>
   saveAvailableChaptersEpub(id: string): Promise<Result<void>>
   onDiscoveryQueueUpdate(

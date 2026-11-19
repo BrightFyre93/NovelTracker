@@ -1,6 +1,7 @@
 import type { ChapterContent } from '../../../shared/contracts'
 import {
   chapterArtifactFileExists,
+  chapterArtifactIsUsable,
   chapterArtifactReference,
   readCoverArtifact,
   removeChapterArtifacts,
@@ -12,6 +13,11 @@ export function createDownloadArtifactStore(dataDirectory: () => string) {
   return {
     hasChapterFile(itemId: string, url: string): Promise<boolean> {
       return chapterArtifactFileExists(dataDirectory(), itemId, url)
+    },
+
+    /** True when the saved chapter exists and its content and images are readable. */
+    hasUsableChapter(itemId: string, url: string): Promise<boolean> {
+      return chapterArtifactIsUsable(dataDirectory(), itemId, url)
     },
 
     writeChapter(itemId: string, content: ChapterContent): Promise<void> {

@@ -391,7 +391,7 @@ export async function readSettings(
       'app theme',
       defaults.appTheme,
       (value): value is AppSettings['appTheme'] =>
-        value === 'light' || value === 'dark'
+        value === 'light' || value === 'dark' || value === 'system'
     )
   }
   for (const warning of warnings) recordStorageRecoveryWarning(warning)
@@ -1205,6 +1205,31 @@ export async function readChapterArtifactDescriptor(
     paragraphs: artifact.blocks !== undefined ? [] : artifact.paragraphs!,
     ...(artifact.blocks !== undefined ? { blocks: artifact.blocks } : {}),
     images
+  }
+}
+
+export async function chapterArtifactIsUsable(
+  dataDirectory: string,
+  queueItemId: string,
+  chapterUrl: string
+): Promise<boolean> {
+  try {
+    const descriptor = await readChapterArtifactDescriptor(
+      dataDirectory,
+      queueItemId,
+      chapterUrl,
+      { verifyImages: false }
+    )
+    return descriptor !== null && descriptor.url === chapterUrl
+  } catch (error) {
+    if (
+      error instanceof ArtifactValidationError ||
+      error instanceof SyntaxError ||
+      (isNodeError(error) && error.code === 'ENOENT')
+    ) {
+      return false
+    }
+    throw error
   }
 }
 

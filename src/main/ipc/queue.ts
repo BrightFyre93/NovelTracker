@@ -262,6 +262,24 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
   )
   handle(
     'validated-result',
+    'discovery-queue:reverse-chapters',
+    z.tuple([queueItemIdSchema]),
+    async (_event, rawId) => {
+      await queueCommands.reverseChapterOrder(rawId)
+      return { ok: true, value: undefined }
+    }
+  )
+  handle(
+    'validated-result',
+    'discovery-queue:update-chapter-url',
+    z.tuple([queueItemIdSchema, z.string().max(200), z.string().max(4096)]),
+    async (_event, rawId, chapterId, url) => {
+      await queueCommands.updateChapterUrl(rawId, chapterId, url)
+      return { ok: true, value: undefined }
+    }
+  )
+  handle(
+    'validated-result',
     'download-queue:enqueue-from-snapshot',
     z.tuple([
       z.string(),

@@ -48,6 +48,39 @@ import type {
   EpubPackagingResult
 } from './epubPackaging'
 import { DEFAULT_EPUB_OUTPUT_OPTIONS } from '../../shared/epubOutputOptions'
+import { fileIdFromNovelId, novelIdFromSeed } from './novelIdentity'
+
+interface PackageIdentity {
+  novelId: string
+  fileId: string
+}
+
+/**
+ * Novel id: the same for every file of a novel (from the normalized source
+ * URL, or an explicit id carried over by a merge). File id: novel id plus the
+ * first chapter number, so rebuilding or extending a file keeps its id while
+ * different ranges or volumes of the same novel get different ids.
+ */
+function resolvePackageIdentity(
+  input: EpubPackagingInput,
+  title: string
+): PackageIdentity {
+  const novelId =
+    input.novelId ??
+    novelIdFromSeed(
+      input.outputOptions.identifierSeed.trim() ||
+        input.metadata.sourceUrl.trim() ||
+        `title:${title}`
+    )
+  const first = input.chapters[0]
+  const firstNumber = first ? parseChapterNumber(first.title) : null
+  const key =
+    input.fileIdKey ??
+    (firstNumber !== null
+      ? `number:${firstNumber}`
+      : `url:${first?.url ?? ''}`)
+  return { novelId, fileId: fileIdFromNovelId(novelId, key) }
+}
 
 function escapeXml(value: string): string {
   let validXmlText = ''
@@ -235,7 +268,8 @@ function makeNovelInfoXhtml(
   language: string,
   metadata: EpubNovelMetadata,
   coverHref: string,
-  includeImageAttribution: boolean
+  includeImageAttribution: boolean,
+  coverSourceUrl?: string
 ): string {
   const details = [
     ['Author', author],
@@ -254,7 +288,7 @@ function makeNovelInfoXhtml(
     ? `<img src="../${escapeXml(coverHref)}" alt="Cover of ${escapeXml(title)}"/>`
     : ''
   const coverAttribution = includeImageAttribution
-    ? safeAttributionUrl(metadata.cover?.sourceUrl)
+    ? safeAttributionUrl(coverSourceUrl)
     : null
   const cover = coverImage
     ? `<figure>${coverAttribution ? `<a href="${escapeXml(coverAttribution)}">${coverImage}</a>` : coverImage}</figure>`
@@ -323,7 +357,7 @@ function createArtifactPackageFiles(
   chapters: EpubPackagingInput['chapters'],
   metadata: EpubNovelMetadata,
   images: readonly PackagedImageManifestEntry[],
-  identifierSeedValue: string,
+  identity: { novelId: string; fileId: string },
   includeNovelInfoPage: boolean,
   includeChapterListPage: boolean
 ): {
@@ -332,14 +366,7 @@ function createArtifactPackageFiles(
   nav: Readable
   hashes: { opf: string; nav: string }
 } {
-  const firstChapter = chapters[0]
-  const lastChapter = chapters[chapters.length - 1]
-  const identifierSeed = [
-    identifierSeedValue.trim() || metadata.sourceUrl.trim(),
-    firstChapter?.url ?? '',
-    lastChapter?.url ?? ''
-  ].join('\n')
-  const identifier = `urn:sha256:${createHash('sha256').update(identifierSeed).digest('hex')}`
+  const identifier = `urn:sha256:${identity.fileId}`
   const modified = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   const hashes = { opf: '', nav: '' }
   const descriptiveMetadata = [
@@ -364,6 +391,7 @@ function createArtifactPackageFiles(
     <dc:creator>${escapeXml(author || 'Unknown')}</dc:creator>
     <dc:language>${escapeXml(language)}</dc:language>
     ${descriptiveMetadata}
+    <meta name="noveltracker:novel-id" content="${identity.novelId}"/>
     <meta property="dcterms:modified">${modified}</meta>
   </metadata>
   <manifest>
@@ -837,11 +865,54 @@ const MAX_VOLUME_SOURCE_IMAGE_BYTES = Math.floor(
   MAX_TOTAL_EPUB_IMAGE_BYTES * 0.8
 )
 
+// WebP images are re-encoded to JPEG or PNG, which is often much larger than
+// the source, so they count more when deciding where a volume ends.
+function estimatePackagedImageBytes(
+  mediaType: EpubImageMediaType,
+  sourceBytes: number
+): number {
+  return mediaType === 'image/webp' ? sourceBytes * 3 : sourceBytes
+}
+
+// Identifies what a volume was built from, so an earlier file is only reused
+// when the chapters and options are unchanged.
+function createVolumeFingerprint(
+  input: EpubPackagingInput,
+  chapters: EpubPackagingInput['chapters']
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        chapters: chapters.map((chapter) => [chapter.url, chapter.title]),
+        title: input.title,
+        author: input.author,
+        metadata: input.metadata,
+        options: input.outputOptions,
+        cover: input.includeCover
+      })
+    )
+    .digest('hex')
+}
+
 export async function writeEpubFromArtifactStore(
   input: EpubPackagingInput,
   signal?: AbortSignal,
   onProgress?: (progress: EpubPackagingProgress) => void
 ): Promise<EpubPackagingResult> {
+  if (input.allowVolumeSplit === false) {
+    // Merges always produce exactly one EPUB, whatever its size.
+    const single = await writeSingleEpubFromArtifactStore(
+      { ...input, volumeIndex: 1, volumeCount: 1 },
+      signal,
+      onProgress
+    )
+    const output = await describeEpubOutput(single.outputPath, 1)
+    return {
+      outputPath: single.outputPath,
+      outputPaths: [output],
+      overwroteExistingFile: single.overwroteExistingFile
+    }
+  }
   const chaptersPerVolume = input.outputOptions.maxChaptersPerEpub
   const volumes: EpubPackagingInput['chapters'][] = []
   let currentVolume: EpubPackagingInput['chapters'] = []
@@ -880,7 +951,10 @@ export async function writeEpubFromArtifactStore(
       for (const image of descriptor.images) {
         if (currentImageHashes.has(image.sha256) || chapterImageHashes.has(image.sha256)) continue
         chapterImageHashes.add(image.sha256)
-        chapterImageBytes += (await stat(image.path)).size
+        chapterImageBytes += estimatePackagedImageBytes(
+          image.mediaType,
+          (await stat(image.path)).size
+        )
       }
     }
     const exceedsChapterCap = currentVolume.length >= chaptersPerVolume
@@ -904,7 +978,10 @@ export async function writeEpubFromArtifactStore(
         for (const image of descriptor?.images ?? []) {
           if (chapterImageHashes.has(image.sha256)) continue
           chapterImageHashes.add(image.sha256)
-          chapterImageBytes += (await stat(image.path)).size
+          chapterImageBytes += estimatePackagedImageBytes(
+            image.mediaType,
+            (await stat(image.path)).size
+          )
         }
       }
     }
@@ -922,8 +999,12 @@ export async function writeEpubFromArtifactStore(
       volumes.length === 1
         ? input.filename
         : createVolumeFilename(input, chapters, index + 1, chapterOrdinal)
+    const fingerprint = createVolumeFingerprint(input, chapters)
     const prior = input.completedOutputs?.find(
-      (output) => output.volumeIndex === index + 1 && output.filename === filename
+      (output) =>
+        output.volumeIndex === index + 1 &&
+        output.filename === filename &&
+        output.fingerprint === fingerprint
     )
     let output: EpubOutputRecord | null = null
     if (prior) output = await verifyExistingOutput(prior)
@@ -941,7 +1022,7 @@ export async function writeEpubFromArtifactStore(
         onProgress
       )
       overwroteExistingFile ||= result.overwroteExistingFile
-      output = await describeEpubOutput(result.outputPath, index + 1)
+      output = await describeEpubOutput(result.outputPath, index + 1, fingerprint)
     }
     outputPaths.push(output)
     chapterOrdinal += chapters.length
@@ -964,22 +1045,34 @@ export async function writeEpubFromArtifactStore(
 function createNovelTrackerSidecar(
   input: EpubPackagingInput,
   title: string,
-  language: string
+  language: string,
+  identity: PackageIdentity,
+  coverHref: string
 ): Record<string, unknown> {
   const sourceUrl = input.metadata.sourceUrl.trim()
   const sourceUrlHash = sourceUrl
     ? createHash('sha256').update(sourceUrl).digest('hex')
     : null
-  const stableSeed = input.outputOptions.identifierSeed || sourceUrlHash || title
   return {
     schemaVersion: 1,
-    bookId: createHash('sha256')
-      .update(`noveltracker-book-v1:${stableSeed}`)
-      .digest('hex'),
+    // bookId is the novel-level id shared by every file of the novel;
+    // fileId is the id of this file (also used as dc:identifier).
+    bookId: identity.novelId,
+    fileId: identity.fileId,
     sourceUrlHash,
     title,
     author: input.author.trim(),
     language,
+    // Entry of the cover image inside the archive, or null without a cover.
+    coverPath: coverHref || null,
+    metadata: {
+      sourceUrl,
+      alternativeNames: input.metadata.alternativeNames,
+      genres: input.metadata.genres,
+      source: input.metadata.source,
+      novelStatus: input.metadata.novelStatus,
+      description: input.metadata.description
+    },
     volume: {
       index: input.volumeIndex ?? 1,
       count: input.volumeCount ?? 1
@@ -1005,6 +1098,7 @@ function createVolumeFilename(
 ): string {
   const stem = input.filename
     .replace(/\.epub$/i, '')
+    .replace(/\s*\(incomplete(?: \d+)?\)$/i, '')
     .replace(/\s+\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?$/i, '')
     .trim()
   const first = chapters[0]
@@ -1019,7 +1113,8 @@ function createVolumeFilename(
 
 async function describeEpubOutput(
   path: string,
-  volumeIndex: number
+  volumeIndex: number,
+  fingerprint?: string
 ): Promise<EpubOutputRecord> {
   const details = await stat(path)
   const hash = createHash('sha256')
@@ -1032,7 +1127,8 @@ async function describeEpubOutput(
     path,
     byteSize: details.size,
     sha256: hash.digest('hex'),
-    status: 'published'
+    status: 'published',
+    ...(fingerprint ? { fingerprint } : {})
   }
 }
 
@@ -1152,6 +1248,7 @@ async function writeSingleEpubFromArtifactStore(
     }
 
     let coverHref = ''
+    let coverSourceUrl: string | undefined
     if (input.includeCover && !input.outputOptions.skipImages) {
       if (signal?.aborted) {
         throw new OperationCancelledError('EPUB creation was cancelled.')
@@ -1174,10 +1271,12 @@ async function writeSingleEpubFromArtifactStore(
         true
       )
       coverHref = packagedCover.href
+      coverSourceUrl = cover.sourceUrl
     }
 
     const title = input.title.trim() || 'Untitled'
     const language = input.outputOptions.language.trim() || 'en'
+    const identity = resolvePackageIdentity(input, title)
     const files = createArtifactPackageFiles(
       title,
       input.author.trim(),
@@ -1185,7 +1284,7 @@ async function writeSingleEpubFromArtifactStore(
       input.chapters,
       input.metadata,
       packagedImages,
-      input.outputOptions.identifierSeed,
+      identity,
       input.outputOptions.includeNovelInfoPage,
       input.outputOptions.includeChapterListPage
     )
@@ -1201,7 +1300,7 @@ async function writeSingleEpubFromArtifactStore(
     zip.file(
       'META-INF/noveltracker.json',
       JSON.stringify(
-        createNovelTrackerSidecar(input, title, language),
+        createNovelTrackerSidecar(input, title, language, identity, coverHref),
         null,
         2
       ),
@@ -1222,7 +1321,8 @@ async function writeSingleEpubFromArtifactStore(
           language,
           input.metadata,
           coverHref,
-          input.outputOptions.includeImageAttribution
+          input.outputOptions.includeImageAttribution,
+          coverSourceUrl
         )
       )
     }

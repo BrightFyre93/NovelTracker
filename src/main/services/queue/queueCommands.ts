@@ -1,7 +1,7 @@
 import type { DiscoveryQueueItem } from '../../../shared/contracts'
 import type { IpcContext } from '../../ipc/context'
 import {
-  chapterArtifactFileExists,
+  chapterArtifactIsUsable,
   chapterArtifactReference
 } from '../localStore'
 import { createQueueSubmissionCommand } from './queueSubmission'
@@ -111,7 +111,7 @@ export function createQueueCommands(context: QueueCommandContext) {
             chapter,
             state,
             stateValid: true,
-            fileExists: await chapterArtifactFileExists(
+            fileExists: await chapterArtifactIsUsable(
               dataDirectory(),
               item.id,
               chapter.url
@@ -123,29 +123,40 @@ export function createQueueCommands(context: QueueCommandContext) {
         if (!result.stateValid || !result.state) {
           invalidStates.push(result.chapter.title)
         } else if (!result.fileExists) {
-          if (allowMissing) {
-            missingFiles.push({
-              ...result.state,
-              state: 'InvalidArtifact',
-              updatedAt: new Date().toISOString(),
-              lastError: `Saved chapter artifact is missing for "${result.chapter.title}".`,
-              artifactRef: null
-            })
-          }
+          missingFiles.push({
+            ...result.state,
+            state: 'InvalidArtifact',
+            updatedAt: new Date().toISOString(),
+            lastError: `Saved chapter content is missing or damaged for "${result.chapter.title}".`,
+            artifactRef: null
+          })
         }
       }
     }
 
-    if (!allowMissing && invalidStates.length > 0) {
-      const examples = invalidStates.slice(0, 3).join(', ')
-      const remaining =
-        invalidStates.length > 3 ? ` and ${invalidStates.length - 3} more` : ''
-      throw new Error(
-        `${invalidStates.length} selected chapter(s) are not marked as downloaded${examples ? ` (${examples}${remaining})` : ''}. Retry the EPUB online before repackaging.`
-      )
-    }
     if (missingFiles.length > 0) {
       await chapterStateRepository.writeChapterStates(item.id, missingFiles)
+    }
+    if (!allowMissing && (invalidStates.length > 0 || missingFiles.length > 0)) {
+      const problems: string[] = []
+      if (invalidStates.length > 0) {
+        const examples = invalidStates.slice(0, 3).join(', ')
+        const remaining =
+          invalidStates.length > 3
+            ? ` and ${invalidStates.length - 3} more`
+            : ''
+        problems.push(
+          `${invalidStates.length} selected chapter(s) are not marked as downloaded${examples ? ` (${examples}${remaining})` : ''}`
+        )
+      }
+      if (missingFiles.length > 0) {
+        problems.push(
+          `${missingFiles.length} saved chapter file(s) are missing or damaged`
+        )
+      }
+      throw new Error(
+        `${problems.join('; ')}. Use Retry to download them again before repackaging.`
+      )
     }
   }
 
@@ -283,10 +294,11 @@ export function createQueueCommands(context: QueueCommandContext) {
     const canRetry = (status: DiscoveryQueueItem['status']): boolean =>
       status === 'failed' ||
       status === 'partially-completed' ||
-      status === 'cancelled'
+      status === 'cancelled' ||
+      status === 'packaging-failed'
     if (!canRetry(item.status))
       throw new Error(
-        'Only failed, partially completed, or cancelled jobs can be retried.'
+        'Only failed, partially completed, cancelled, or packaging-failed jobs can be retried.'
       )
     if (!discoveryQueue.includes(item) || !canRetry(item.status))
       throw new Error('The EPUB job changed before it could be retried.')
@@ -297,13 +309,15 @@ export function createQueueCommands(context: QueueCommandContext) {
     await mutateItem(item.id, (draft) => {
       if (!canRetry(draft.status))
         throw new Error(
-          'Only failed, partially completed, or cancelled jobs can be retried.'
+          'Only failed, partially completed, cancelled, or packaging-failed jobs can be retried.'
         )
       draft.targetOutputPath = outputPath
       draft.sequence = queueStore.nextSequence()
       transitionQueueItem(draft, 'queued')
       draft.repackageOnly = false
       draft.saveAvailableChaptersOnly = false
+      // Chapters may be downloaded again, so earlier volumes must be rebuilt.
+      draft.outputPaths = []
       draft.queuedAt = new Date().toISOString()
       draft.error = ''
       draft.progress = {
@@ -403,24 +417,34 @@ export function createQueueCommands(context: QueueCommandContext) {
           : 'The EPUB job changed before it could be repackaged.'
       )
     }
-    item.repackageOnly = true
-    item.saveAvailableChaptersOnly = saveAvailableOnly
-    item.targetOutputPath = outputPath
-    item.sequence = queueStore.nextSequence()
-    transitionQueueItem(item, 'queued')
-    item.queuedAt = new Date().toISOString()
-    item.error = ''
-    if (!saveAvailableOnly) item.failedChapters = []
-    item.progress = {
-      current: saveAvailableOnly
-        ? Math.min(item.progress?.current ?? 0, selectedChapters.length)
-        : selectedChapters.length,
-      total: selectedChapters.length,
-      message: saveAvailableOnly
-        ? 'Queued to save available chapters'
-        : 'Queued for offline repackaging'
-    }
-    await persistDownloadState(item)
+    await mutateItem(item.id, (draft) => {
+      if (!canQueue(draft.status)) {
+        throw new Error(
+          saveAvailableOnly
+            ? 'The EPUB job changed before available chapters could be saved.'
+            : 'The EPUB job changed before it could be repackaged.'
+        )
+      }
+      draft.repackageOnly = true
+      draft.saveAvailableChaptersOnly = saveAvailableOnly
+      draft.targetOutputPath = outputPath
+      draft.sequence = queueStore.nextSequence()
+      transitionQueueItem(draft, 'queued')
+      draft.queuedAt = new Date().toISOString()
+      draft.error = ''
+      if (!saveAvailableOnly) draft.failedChapters = []
+      draft.progress = {
+        current: saveAvailableOnly
+          ? Math.min(draft.progress?.current ?? 0, selectedChapters.length)
+          : selectedChapters.length,
+        total: selectedChapters.length,
+        message: saveAvailableOnly
+          ? 'Queued to save available chapters'
+          : 'Queued for offline repackaging'
+      }
+      draft.updatedAt = new Date().toISOString()
+    })
+    notifyDiscoveryQueueChanged()
     requestDownloadQueueDrain()
   }
 

@@ -1,4 +1,4 @@
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, nativeTheme } from 'electron'
 import { join } from 'node:path'
 
 export class MainWindowManager {
@@ -17,6 +17,8 @@ export class MainWindowManager {
       minWidth: 820,
       minHeight: 620,
       show: false,
+      // Matches the page background so there is no flash while it loads.
+      backgroundColor: nativeTheme.shouldUseDarkColors ? '#131c28' : '#f3f6fa',
       webPreferences: {
         preload: join(__dirname, '../preload/index.cjs'),
         contextIsolation: true,

@@ -130,21 +130,24 @@ function mediaTypeForFormat(format: 'jpeg' | 'png' | 'gif'): ChapterImage['media
   return 'image/png'
 }
 
+/**
+ * Converts a WebP image to a flattened JPEG without resizing or padding.
+ * Used by EPUB repair for inline images. Covers are handled separately by
+ * resizeSmallKindleCover, so this function must never apply cover sizing.
+ */
 export async function convertWebpToJpeg(data: Buffer): Promise<Buffer> {
-  const result = await normalizeEpubImage(
-    data,
-    'image/webp',
-    {
-      compressImages: false,
-      maxImageDimension: 0,
-      imageFormat: 'jpeg',
-      coverJpegOnly: true,
-      flattenAnimatedImages: true
-    },
-    true
-  )
-  if (result.mediaType !== 'image/jpeg') {
-    throw new Error('WebP repair conversion did not produce JPEG output.')
+  if (data.length === 0 || data.length > MAX_IMAGE_BYTES) {
+    throw new Error('EPUB image data is empty or exceeds its size limit.')
   }
-  return result.data
+  const converted = await sharp(data, {
+    failOn: 'error',
+    limitInputPixels: 40_000_000,
+    animated: false
+  })
+    .rotate()
+    .flatten({ background: '#ffffff' })
+    .jpeg({ quality: 90 })
+    .toBuffer()
+  if (converted.length === 0) throw new Error('The converted image is empty.')
+  return converted
 }

@@ -25,7 +25,12 @@ export const epubOutputOptionsSchema = z.object({
   language: z.string().trim().min(2).max(35).default('en'),
   filenameTemplate: z.string().max(1000).default(''),
   identifierSeed: z.string().max(4096).default(''),
-  includeNovelInfoPage: z.boolean().default(true),
+  // The novel information page is always included; older saved values of
+  // false are ignored.
+  includeNovelInfoPage: z
+    .boolean()
+    .default(true)
+    .transform((): boolean => true),
   includeChapterListPage: z.boolean().default(false),
   skipImages: z.boolean().default(false),
   compressImages: z.boolean().default(true),

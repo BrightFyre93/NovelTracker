@@ -32,6 +32,7 @@ export interface LibraryFileRecord {
   size: number
   modifiedAt: string
   novelTitle: string
+  /** Stable id of this EPUB file (the sidecar file id), used with volumeIndex to follow moves. */
   stableBookId?: string
   volumeIndex?: number
   author: string

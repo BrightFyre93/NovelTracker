@@ -1,5 +1,4 @@
-import { statfs } from 'node:fs/promises'
-import { appendJobDiagnostic } from '../jobDiagnostics'
+import { reportJobFailure } from './jobFailureReport'
 import type {
   ChapterContent,
   ChapterLink,
@@ -449,97 +448,61 @@ export async function runQueuedDownloadJob(
             ? errorMessage(error)
             : ''
       } else {
+        let damagedNote = ''
         const packagingFailed =
           lifecycle.packagingStarted &&
           requestedAction === 'none' &&
           !controller.signal.aborted
         if (packagingFailed) {
           transitionQueueItem(item, 'packaging-failed')
-          let freeBytes: number | null = null
+          // Find saved chapters that are missing or damaged so that Retry
+          // downloads exactly those chapters again.
           try {
-            const filesystem = await statfs(options.outputDirectory)
-            freeBytes = filesystem.bavail * filesystem.bsize
-          } catch (diagnosticError) {
-            console.warn(
-              `Free space could not be read for packaging failure ${itemId}:`,
-              errorMessage(diagnosticError)
-            )
-          }
-          console.error('EPUB packaging failed after chapter processing.', {
-            itemId,
-            error: errorMessage(error),
-            stack: error instanceof Error ? error.stack : String(error),
-            freeBytes,
-            paths: {
-              dataDirectory: dataDirectory(),
-              outputDirectory: options.outputDirectory,
-              targetOutputPath: item.targetOutputPath
-            },
-            options: {
-              language: options.outputOptions.language,
-              filename: options.filename,
-              outputDirectory: options.outputDirectory,
-              omitHttp404Chapters: options.omitHttp404Chapters === true,
-              outputOptions: {
-                filenameTemplate: options.outputOptions.filenameTemplate,
-                includeNovelInfoPage:
-                  options.outputOptions.includeNovelInfoPage,
-                includeChapterListPage:
-                  options.outputOptions.includeChapterListPage,
-                skipImages: options.outputOptions.skipImages,
-                compressImages: options.outputOptions.compressImages,
-                maxImageDimension: options.outputOptions.maxImageDimension,
-                imageFormat: options.outputOptions.imageFormat,
-                coverJpegOnly: options.outputOptions.coverJpegOnly,
-                flattenAnimatedImages:
-                  options.outputOptions.flattenAnimatedImages,
-                includeImageAttribution:
-                  options.outputOptions.includeImageAttribution,
-                maxChaptersPerEpub:
-                  options.outputOptions.maxChaptersPerEpub
-              }
+            let damagedChapterCount = 0
+            for (const [index, chapter] of selectedChapters.entries()) {
+              if (chapterStates.get(chapter.id)?.state !== 'Downloaded') continue
+              if (await artifactStore.hasUsableChapter(itemId, chapter.url)) continue
+              damagedChapterCount += 1
+              await updateChapterState(chapter, index, 'InvalidArtifact', {
+                lastError: `Saved chapter content is missing or damaged for "${chapter.title}".`,
+                artifactRef: null
+              })
             }
-          })
-          try {
-            await appendJobDiagnostic(dataDirectory(), itemId, {
-              event: 'packaging-failed',
-              error: errorMessage(error),
-              stack: error instanceof Error ? error.stack : String(error),
-              freeBytes,
-              paths: {
-                outputDirectory: options.outputDirectory,
-                targetOutputPath: item.targetOutputPath
-              },
-              options: {
-                ...options.outputOptions,
-                css: undefined,
-                filename: options.filename,
-                outputDirectory: options.outputDirectory,
-                omitHttp404Chapters: options.omitHttp404Chapters === true
-              },
-              failedChapters: item.failedChapters.map((chapter) => ({
-                title: chapter.title,
-                url: chapter.url,
-                httpStatus: chapter.httpStatus ?? null,
-                omitted: chapter.omitted === true,
-                error: chapter.error
-              })),
-              outputs: item.outputPaths ?? []
-            })
-          } catch (diagnosticError) {
+            if (damagedChapterCount > 0) {
+              damagedNote = ` ${damagedChapterCount} saved chapter(s) are missing or damaged. Use Retry to download them again.`
+            }
+          } catch (checkError) {
             console.warn(
-              `Job diagnostic could not be written for ${itemId}:`,
-              errorMessage(diagnosticError)
+              `Saved chapters of job ${itemId} could not be checked after the packaging failure:`,
+              errorMessage(checkError)
             )
           }
+          await reportJobFailure({
+            event: 'packaging-failed',
+            itemId,
+            item,
+            options,
+            error,
+            dataDirectory: dataDirectory(),
+            errorMessage
+          })
         } else {
           const finalStatus =
             chapterProgress.completedSelectedChapterCount > 0
               ? 'partially-completed'
               : 'failed'
           transitionQueueItem(item, finalStatus)
+          await reportJobFailure({
+            event: 'job-failed',
+            itemId,
+            item,
+            options,
+            error,
+            dataDirectory: dataDirectory(),
+            errorMessage
+          })
         }
-        item.error = errorMessage(error)
+        item.error = `${errorMessage(error)}${damagedNote}`
         console.error(`Queued EPUB job ${itemId} failed:`, error)
       }
       if (requestedAction !== 'shutdown') {

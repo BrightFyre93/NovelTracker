@@ -21,6 +21,12 @@ export interface EpubPackagingInput {
   appVersion?: string
   volumeIndex?: number
   volumeCount?: number
+  /** Overrides the novel id derived from outputOptions.identifierSeed. */
+  novelId?: string
+  /** Overrides the key (default: first chapter number) of the file id. */
+  fileIdKey?: string
+  /** When false, the chapters are always written to exactly one EPUB. */
+  allowVolumeSplit?: boolean
 }
 
 export interface EpubPackagingResult {

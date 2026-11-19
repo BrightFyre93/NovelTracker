@@ -1,4 +1,5 @@
 import type { ChapterImage } from '../../../shared/contracts'
+import sharp from 'sharp'
 import {
   HttpStatusError,
   NoReadableContentError,
@@ -45,6 +46,52 @@ export function imageMediaType(data: Uint8Array): EpubImageMediaType {
     String.fromCharCode(...data.subarray(8, 12)) === 'WEBP'
   ) return 'image/webp'
   throw new Error('An image is not a supported JPEG, PNG, GIF, or WebP file.')
+}
+
+const MAX_SVG_BYTES = 2 * 1024 * 1024
+const MAX_SVG_RASTER_DIMENSION = 2000
+
+function looksLikeSvg(data: Buffer, contentType: string): boolean {
+  if (/image\/svg\+xml/i.test(contentType)) return true
+  const head = data.subarray(0, 512).toString('utf8').trimStart().toLowerCase()
+  return (
+    head.startsWith('<svg') ||
+    (head.startsWith('<?xml') && head.includes('<svg'))
+  )
+}
+
+/**
+ * Renders an SVG to a PNG with transparency. The SVG is parsed from memory, so
+ * it cannot load other files; documents that declare entities are refused.
+ */
+async function rasterizeSvgToPng(data: Buffer): Promise<Buffer> {
+  if (data.length === 0 || data.length > MAX_SVG_BYTES) {
+    throw new Error('An SVG image is empty or exceeds its size limit.')
+  }
+  if (/<!ENTITY/i.test(data.toString('utf8'))) {
+    throw new Error('An SVG image uses unsupported entity declarations.')
+  }
+  try {
+    const png = await sharp(data, {
+      density: 144,
+      limitInputPixels: 40_000_000,
+      failOn: 'error'
+    })
+      .resize({
+        width: MAX_SVG_RASTER_DIMENSION,
+        height: MAX_SVG_RASTER_DIMENSION,
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .png()
+      .toBuffer()
+    if (png.length === 0 || png.length > MAX_IMAGE_BYTES) {
+      throw new Error('The converted SVG image is empty or too large.')
+    }
+    return png
+  } catch (error) {
+    throw new Error(`An SVG image could not be converted: ${toMessage(error)}`)
+  }
 }
 
 async function validateImageHost(value: string, pageOrigin: string): Promise<void> {
@@ -121,7 +168,12 @@ export async function fetchImageResource(
         chunks.push(value)
       }
 
-      const data = Buffer.concat(chunks, totalLength)
+      let data: Buffer = Buffer.concat(chunks, totalLength)
+      if (looksLikeSvg(data, response.headers.get('content-type') ?? '')) {
+        // Kindle does not reliably render SVG in reflowable books, so SVG
+        // images are converted to PNG before they are saved.
+        data = await rasterizeSvgToPng(data)
+      }
       const mediaType = imageMediaType(data)
       if (!Object.prototype.hasOwnProperty.call(EPUB_IMAGE_TYPES, mediaType)) {
         throw new Error('An image uses an unsupported format.')

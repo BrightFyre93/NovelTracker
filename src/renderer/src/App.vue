@@ -23,6 +23,10 @@ import { DEFAULT_EPUB_OUTPUT_PREFERENCES } from '../../shared/epubOutputOptions'
 import ConfigurationView from './components/ConfigurationView.vue'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
+import ChapterUrlDialog from './components/ChapterUrlDialog.vue'
+import { applyAppTheme } from './composables/useAppTheme'
+import { useChapterActions } from './composables/useChapterActions'
 import { useTrackerNovelSearch } from './composables/useTrackerNovelSearch'
 import { useDownloadStore } from './stores/download'
 import { useLibraryStore } from './stores/library'
@@ -124,6 +128,24 @@ const libraryScanCountLabel = computed(() => {
   }
   if (currentProgress.totalFiles === 0) return 'No supported files found'
   return `${currentProgress.indexedFiles.toLocaleString()} of ${currentProgress.totalFiles.toLocaleString()} indexed · ${currentProgress.discoveredFiles.toLocaleString()} found`
+})
+
+const confirmClearBrowser = ref(false)
+const chapterFilterActive = computed(() => chapterSearch.value.trim() !== '')
+const {
+  reorderBusy,
+  urlDialogChapter,
+  urlSaving,
+  urlError,
+  reverseSelection,
+  copyUrls,
+  reverseOrder,
+  openUrlDialog,
+  closeUrlDialog,
+  saveChapterUrl
+} = useChapterActions({
+  visibleChapters: () => filteredChapters.value.map((entry) => entry.chapter),
+  flushSelection: flushQueueSelectionSave
 })
 
 watch(url, async (value) => {
@@ -286,7 +308,7 @@ async function cancelBrowserDiscovery(): Promise<void> {
 }
 
 async function clearBrowserData(): Promise<void> {
-  if (!window.confirm('Clear saved browser cookies and site data for NovelTracker? This does not clear other app settings.')) return
+  confirmClearBrowser.value = false
   store.error = ''
   store.success = ''
   browserBusy.value = true
@@ -364,10 +386,6 @@ async function openCreateView(): Promise<void> {
     activeView.value = 'create'
     store.error = toMessage(error)
   }
-}
-
-function applyAppTheme(theme: 'light' | 'dark'): void {
-  document.documentElement.dataset.theme = theme
 }
 
 function resetDiscoveryForm(): void {
@@ -658,8 +676,10 @@ function updateChapterSelection(id: string, event: Event): void {
     <Message
       v-if="queueSelectionError"
       severity="error"
-      :closable="false"
+      closable
+      :key="queueSelectionError"
       class="feedback"
+      @close="queueSelectionError = ''"
     >
       {{ queueSelectionError }}
     </Message>
@@ -735,7 +755,7 @@ function updateChapterSelection(id: string, event: Event): void {
           severity="secondary"
           text
           :disabled="busy || browserBusy"
-          @click="clearBrowserData"
+          @click="confirmClearBrowser = true"
         />
       </div>
       <p class="help-text">
@@ -879,6 +899,47 @@ function updateChapterSelection(id: string, event: Event): void {
               :disabled="busy"
               @click="toggleAll(false)"
             />
+            <Button
+              icon="pi pi-arrow-right-arrow-left"
+              :title="chapterFilterActive ? 'Reverse selection of the filtered chapters' : 'Reverse selection of all chapters'"
+              :aria-label="chapterFilterActive ? 'Reverse selection of the filtered chapters' : 'Reverse selection of all chapters'"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy || chapters.length === 0"
+              @click="reverseSelection(chapterFilterActive ? 'visible' : 'all')"
+            />
+            <Button
+              icon="pi pi-sort-alt"
+              title="Reverse chapter order"
+              aria-label="Reverse chapter order"
+              severity="secondary"
+              text
+              size="small"
+              :loading="reorderBusy"
+              :disabled="busy || reorderBusy || !store.queueItemId || chapters.length === 0"
+              @click="reverseOrder"
+            />
+            <Button
+              icon="pi pi-copy"
+              title="Copy selected chapter URLs"
+              aria-label="Copy selected chapter URLs"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy || selectedCount === 0"
+              @click="copyUrls('selected')"
+            />
+            <Button
+              icon="pi pi-clone"
+              title="Copy all chapter URLs"
+              aria-label="Copy all chapter URLs"
+              severity="secondary"
+              text
+              size="small"
+              :disabled="busy || chapters.length === 0"
+              @click="copyUrls('all')"
+            />
           </div>
         </div>
         <div class="chapter-filter-row">
@@ -918,6 +979,19 @@ function updateChapterSelection(id: string, event: Event): void {
                 </span>
                 <span v-else-if="entry.chapter.recommended === false" class="chapter-archive-status">Not recommended</span>
               </span>
+              <Button
+                v-if="store.queueItemId"
+                class="chapter-row-edit"
+                icon="pi pi-pencil"
+                :title="`Edit URL of ${entry.chapter.title}`"
+                :aria-label="`Edit URL of ${entry.chapter.title}`"
+                severity="secondary"
+                text
+                rounded
+                size="small"
+                :disabled="busy"
+                @click.stop.prevent="openUrlDialog(entry.chapter)"
+              />
             </label>
           </template>
         </VirtualScroller>
@@ -1000,13 +1074,28 @@ function updateChapterSelection(id: string, event: Event): void {
       </div>
     </section>
 
-    <Message v-if="error" severity="error" :closable="false" class="feedback">{{ error }}</Message>
-    <Message v-if="success" severity="success" :closable="false" class="feedback">{{ success }}</Message>
+    <Message v-if="error" :key="error" severity="error" closable class="feedback" @close="store.error = ''">{{ error }}</Message>
+    <Message v-if="success" :key="success" severity="success" closable class="feedback" @close="store.success = ''">{{ success }}</Message>
     </template>
     <QueueView v-else-if="activeView === 'queue'" @open-item="openQueueItem" />
     <LibraryView v-else-if="activeView === 'library'" @open-configuration="activeView = 'configuration'" />
     <ConfigurationView v-else @theme-changed="applyAppTheme" />
   </main>
+  <ConfirmDialog
+    :open="confirmClearBrowser"
+    title="Clear browser session?"
+    message="Saved browser cookies and site data for NovelTracker will be removed. Other app settings are not changed."
+    confirm-label="Clear session"
+    @confirm="clearBrowserData"
+    @cancel="confirmClearBrowser = false"
+  />
+  <ChapterUrlDialog
+    :chapter="urlDialogChapter"
+    :saving="urlSaving"
+    :error="urlError"
+    @save="saveChapterUrl"
+    @cancel="closeUrlDialog"
+  />
   <div
     v-if="libraryScanning"
     class="scan-overlay"

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, nativeTheme } from 'electron'
 import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type { EpubMergeProgress } from '../../shared/contracts'
@@ -356,7 +356,9 @@ app
     })
     await migrateSettings(dataDirectory())
     await settingsService.initialize()
+    nativeTheme.themeSource = settingsService.current.appTheme
     settingsService.onDidChange((current, patch) => {
+      if ('appTheme' in patch) nativeTheme.themeSource = current.appTheme
       if ('domainRequestDelays' in patch)
         setDomainRequestDelays(current.domainRequestDelays)
       if (

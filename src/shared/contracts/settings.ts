@@ -18,7 +18,7 @@ export interface AppSettings {
   siteExtractionPreferences: SiteExtractionPreference[]
   epubCss: string
   epubOutputPreferences: EpubOutputPreferences
-  appTheme: 'light' | 'dark'
+  appTheme: 'light' | 'dark' | 'system'
 }
 
 export type SettingsUpdatePatch = Partial<

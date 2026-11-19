@@ -35,6 +35,8 @@ export interface EpubOutputRecord {
   byteSize: number
   sha256: string
   status: 'published'
+  /** Hash of the chapters and options this volume was built from. */
+  fingerprint?: string
 }
 
 export interface TrackerSource {
@@ -152,6 +154,10 @@ export interface DiscoveryQueueItem {
   siteExtractionMode?: SiteExtractionMode
   chapters: QueueChapter[]
   chapterSummary: QueueChapterSummary
+  /** True when the user reversed the discovered chapter order (kept on refresh). */
+  chapterOrderReversed?: boolean
+  /** Chapter URLs edited by the user: original discovered URL to edited URL. */
+  chapterUrlEdits?: Record<string, string>
   targetOutputPath: string
   discoveryChanges: string
   recommendationSummary: string
