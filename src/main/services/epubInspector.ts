@@ -4,6 +4,7 @@ import * as yauzl from 'yauzl'
 import type { CoverageConfidence, LibraryFileRecord } from '../../shared/contracts'
 import { parseChapterNumber } from '../../shared/chapterNumber'
 import { parseFilenameRange } from '../../shared/filenameRange'
+import { normalizeNovelSourceUrl } from '../../shared/downloadedNovelLookup'
 import {
   createXmlParser,
   entries,
@@ -46,6 +47,7 @@ interface NovelTrackerSidecar {
   language: string
   /** Cover image entry inside the archive, when the file has one. */
   coverPath: string | null
+  sourceUrl: string
   chapters: Array<{ number: number | null; title: string }>
 }
 
@@ -160,6 +162,10 @@ async function readNovelTrackerSidecar(
       return [{ number: chapter.number, title: chapter.title }]
     })
     if (chapters.length !== record.chapters.length) return null
+    const sidecarMetadata = object(record.metadata)
+    const sourceUrl = typeof sidecarMetadata.sourceUrl === 'string'
+      ? normalizeNovelSourceUrl(sidecarMetadata.sourceUrl) ?? ''
+      : ''
     // An edited archive keeps its old sidecar: trust it only while the number of
     // chapter files still matches.
     if (chapters.length !== scanned.chapterEntryCount) return null
@@ -173,6 +179,7 @@ async function readNovelTrackerSidecar(
       title: record.title,
       author: record.author,
       language: record.language,
+      sourceUrl,
       coverPath:
         typeof record.coverPath === 'string' &&
         /^images\/[a-f0-9]{64}\.(?:jpg|png|gif)$/.test(record.coverPath)
@@ -267,6 +274,7 @@ export async function inspectEpub(
       size,
       modifiedAt,
       novelTitle: sidecar.title,
+      ...(sidecar.sourceUrl ? { sourceUrl: sidecar.sourceUrl } : {}),
       // The library tracks moved files by the file-level id (not the novel id,
       // which every range file of a novel shares).
       ...(sidecar.fileId ? { stableBookId: sidecar.fileId } : {}),
@@ -361,6 +369,7 @@ async function inspectLegacyEpub(
   const creator = firstMetadataValue(metadata, 'creator')
   const author = /^(?:unknown|<unknown>)$/i.test(creator) ? '' : creator
   const language = firstMetadataValue(metadata, 'language')
+  const sourceUrl = normalizeNovelSourceUrl(firstMetadataValue(metadata, 'source')) ?? ''
   const confidence: CoverageConfidence =
     chapterNumbers.length > 0 ? 'extracted-toc' : parseFilenameRange(relativePath) ? 'filename' : 'unknown'
 
@@ -374,6 +383,7 @@ async function inspectLegacyEpub(
     size,
     modifiedAt,
     novelTitle: title,
+    ...(sourceUrl ? { sourceUrl } : {}),
     author,
     language,
     chapterTitles: uniqueTitles,

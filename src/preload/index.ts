@@ -101,6 +101,8 @@ const api: NovelTrackerApi = {
     listener: (update: DiscoveryQueueUpdate) => void
   ) => onIpcEvent('discovery-queue:update', listener),
   getLibraryIndexSummary: () => invokeIpc('library:index-summary'),
+  lookupDownloadedNovels: (urls: string[]) =>
+    invokeIpc('library:lookup-downloaded-novels', urls),
   searchLibraryNovels: (
     query: string,
     multipleFilesOnly: boolean,

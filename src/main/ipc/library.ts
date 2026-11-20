@@ -54,6 +54,17 @@ export function registerLibraryIpcHandlers(
 
   handle(
     'validated-result',
+    'library:lookup-downloaded-novels',
+    z.tuple([z.array(z.string().max(4096)).min(1).max(500)]),
+    async (_event, urls) => {
+      const matches = await libraryIndexRepository.lookupDownloadedNovels(urls)
+      if (!matches) throw new Error('Scan the library before checking downloaded novels.')
+      return { ok: true, value: matches }
+    }
+  )
+
+  handle(
+    'validated-result',
     'library:search-novel-files',
     z.tuple([
       z.string().max(300),

@@ -212,6 +212,7 @@ function cachedFile(
     ...libraryFileIdentity(file),
     filename: cached.filename,
     novelTitle: cached.novelTitle,
+    ...(cached.sourceUrl ? { sourceUrl: cached.sourceUrl } : {}),
     ...(cached.stableBookId ? { stableBookId: cached.stableBookId } : {}),
     ...(cached.volumeIndex ? { volumeIndex: cached.volumeIndex } : {}),
     author: cached.author,
@@ -480,6 +481,10 @@ export async function scanLibrary(
         }
       } catch (error) {
         record = emptyFile(file, error)
+        // Keep URL metadata recovered on an earlier scan if this scan cannot
+        // reopen the EPUB. A transient inspection failure should not erase the
+        // library's downloaded-novel lookup key.
+        if (previousFile?.sourceUrl) record.sourceUrl = previousFile.sourceUrl
         scanErrors += 1
       }
     } else {

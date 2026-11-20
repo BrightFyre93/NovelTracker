@@ -21,6 +21,7 @@ import { encodeChapterSelection } from '../../shared/chapterSelection'
 import { MAX_EPUB_FILENAME_BASENAME_LENGTH, resolveEpubFilename } from '../../shared/epubFilename'
 import { DEFAULT_EPUB_OUTPUT_PREFERENCES } from '../../shared/epubOutputOptions'
 import ConfigurationView from './components/ConfigurationView.vue'
+import DownloadedCheckView from './components/DownloadedCheckView.vue'
 import LibraryView from './components/LibraryView.vue'
 import QueueView from './components/QueueView.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -39,7 +40,7 @@ const {
   progress: libraryProgress,
   cancelError: libraryCancelError
 } = storeToRefs(libraryState)
-const activeView = ref<'create' | 'queue' | 'library' | 'configuration'>('create')
+const activeView = ref<'create' | 'queue' | 'library' | 'downloaded-check' | 'configuration'>('create')
 const browserBusy = ref(false)
 const browserAssistOpen = ref(false)
 const browserDiscoveryRunning = ref(false)
@@ -600,6 +601,7 @@ function updateChapterSelection(id: string, event: Event): void {
         <button :class="{ active: activeView === 'create' }" @click="openCreateView">Prepare EPUB</button>
         <button :class="{ active: activeView === 'queue' }" @click="activeView = 'queue'">Queue</button>
         <button :class="{ active: activeView === 'library' }" @click="activeView = 'library'">Library</button>
+        <button :class="{ active: activeView === 'downloaded-check' }" @click="activeView = 'downloaded-check'">Novel Check</button>
         <button :class="{ active: activeView === 'configuration' }" @click="activeView = 'configuration'">Configuration</button>
       </nav>
     </header>
@@ -1079,6 +1081,7 @@ function updateChapterSelection(id: string, event: Event): void {
     </template>
     <QueueView v-else-if="activeView === 'queue'" @open-item="openQueueItem" />
     <LibraryView v-else-if="activeView === 'library'" @open-configuration="activeView = 'configuration'" />
+    <DownloadedCheckView v-else-if="activeView === 'downloaded-check'" />
     <ConfigurationView v-else @theme-changed="applyAppTheme" />
   </main>
   <ConfirmDialog

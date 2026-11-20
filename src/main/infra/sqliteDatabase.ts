@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
 const DATABASE_FILENAME = 'novel-tracker.sqlite'
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 8
 
 export class SqliteDatabase {
   private database: DatabaseSync | null = null
@@ -280,6 +280,24 @@ export class SqliteDatabase {
           `)
         })
         version = 7
+      }
+      if (version === 7) {
+        withSqliteTransaction(database, () => {
+          database.exec(`
+            ALTER TABLE library_files ADD COLUMN source_url TEXT;
+            ALTER TABLE library_novels ADD COLUMN source_url TEXT;
+            ALTER TABLE library_novels ADD COLUMN source_url_key TEXT;
+            -- Reinspect existing EPUBs once so URL values in their sidecars/OPF
+            -- populate the new downloaded-novel lookup index on the next scan.
+            UPDATE library_files SET modified_at = '' WHERE format = 'EPUB';
+            CREATE INDEX IF NOT EXISTS library_novels_by_source_url
+              ON library_novels(source_url_key);
+            CREATE INDEX IF NOT EXISTS library_files_by_source_url
+              ON library_files(source_url);
+            PRAGMA user_version = 8;
+          `)
+        })
+        version = 8
       }
       if (version !== SCHEMA_VERSION) {
         throw new Error(`The SQLite schema could not be upgraded to version ${SCHEMA_VERSION}.`)

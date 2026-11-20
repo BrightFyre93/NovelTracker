@@ -23,6 +23,7 @@ import type {
   LibraryNovelSearchPage,
   LibraryOperation,
   LibraryProgress,
+  DownloadedNovelLookupResult,
   QueuedEpubJob,
   QueueEpubOverrides,
   Result,
@@ -53,6 +54,10 @@ export interface IpcMap {
   'library:index-summary': {
     args: []
     result: LibraryIndexOverview | null
+  }
+  'library:lookup-downloaded-novels': {
+    args: [urls: string[]]
+    result: Result<DownloadedNovelLookupResult[]>
   }
   'library:search-novels': {
     args: [

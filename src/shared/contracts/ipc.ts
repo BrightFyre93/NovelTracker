@@ -30,7 +30,8 @@ import type {
   EpubMergeProgress,
   LibraryEpubMergeResponse,
   LibraryOperation,
-  EpubRepairResponse
+  EpubRepairResponse,
+  DownloadedNovelLookupResult
 } from './library'
 
 export interface NovelTrackerApi {
@@ -116,6 +117,7 @@ export interface NovelTrackerApi {
   getLibraryIndexBackupDate(): Promise<string | null>
   restoreLibraryIndexBackup(): Promise<Result<LibraryIndexOverview>>
   scanLibrary(forceRebuild?: boolean): Promise<Result<LibraryIndexOverview>>
+  lookupDownloadedNovels(urls: string[]): Promise<Result<DownloadedNovelLookupResult[]>>
   cancelLibraryScan(): Promise<void>
   correctLibraryFile(
     fileId: string,

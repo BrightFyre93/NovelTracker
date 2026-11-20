@@ -4,7 +4,8 @@ import type {
   LibraryFileSearchPage,
   LibraryIndex,
   LibraryIndexOverview,
-  LibraryNovelSearchPage
+  LibraryNovelSearchPage,
+  DownloadedNovelLookupResult
 } from '../../../shared/contracts'
 import type { ArchiveRecommendationTarget } from '../../../shared/archiveRecommendation'
 
@@ -12,6 +13,7 @@ export interface LibraryIndexRepository {
   read(): Promise<LibraryIndex | null>
   readScanCache(): Promise<LibraryIndex | null>
   readOverview(): Promise<LibraryIndexOverview | null>
+  lookupDownloadedNovels(urls: string[]): Promise<DownloadedNovelLookupResult[] | null>
   searchNovels(
     query: string,
     multipleFilesOnly: boolean,

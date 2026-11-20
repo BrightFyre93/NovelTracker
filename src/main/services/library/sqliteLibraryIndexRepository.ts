@@ -10,7 +10,8 @@ import type {
   LibraryFolderState,
   LibraryIndex,
   LibraryIndexOverview,
-  LibraryNovelSearchPage
+  LibraryNovelSearchPage,
+  DownloadedNovelLookupResult
 } from '../../../shared/contracts'
 import type { ArchiveRecommendationTarget } from '../../../shared/archiveRecommendation'
 import {
@@ -29,6 +30,11 @@ import { backupLegacyJsonFile } from '../../infra/jsonMigrationBackup'
 import { withSqliteTransaction } from '../../infra/sqliteDatabase'
 import type { SqliteDatabase } from '../../infra/sqliteDatabase'
 import { samePath } from '../pathUtils'
+import {
+  extractNovelNameFromUrl,
+  normalizeNovelLookupName,
+  normalizeNovelSourceUrl
+} from '../../../shared/downloadedNovelLookup'
 import {
   clearLibraryIndexCache,
   readLibraryIndex,
@@ -111,6 +117,7 @@ function isLibraryFileRecord(value: unknown): value is LibraryFileRecord {
     Number.isFinite(value.size) &&
     typeof value.modifiedAt === 'string' &&
     typeof value.novelTitle === 'string' &&
+    (value.sourceUrl === undefined || typeof value.sourceUrl === 'string') &&
     typeof value.author === 'string' &&
     typeof value.language === 'string' &&
     Array.isArray(value.chapterTitles) &&
@@ -201,6 +208,9 @@ function parseFileRow(row: Record<string, SQLOutputValue>): LibraryFileRecord {
     size: getNumber(row.size, 'file size'),
     modifiedAt: getString(row.modified_at, 'file modification date'),
     novelTitle: getString(row.novel_title, 'novel title'),
+    ...(typeof row.source_url === 'string' && row.source_url
+      ? { sourceUrl: getString(row.source_url, 'source URL') }
+      : {}),
     ...(row.stable_book_id === null || row.stable_book_id === undefined
       ? {}
       : { stableBookId: getString(row.stable_book_id, 'stable book identifier') }),
@@ -234,7 +244,7 @@ function readFilesByNovelIds(
   const fileRows = database
     .prepare(
       `SELECT novel_id, id, path, relative_path, filename, format,
-              folder_state, size, modified_at, novel_title, stable_book_id, volume_index, author, language,
+              folder_state, size, modified_at, novel_title, source_url, stable_book_id, volume_index, author, language,
               filename_range_start, filename_range_end, coverage_confidence,
               cover_path, inspection_error
        FROM library_files
@@ -291,7 +301,7 @@ function readFileRecordsByIds(
     const fileRows = database
       .prepare(
         `SELECT id, path, relative_path, filename, format, folder_state, size,
-                modified_at, novel_title, stable_book_id, volume_index, author, language, filename_range_start,
+                modified_at, novel_title, source_url, stable_book_id, volume_index, author, language, filename_range_start,
                 filename_range_end, coverage_confidence, cover_path, inspection_error
          FROM library_files WHERE id IN (${placeholders})`
       )
@@ -464,19 +474,23 @@ function replaceIndex(database: DatabaseSync, index: LibraryIndex): void {
     )
 
   const novels = new Map<string, string>()
+  const novelSources = new Map<string, string>()
   for (const file of index.files) {
     const key = normalizeNovelTitleForGrouping(file.novelTitle)
     if (!novels.has(key)) novels.set(key, file.novelTitle)
+    const sourceUrl = file.sourceUrl ? normalizeNovelSourceUrl(file.sourceUrl) : null
+    if (sourceUrl && !novelSources.has(key)) novelSources.set(key, sourceUrl)
   }
   const insertNovel = database.prepare(
-    `INSERT INTO library_novels (id, display_title, normalized_title)
-     VALUES (?, ?, ?)`
+    `INSERT INTO library_novels (id, display_title, normalized_title, source_url, source_url_key)
+     VALUES (?, ?, ?, ?, ?)`
   )
   const insertAlias = database.prepare(
     'INSERT OR IGNORE INTO library_novel_aliases (novel_id, alias_key) VALUES (?, ?)'
   )
   for (const [key, title] of novels) {
-    insertNovel.run(key, title, key)
+    const sourceUrl = novelSources.get(key) ?? null
+    insertNovel.run(key, title, key, sourceUrl, sourceUrl)
     const alias = normalizeNovelTitleForMatching(title)
     if (alias) insertAlias.run(key, alias)
   }
@@ -484,10 +498,10 @@ function replaceIndex(database: DatabaseSync, index: LibraryIndex): void {
   const insertFile = database.prepare(
     `INSERT INTO library_files (
        id, ordinal, path, relative_path, filename, format, folder_state, size,
-       modified_at, novel_id, novel_title, stable_book_id, volume_index, author, language,
+       modified_at, novel_id, novel_title, source_url, stable_book_id, volume_index, author, language,
        filename_range_start, filename_range_end, coverage_confidence,
        cover_path, inspection_error
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
   const insertChapter = database.prepare(
     `INSERT INTO library_chapters
@@ -508,6 +522,7 @@ function replaceIndex(database: DatabaseSync, index: LibraryIndex): void {
       file.modifiedAt,
       novelId,
       file.novelTitle,
+      file.sourceUrl ?? null,
       file.stableBookId ?? null,
       file.volumeIndex ?? null,
       file.author,
@@ -562,7 +577,7 @@ function readIndex(database: DatabaseSync, includeChapterRows = true): LibraryIn
   const files = database
     .prepare(
       `SELECT id, path, relative_path, filename, format, folder_state, size,
-              modified_at, novel_title, stable_book_id, volume_index, author, language, filename_range_start,
+              modified_at, novel_title, source_url, stable_book_id, volume_index, author, language, filename_range_start,
               filename_range_end, coverage_confidence, cover_path, inspection_error
        FROM library_files ORDER BY ordinal`
     )
@@ -715,6 +730,62 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
   async readOverview(): Promise<LibraryIndexOverview | null> {
     await this.ensureInitialized()
     return readOverview(await this.database.open())
+  }
+
+  async lookupDownloadedNovels(urls: string[]): Promise<DownloadedNovelLookupResult[] | null> {
+    await this.ensureInitialized()
+    const database = await this.database.open()
+    if (!readOverview(database)) return null
+    const byUrl = database.prepare(
+      `SELECT n.id, n.display_title, n.source_url, f.path
+       FROM library_novels n
+       JOIN library_files f ON f.novel_id = n.id
+       WHERE f.source_url = ?
+       ORDER BY n.id, f.ordinal`
+    )
+    const byName = database.prepare(
+      `SELECT n.id, n.display_title, n.source_url, f.path
+       FROM library_novels n
+       JOIN library_files f ON f.novel_id = n.id
+       WHERE n.normalized_title = ? OR EXISTS (
+         SELECT 1 FROM library_novel_aliases a
+         WHERE a.novel_id = n.id AND a.alias_key = ?
+       )
+       ORDER BY n.id, f.ordinal`
+    )
+    return urls.map((url) => {
+      const normalizedUrl = normalizeNovelSourceUrl(url)
+      const extractedName = extractNovelNameFromUrl(url)
+      const nameKey = normalizeNovelLookupName(extractedName)
+      const urlRows = normalizedUrl ? byUrl.all(normalizedUrl) : []
+      const matchType = urlRows.length > 0 ? 'url' : 'name'
+      const rows = urlRows.length > 0
+        ? urlRows
+        : nameKey
+          ? byName.all(normalizeNovelTitleForGrouping(extractedName), nameKey)
+          : []
+      const matches = new Map<string, DownloadedNovelLookupResult['matches'][number]>()
+      for (const row of rows) {
+        const id = getString(row.id, 'novel identifier')
+        let match = matches.get(id)
+        if (!match) {
+          match = {
+            novelName: getString(row.display_title, 'novel title'),
+            sourceUrl: typeof row.source_url === 'string' ? row.source_url : '',
+            localPaths: []
+          }
+          matches.set(id, match)
+        }
+        const path = getString(row.path, 'local EPUB path')
+        if (!match.localPaths.includes(path)) match.localPaths.push(path)
+      }
+      return {
+        url,
+        extractedName,
+        matchType: matches.size > 0 ? matchType : null,
+        matches: [...matches.values()]
+      }
+    })
   }
 
   async searchNovels(
@@ -987,10 +1058,13 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
 
       const reusedFileIds = new Set(index.scanSummary.reusedFileIds ?? [])
       const insertNovel = database.prepare(
-        `INSERT INTO library_novels (id, display_title, normalized_title)
-         VALUES (?, ?, ?)
+        `INSERT INTO library_novels (
+           id, display_title, normalized_title, source_url, source_url_key
+         ) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET display_title = excluded.display_title,
-           normalized_title = excluded.normalized_title`
+           normalized_title = excluded.normalized_title,
+           source_url = COALESCE(excluded.source_url, library_novels.source_url),
+           source_url_key = COALESCE(excluded.source_url_key, library_novels.source_url_key)`
       )
       const insertAlias = database.prepare(
         'INSERT OR IGNORE INTO library_novel_aliases (novel_id, alias_key) VALUES (?, ?)'
@@ -998,16 +1072,17 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
       const upsertFile = database.prepare(
         `INSERT INTO library_files (
            id, ordinal, path, relative_path, filename, format, folder_state, size,
-           modified_at, novel_id, novel_title, stable_book_id, volume_index, author,
+           modified_at, novel_id, novel_title, source_url, stable_book_id, volume_index, author,
            language, filename_range_start, filename_range_end, coverage_confidence,
            cover_path, inspection_error
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET ordinal = excluded.ordinal,
            path = excluded.path, relative_path = excluded.relative_path,
            filename = excluded.filename, format = excluded.format,
            folder_state = excluded.folder_state, size = excluded.size,
            modified_at = excluded.modified_at, novel_id = excluded.novel_id,
-           novel_title = excluded.novel_title, stable_book_id = excluded.stable_book_id,
+           novel_title = excluded.novel_title, source_url = excluded.source_url,
+           stable_book_id = excluded.stable_book_id,
            volume_index = excluded.volume_index, author = excluded.author,
            language = excluded.language, filename_range_start = excluded.filename_range_start,
            filename_range_end = excluded.filename_range_end,
@@ -1021,13 +1096,15 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
       )
       index.files.forEach((file, ordinal) => {
         const novelId = normalizeNovelTitleForGrouping(file.novelTitle)
-        insertNovel.run(novelId, file.novelTitle, novelId)
+        const sourceUrl = file.sourceUrl ? normalizeNovelSourceUrl(file.sourceUrl) : null
+        insertNovel.run(novelId, file.novelTitle, novelId, sourceUrl, sourceUrl)
         const alias = normalizeNovelTitleForMatching(file.novelTitle)
         if (alias) insertAlias.run(novelId, alias)
         upsertFile.run(
           file.id, ordinal, file.path, file.relativePath, file.filename, file.format,
           file.folderState, file.size, file.modifiedAt, novelId, file.novelTitle,
-          file.stableBookId ?? null, file.volumeIndex ?? null, file.author, file.language,
+          file.sourceUrl ?? null, file.stableBookId ?? null, file.volumeIndex ?? null,
+          file.author, file.language,
           file.filenameRange?.start ?? null, file.filenameRange?.end ?? null,
           file.coverageConfidence, file.coverPath, file.inspectionError
         )
@@ -1062,15 +1139,30 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
       }
 
       database.exec('DELETE FROM library_novel_aliases; DELETE FROM library_novels;')
-      const novelRows = database.prepare('SELECT DISTINCT novel_title FROM library_files').all()
-      const updateNovel = database.prepare('UPDATE library_files SET novel_id = ? WHERE novel_title = ?')
+      const novelRows = database.prepare(
+        'SELECT novel_title, source_url FROM library_files ORDER BY ordinal'
+      ).all()
+      const novelSources = new Map<string, string>()
+      const novelTitles = new Map<string, string>()
       for (const row of novelRows) {
         const title = getString(row.novel_title, 'novel title')
         const novelId = normalizeNovelTitleForGrouping(title)
-        insertNovel.run(novelId, title, novelId)
+        if (!novelTitles.has(novelId)) novelTitles.set(novelId, title)
+        const sourceUrl = typeof row.source_url === 'string'
+          ? normalizeNovelSourceUrl(row.source_url)
+          : null
+        if (sourceUrl && !novelSources.has(novelId)) novelSources.set(novelId, sourceUrl)
+      }
+      const updateNovel = database.prepare('UPDATE library_files SET novel_id = ? WHERE novel_title = ?')
+      for (const [novelId, title] of novelTitles) {
+        const sourceUrl = novelSources.get(novelId) ?? null
+        insertNovel.run(novelId, title, novelId, sourceUrl, sourceUrl)
         const alias = normalizeNovelTitleForMatching(title)
         if (alias) insertAlias.run(novelId, alias)
-        updateNovel.run(novelId, title)
+      }
+      for (const row of novelRows) {
+        const title = getString(row.novel_title, 'novel title')
+        updateNovel.run(normalizeNovelTitleForGrouping(title), title)
       }
       database.prepare(
         `UPDATE library_index_metadata
@@ -1152,13 +1244,22 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
 
       database
         .prepare(
-          `INSERT INTO library_novels (id, display_title, normalized_title)
-           VALUES (?, ?, ?)
+          `INSERT INTO library_novels (
+             id, display_title, normalized_title, source_url, source_url_key
+           ) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              display_title = excluded.display_title,
-             normalized_title = excluded.normalized_title`
+             normalized_title = excluded.normalized_title,
+             source_url = COALESCE(excluded.source_url, library_novels.source_url),
+             source_url_key = COALESCE(excluded.source_url_key, library_novels.source_url_key)`
         )
-        .run(novelId, indexedFile.novelTitle, novelId)
+        .run(
+          novelId,
+          indexedFile.novelTitle,
+          novelId,
+          indexedFile.sourceUrl ?? null,
+          indexedFile.sourceUrl ? normalizeNovelSourceUrl(indexedFile.sourceUrl) : null
+        )
       const alias = normalizeNovelTitleForMatching(indexedFile.novelTitle)
       if (alias) {
         database
@@ -1172,10 +1273,10 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
         .prepare(
           `INSERT INTO library_files (
              id, ordinal, path, relative_path, filename, format, folder_state, size,
-             modified_at, novel_id, novel_title, stable_book_id, volume_index, author, language,
+             modified_at, novel_id, novel_title, source_url, stable_book_id, volume_index, author, language,
              filename_range_start, filename_range_end, coverage_confidence,
              cover_path, inspection_error
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              ordinal = excluded.ordinal,
              path = excluded.path,
@@ -1187,6 +1288,7 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
              modified_at = excluded.modified_at,
              novel_id = excluded.novel_id,
              novel_title = excluded.novel_title,
+             source_url = excluded.source_url,
              stable_book_id = excluded.stable_book_id,
              volume_index = excluded.volume_index,
              author = excluded.author,
@@ -1209,6 +1311,7 @@ class SqliteLibraryIndexRepository implements LibraryIndexRepository {
           indexedFile.modifiedAt,
           novelId,
           indexedFile.novelTitle,
+          indexedFile.sourceUrl ?? null,
           indexedFile.stableBookId ?? null,
           indexedFile.volumeIndex ?? null,
           indexedFile.author,

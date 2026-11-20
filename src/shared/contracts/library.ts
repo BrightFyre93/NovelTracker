@@ -32,6 +32,7 @@ export interface LibraryFileRecord {
   size: number
   modifiedAt: string
   novelTitle: string
+  sourceUrl?: string
   /** Stable id of this EPUB file (the sidecar file id), used with volumeIndex to follow moves. */
   stableBookId?: string
   volumeIndex?: number
@@ -44,6 +45,19 @@ export interface LibraryFileRecord {
   coverageConfidence: CoverageConfidence
   coverPath: string | null
   inspectionError: string
+}
+
+export interface DownloadedNovelMatch {
+  novelName: string
+  sourceUrl: string
+  localPaths: string[]
+}
+
+export interface DownloadedNovelLookupResult {
+  url: string
+  extractedName: string
+  matchType: 'url' | 'name' | null
+  matches: DownloadedNovelMatch[]
 }
 
 export interface LibraryIndex {
