@@ -1,8 +1,11 @@
 import { createLibraryWorkflowCommands } from '../services/library/libraryWorkflowCommands'
 import type { LibraryWorkflowContext } from '../services/library/libraryWorkflowCommands'
 import { z } from 'zod'
+import { clipboard } from 'electron'
 import type { LibraryFileCorrection } from '../../shared/contracts'
+import { buildDownloadSyncText } from '../../shared/downloadSyncText'
 import { inspectEpub } from '../services/epubInspector'
+import { applyLibraryFileCorrection } from '../services/library/libraryIndexRepository'
 
 export function registerLibraryIpcHandlers(
   context: LibraryWorkflowContext
@@ -51,6 +54,43 @@ export function registerLibraryIpcHandlers(
   handle('typed', 'library:index-summary', z.tuple([]), async () => {
     return libraryIndexRepository.readOverview()
   })
+
+  // Builds the text the Android app imports and puts it on the clipboard.
+  handle(
+    'validated-result',
+    'library:copy-download-sync-text',
+    z.tuple([]),
+    async () => {
+      const index = await libraryIndexRepository.read()
+      if (!index) throw new Error('Scan the library before copying download counts.')
+      const sync = buildDownloadSyncText(
+        index.files.map((file) =>
+          applyLibraryFileCorrection(file, index.corrections[file.id])
+        )
+      )
+      if (sync.rows.length === 0) {
+        throw new Error(
+          'No novel in the library has a known downloaded chapter number yet.'
+        )
+      }
+      let copied = false
+      try {
+        clipboard.writeText(sync.text)
+        copied = true
+      } catch (error) {
+        console.warn('The download sync text could not be copied:', error)
+      }
+      return {
+        ok: true,
+        value: {
+          text: sync.text,
+          novelCount: sync.rows.length,
+          skippedCount: sync.skippedNovelCount,
+          copied
+        }
+      }
+    }
+  )
 
   handle(
     'validated-result',

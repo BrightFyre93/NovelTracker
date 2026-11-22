@@ -24,6 +24,7 @@ import type {
   LibraryOperation,
   LibraryProgress,
   DownloadedNovelLookupResult,
+  DownloadSyncCopyResult,
   QueuedEpubJob,
   QueueEpubOverrides,
   Result,
@@ -248,6 +249,10 @@ export interface IpcMap {
   'discovery-queue:reverse-chapters': {
     args: [id: string]
     result: Result<void>
+  }
+  'library:copy-download-sync-text': {
+    args: []
+    result: Result<DownloadSyncCopyResult>
   }
   'discovery-queue:update-chapter-url': {
     args: [id: string, chapterId: string, url: string]

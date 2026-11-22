@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import type {
@@ -42,6 +42,10 @@ interface StoredState {
   version: 2
   results: string[]
   cache: Record<string, SavedMatch>
+  /** Text typed in the URL box but not checked yet. */
+  draft?: string
+  filter?: ResultFilter
+  grouped?: boolean
 }
 
 interface ResultGroup {
@@ -133,6 +137,12 @@ function loadSavedState(): void {
         }
         savedMatches.value = cache
         results.value = stored.results.filter((key) => typeof key === 'string' && key in cache)
+        // Keep what was typed, and how the list was filtered, when moving between pages.
+        if (typeof stored.draft === 'string') inputText.value = stored.draft
+        if (stored.filter === 'all' || stored.filter === 'found' || stored.filter === 'not-found') {
+          filter.value = stored.filter
+        }
+        grouped.value = stored.grouped === true
         return
       }
     }
@@ -197,7 +207,10 @@ function persistNow(): void {
     const state: StoredState = {
       version: 2,
       results: results.value,
-      cache: savedMatches.value
+      cache: savedMatches.value,
+      draft: inputText.value,
+      filter: filter.value,
+      grouped: grouped.value
     }
     localStorage.setItem(storageKey, JSON.stringify(state))
   } catch {
@@ -613,6 +626,7 @@ function forgetSavedMatches(): void {
 
 onMounted(() => {
   loadSavedState()
+  watch([inputText, filter, grouped], persistSoon)
   document.addEventListener('pointerdown', closeFilterOnOutsideClick)
   removeQueueListener = window.novelTracker.onDiscoveryQueueUpdate(handleQueueUpdate)
   void refreshJobs()

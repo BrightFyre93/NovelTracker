@@ -51,6 +51,8 @@ const busy = computed(() =>
 )
 const error = ref('')
 const success = ref('')
+const copyingSync = ref(false)
+const syncFallbackText = ref('')
 const loadingNovelFiles = ref(false)
 const searchingNovels = ref(false)
 const searchingFiles = ref(false)
@@ -671,6 +673,33 @@ async function repairExistingEpub(fileId: string): Promise<void> {
   }
 }
 
+async function copyDownloadCounts(): Promise<void> {
+  error.value = ''
+  success.value = ''
+  syncFallbackText.value = ''
+  copyingSync.value = true
+  try {
+    const sync = unwrapResult(await window.novelTracker.copyDownloadSyncText())
+    const skipped = sync.skippedCount
+      ? ` ${sync.skippedCount.toLocaleString()} novel${sync.skippedCount === 1 ? ' was' : 's were'} left out because no downloaded chapter number is known.`
+      : ''
+    if (sync.copied) {
+      success.value = `Copied the download counts of ${sync.novelCount.toLocaleString()} novels. In the Android app open the ⋮ menu, choose "Update downloads from text…", paste, check the preview, and apply it.${skipped}`
+    } else {
+      syncFallbackText.value = sync.text
+      error.value = `The clipboard could not be written. Copy the ${sync.novelCount.toLocaleString()} lines below by hand.${skipped}`
+    }
+  } catch (reason) {
+    error.value = toMessage(reason)
+  } finally {
+    copyingSync.value = false
+  }
+}
+
+function selectSyncText(event: Event): void {
+  if (event.target instanceof HTMLTextAreaElement) event.target.select()
+}
+
 function parseCoverage(value: string): number[] | undefined {
   const input = value.trim()
   if (!input) return undefined
@@ -780,6 +809,16 @@ function chapterRangeLabel(start: number, end: number): string {
             :loading="restoringBackup"
             @click="restoreBackup"
           />
+          <Button
+            icon="pi pi-clipboard"
+            aria-label="Copy download counts for the Android app"
+            severity="secondary"
+            outlined
+            title="Copy every novel's name, downloaded chapter count and site page name to the clipboard, ready to paste into the Android app (Update downloads from text)."
+            :disabled="busy || !index"
+            :loading="copyingSync"
+            @click="copyDownloadCounts"
+          />
         </div>
       </div>
       <p class="help-text library-note">
@@ -789,6 +828,18 @@ function chapterRangeLabel(start: number, end: number): string {
         <div><strong>{{ totalNovelCount.toLocaleString() }}</strong><span>visible novels</span></div>
         <div><strong>{{ index.fileCount.toLocaleString() }}</strong><span>indexed ebook files</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
+      </div>
+      <div v-if="syncFallbackText" class="library-note">
+        <label class="field-label" for="download-sync-text">Download counts for the Android app</label>
+        <textarea
+          id="download-sync-text"
+          class="queue-url-input"
+          rows="8"
+          readonly
+          :value="syncFallbackText"
+          @focus="selectSyncText"
+        />
+        <p class="help-text">Select all, copy, then paste it in the Android app: ⋮ menu, then "Update downloads from text…".</p>
       </div>
       <Message v-if="!index && !busy" severity="info" :closable="false" class="feedback">
         {{ backupDate

@@ -95,6 +95,7 @@ const api: NovelTrackerApi = {
     invokeIpc('discovery-queue:update-selection', id, selection),
   reverseDiscoveryQueueChapters: (id: string) =>
     invokeIpc('discovery-queue:reverse-chapters', id),
+  copyDownloadSyncText: () => invokeIpc('library:copy-download-sync-text'),
   updateDiscoveryQueueChapterUrl: (id: string, chapterId: string, url: string) =>
     invokeIpc('discovery-queue:update-chapter-url', id, chapterId, url),
   onDiscoveryQueueUpdate: (

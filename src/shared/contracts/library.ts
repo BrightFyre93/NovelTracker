@@ -60,6 +60,16 @@ export interface DownloadedNovelLookupResult {
   matches: DownloadedNovelMatch[]
 }
 
+/** Result of building the download sync text for the Android app. */
+export interface DownloadSyncCopyResult {
+  text: string
+  novelCount: number
+  /** Novels left out because no downloaded chapter number could be determined. */
+  skippedCount: number
+  /** False when the clipboard could not be written; show the text instead. */
+  copied: boolean
+}
+
 export interface LibraryIndex {
   schemaVersion: 1
   libraryRoot: string

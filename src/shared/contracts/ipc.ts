@@ -31,7 +31,8 @@ import type {
   LibraryEpubMergeResponse,
   LibraryOperation,
   EpubRepairResponse,
-  DownloadedNovelLookupResult
+  DownloadedNovelLookupResult,
+  DownloadSyncCopyResult
 } from './library'
 
 export interface NovelTrackerApi {
@@ -88,6 +89,7 @@ export interface NovelTrackerApi {
     selection: ChapterSelectionUpdate
   ): Promise<Result<void>>
   reverseDiscoveryQueueChapters(id: string): Promise<Result<void>>
+  copyDownloadSyncText(): Promise<Result<DownloadSyncCopyResult>>
   updateDiscoveryQueueChapterUrl(
     id: string,
     chapterId: string,
