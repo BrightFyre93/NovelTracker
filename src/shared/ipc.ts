@@ -254,6 +254,10 @@ export interface IpcMap {
     args: []
     result: Result<DownloadSyncCopyResult>
   }
+  'queue:copy-download-sync-text': {
+    args: [ids: string[]]
+    result: Result<DownloadSyncCopyResult>
+  }
   'discovery-queue:update-chapter-url': {
     args: [id: string, chapterId: string, url: string]
     result: Result<void>

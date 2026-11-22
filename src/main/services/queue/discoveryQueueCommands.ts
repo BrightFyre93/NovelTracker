@@ -4,6 +4,14 @@ import type {
   DiscoveryQueueInput
 } from '../../../shared/contracts'
 import type { QueueCommandContext } from './queueCommands'
+import { parseChapterNumber } from '../../../shared/chapterNumber'
+import {
+  formatDownloadSyncText,
+  slugFromSourceUrl,
+  type DownloadSyncRow,
+  type DownloadSyncText
+} from '../../../shared/downloadSyncText'
+import { parseFilenameRange } from '../../../shared/filenameRange'
 import { isActiveQueueStatus } from './queueStateMachine'
 import { removeJobDiagnostic } from '../jobDiagnostics'
 
@@ -445,6 +453,49 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
     notifyDiscoveryQueueChanged()
   }
 
+  /**
+   * Builds the Android download sync text for completed jobs. Only the given
+   * job ids are used (the renderer sends the ones its filter shows).
+   */
+  async function buildDownloadSyncText(ids: string[]): Promise<DownloadSyncText> {
+    const wanted = new Set(ids)
+    const rows: DownloadSyncRow[] = []
+    let skippedCount = 0
+    for (const item of discoveryQueue) {
+      if (!wanted.has(item.id) || item.status !== 'completed') continue
+      const failedUrls = new Set(item.failedChapters.map((chapter) => chapter.url))
+      let downloaded = 0
+      await withChapters(item, async () => {
+        for (const chapter of item.chapters) {
+          if (!chapter.selected || failedUrls.has(chapter.url)) continue
+          const number = parseChapterNumber(chapter.title)
+          if (number !== null) downloaded = Math.max(downloaded, Math.floor(number))
+        }
+      })
+      if (downloaded <= 0) {
+        // Titles without chapter numbers: use the range in the EPUB file names.
+        const names = [
+          ...(item.outputPaths ?? []).map((output) => output.filename),
+          item.targetOutputPath
+        ]
+        for (const name of names) {
+          const range = name ? parseFilenameRange(name) : null
+          if (range) downloaded = Math.max(downloaded, Math.floor(range.end))
+        }
+      }
+      if (downloaded <= 0) {
+        skippedCount += 1
+        continue
+      }
+      rows.push({
+        name: (item.downloadOptions?.title || item.title).trim(),
+        downloaded,
+        slug: slugFromSourceUrl(item.sourceUrl)
+      })
+    }
+    return formatDownloadSyncText(rows, skippedCount)
+  }
+
   function requireReviewItem(id: string): DiscoveryQueueItem {
     const item = discoveryQueue.find((candidate) => candidate.id === id)
     if (!item || (item.status !== 'needs-review' && item.status !== 'ready')) {
@@ -539,6 +590,7 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
 
   return {
     addDiscoveryItems,
+    buildDownloadSyncText,
     reverseChapterOrder,
     updateChapterUrl,
     acceptRecommendations,

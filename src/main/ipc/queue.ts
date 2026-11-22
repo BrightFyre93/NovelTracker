@@ -1,3 +1,4 @@
+import { clipboard } from 'electron'
 import type { IpcContext } from './context'
 
 type QueueIpcContext = Pick<
@@ -258,6 +259,36 @@ export function registerQueueIpcHandlers(context: QueueIpcContext): void {
     ]),
     async (_event, id, selectionUpdate) => {
       await queueCommands.updateChapterSelection(id, selectionUpdate)
+    }
+  )
+  // Copies the Android download sync text for the completed jobs the Queue page shows.
+  handle(
+    'validated-result',
+    'queue:copy-download-sync-text',
+    z.tuple([z.array(queueItemIdSchema).max(50_000)]),
+    async (_event, ids) => {
+      const sync = await queueCommands.buildDownloadSyncText(ids)
+      if (sync.rows.length === 0) {
+        throw new Error(
+          'None of the completed jobs shown has a known downloaded chapter number.'
+        )
+      }
+      let copied = false
+      try {
+        clipboard.writeText(sync.text)
+        copied = true
+      } catch (error) {
+        console.warn('The download sync text could not be copied:', error)
+      }
+      return {
+        ok: true,
+        value: {
+          text: sync.text,
+          novelCount: sync.rows.length,
+          skippedCount: sync.skippedNovelCount,
+          copied
+        }
+      }
     }
   )
   handle(

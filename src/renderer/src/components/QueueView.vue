@@ -109,6 +109,14 @@ const failedDiscoveryCount = computed(() =>
   items.value.filter((item) => item.status === 'failed' && !item.downloadOptions).length
 )
 const completedQueueCount = computed(() => items.value.filter((item) => item.status === 'completed').length)
+const copyingSync = ref(false)
+const syncFallbackText = ref('')
+const syncMessage = ref('')
+const syncError = ref('')
+// Completed jobs that the current status filter shows (the export uses exactly these).
+const visibleCompletedItems = computed(() =>
+  filteredQueueItems.value.filter((item) => item.status === 'completed')
+)
 const queuedItems = computed(() =>
   items.value
     .filter((item) => item.status === 'queued' && item.downloadOptions)
@@ -315,6 +323,37 @@ function estimatedTimeRemaining(item: DiscoveryQueueItemSummary): string | null 
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
   return minutes > 0 ? `~${hours} hr ${minutes} min` : `~${hours} hr`
+}
+
+async function copyCompletedForAndroid(): Promise<void> {
+  const ids = visibleCompletedItems.value.map((item) => item.id)
+  if (ids.length === 0 || copyingSync.value) return
+  syncMessage.value = ''
+  syncError.value = ''
+  syncFallbackText.value = ''
+  copyingSync.value = true
+  try {
+    const response = await window.novelTracker.copyQueueDownloadSyncText(ids)
+    if (!response.ok) throw new Error(response.error)
+    const sync = response.value
+    const skipped = sync.skippedCount
+      ? ` ${sync.skippedCount.toLocaleString()} job${sync.skippedCount === 1 ? ' was' : 's were'} left out because no downloaded chapter number is known.`
+      : ''
+    if (sync.copied) {
+      syncMessage.value = `Copied the download counts of ${sync.novelCount.toLocaleString()} novels from the ${ids.length.toLocaleString()} completed jobs shown. In the Android app open the ⋮ menu, choose "Update downloads from text…", paste, check the preview, and apply it.${skipped}`
+    } else {
+      syncFallbackText.value = sync.text
+      syncError.value = `The clipboard could not be written. Copy the ${sync.novelCount.toLocaleString()} lines below by hand.${skipped}`
+    }
+  } catch (reason) {
+    syncError.value = toMessage(reason)
+  } finally {
+    copyingSync.value = false
+  }
+}
+
+function selectSyncText(event: Event): void {
+  if (event.target instanceof HTMLTextAreaElement) event.target.select()
 }
 
 async function refreshQueue(): Promise<void> {
@@ -1259,6 +1298,17 @@ async function clearCompletedQueueItems(): Promise<void> {
           @click="clearCompletedQueueItems"
         />
         <Button
+          icon="pi pi-clipboard"
+          title="Copy the completed jobs shown (see the status filter) to the clipboard for the Android app: name, downloaded chapter count and site page name"
+          aria-label="Copy the completed jobs shown for the Android app"
+          severity="secondary"
+          text
+          size="small"
+          :loading="copyingSync"
+          :disabled="visibleCompletedItems.length === 0 || copyingSync"
+          @click="copyCompletedForAndroid"
+        />
+        <Button
           icon="pi pi-trash"
           severity="danger"
           text
@@ -1353,6 +1403,20 @@ async function clearCompletedQueueItems(): Promise<void> {
       </span>
     </div>
     <p v-if="!outputDirectory" class="help-text">Choose an EPUB output folder in Configuration to queue downloads.</p>
+    <Message v-if="syncMessage" :key="syncMessage" severity="success" closable class="feedback" @close="syncMessage = ''">{{ syncMessage }}</Message>
+    <Message v-if="syncError" :key="syncError" severity="error" closable class="feedback" @close="syncError = ''">{{ syncError }}</Message>
+    <div v-if="syncFallbackText" class="library-note">
+      <label class="field-label" for="queue-download-sync-text">Download counts for the Android app</label>
+      <textarea
+        id="queue-download-sync-text"
+        class="queue-url-input"
+        rows="8"
+        readonly
+        :value="syncFallbackText"
+        @focus="selectSyncText"
+      />
+      <p class="help-text">Select all, copy, then paste it in the Android app: ⋮ menu, then "Update downloads from text…".</p>
+    </div>
     <p v-if="loading && items.length === 0" class="help-text">Loading saved queue…</p>
     <p v-else-if="items.length === 0" class="empty-state">No novels queued. Add a tracker selection or one or more URLs above.</p>
     <p v-else-if="filteredQueueItems.length === 0" class="empty-state">No jobs match the selected statuses.</p>

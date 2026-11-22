@@ -90,6 +90,7 @@ export interface NovelTrackerApi {
   ): Promise<Result<void>>
   reverseDiscoveryQueueChapters(id: string): Promise<Result<void>>
   copyDownloadSyncText(): Promise<Result<DownloadSyncCopyResult>>
+  copyQueueDownloadSyncText(ids: string[]): Promise<Result<DownloadSyncCopyResult>>
   updateDiscoveryQueueChapterUrl(
     id: string,
     chapterId: string,
