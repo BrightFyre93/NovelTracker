@@ -39,7 +39,6 @@ import {
   normalizeEpubOutputPreferences
 } from '../../shared/epubOutputOptions'
 import { isNodeError } from '../../shared/errors'
-import { invalidateLibraryIndexSummary } from '../../shared/libraryIndexSummary'
 import { atomicWriteFile, renameWithRetry } from './atomicFile'
 import { chapterContentBlocksSchema } from '../../shared/chapterContentSchema'
 import type {
@@ -51,7 +50,6 @@ import type {
   QueueChapter,
   DownloadHistoryEntry,
   LibraryOperation,
-  LibraryFileCorrection,
   LibraryIndex
 } from '../../shared/contracts'
 const EMPTY_SETTINGS: AppSettings = {
@@ -500,43 +498,6 @@ export async function readLibraryIndexBackupDate(
   }
 }
 
-export async function writeLibraryIndex(
-  dataDirectory: string,
-  index: LibraryIndex,
-  previousIndex?: LibraryIndex | null
-): Promise<void> {
-  const indexPath = join(dataDirectory, 'library-index.json')
-  libraryIndexCache = undefined
-  invalidateLibraryIndexSummary(index)
-  let backupCandidate = previousIndex
-  if (backupCandidate === undefined) {
-    try {
-      backupCandidate = await readJson<LibraryIndex | null>(indexPath, null)
-    } catch (error) {
-      if (!(error instanceof SyntaxError)) throw error
-      console.warn(
-        'The existing library index is corrupt; replacing it without creating a backup.'
-      )
-      backupCandidate = null
-    }
-  }
-  if (backupCandidate) {
-    await writeJson(
-      join(dataDirectory, 'library-index.backup.json'),
-      backupCandidate
-    )
-  }
-  await writeJson(indexPath, index)
-  const details = await stat(indexPath)
-  libraryIndexCache = {
-    path: indexPath,
-    size: details.size,
-    modifiedAtMs: details.mtimeMs,
-    changedAtMs: details.ctimeMs,
-    index: supportedEbookIndex(index)
-  }
-}
-
 function copyDownloadHistory(
   history: DownloadHistoryEntry[]
 ): DownloadHistoryEntry[] {
@@ -912,7 +873,7 @@ function isValidChapterImage(value: unknown): value is ChapterImage {
   )
 }
 
-export async function readChapterArtifact(
+async function readChapterArtifact(
   dataDirectory: string,
   queueItemId: string,
   chapterUrl: string
@@ -1376,37 +1337,4 @@ export async function archiveDownloadJobs(
     downloadHistoryCache = copyDownloadHistory(retained)
     return copyDownloadHistory(retained)
   })
-}
-
-export async function writeLibraryCorrection(
-  dataDirectory: string,
-  fileId: string,
-  correction: LibraryFileCorrection
-): Promise<LibraryIndex> {
-  const index = await readLibraryIndex(dataDirectory)
-  if (!index) throw new Error('Scan the library before correcting a file.')
-
-  const file = index.files.find((candidate) => candidate.id === fileId)
-  if (!file)
-    throw new Error(
-      'The selected library file is no longer indexed. Rescan the library.'
-    )
-
-  const corrections = index.corrections ?? {}
-  const saved = corrections[fileId] ?? {}
-  if (correction.novelTitle !== undefined)
-    saved.novelTitle = correction.novelTitle.trim()
-  if (correction.chapterNumbers !== undefined)
-    saved.chapterNumbers = [...new Set(correction.chapterNumbers)]
-  corrections[fileId] = saved
-  index.corrections = corrections
-  if (saved.novelTitle) file.novelTitle = saved.novelTitle
-  if (saved.chapterNumbers) {
-    file.chapterNumbers = [...saved.chapterNumbers].sort(
-      (left, right) => left - right
-    )
-    file.coverageConfidence = 'user-corrected'
-  }
-  await writeLibraryIndex(dataDirectory, index)
-  return index
 }

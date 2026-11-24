@@ -1,0 +1,17 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/main/index.ts",
+    "src/main/services/libraryScanWorker.ts",
+    "src/main/services/epubMergeWorker.ts",
+    "src/main/services/epubRepairWorker.ts",
+    "src/main/services/epubPackageWorker.ts",
+    "src/main/services/libraryHealthWorker.ts",
+    "src/preload/index.ts",
+    "src/renderer/src/main.ts"
+  ],
+  "project": ["src/**/*.{ts,vue}"],
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": ["prettier"],
+  "ignoreUnresolved": ["^\\./[A-Za-z]+Worker\\.js$"]
+}
