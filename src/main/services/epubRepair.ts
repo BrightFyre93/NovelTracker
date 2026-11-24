@@ -16,6 +16,7 @@ import {
   MAX_TOTAL_EPUB_IMAGE_BYTES
 } from '../../shared/constants'
 import { resizeSmallKindleCover } from './kindleCover'
+import { repairEscapedMarkupInXhtml } from './escapedMarkupRepair'
 import { convertWebpToJpeg } from './webpToJpeg'
 import { atomicWriteFile, atomicWriteStream } from './atomicFile'
 import { toMessage } from '../../shared/errors'
@@ -401,6 +402,8 @@ export async function repairEpubFile(
   const occupiedPaths = new Set(entries.map((entry) => entry.fileName))
   let totalImageBytes = 0
   let upscaledCover = false
+  let repairedMarkupChapters = 0
+  let repairedMarkupParagraphs = 0
 
   if (coverImagePath && coverEntry && !coverEntry.fileName.endsWith('/') && !/\.webp$/i.test(coverImagePath)) {
     const data = await readEntry(archive, coverEntry, MAX_REPAIR_ENTRY_BYTES)
@@ -511,6 +514,16 @@ export async function repairEpubFile(
       const data = await readEntry(archive, entry, MAX_EPUB_MERGE_ENTRY_BYTES)
       let contents = data.toString('utf8')
       if (replacements.size > 0) contents = rewriteDocumentReferences(contents, name, replacements)
+      if (/\.x?html?$/i.test(name)) {
+        // Chapters where escaped page markup (ads, footer, scripts) ended up as text.
+        const markupRepair = repairEscapedMarkupInXhtml(contents)
+        if (markupRepair.paragraphCount > 0) {
+          validateXml(markupRepair.contents, name)
+          contents = markupRepair.contents
+          repairedMarkupChapters += 1
+          repairedMarkupParagraphs += markupRepair.paragraphCount
+        }
+      }
       repairedArchive.file(name, contents, { date, createFolders: false })
       continue
     }
@@ -541,14 +554,16 @@ export async function repairEpubFile(
   onProgress({
     stage: 'complete',
     percentage: 100,
-    message: `EPUB checked and repaired. Converted ${webpEntries.length} WebP image(s) to JPEG.${upscaledCover ? ' Upscaled the undersized cover.' : ''}`
+    message: `EPUB checked and repaired. Converted ${webpEntries.length} WebP image(s) to JPEG.${upscaledCover ? ' Upscaled the undersized cover.' : ''}${repairedMarkupChapters > 0 ? ` Cleaned ${repairedMarkupChapters} chapter(s) that contained page code.` : ''}`
   })
   return {
     outputPath,
     outputBytes: outputDetails.size,
     repairedWebpImages: webpEntries.length,
     upscaledCover,
-    fixedMimetype
+    fixedMimetype,
+    repairedMarkupChapters,
+    repairedMarkupParagraphs
   }
   } finally {
     archive.close()

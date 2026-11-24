@@ -20,7 +20,8 @@ export default defineConfig({
           libraryScanWorker: resolve('src/main/services/libraryScanWorker.ts'),
           epubMergeWorker: resolve('src/main/services/epubMergeWorker.ts'),
           epubRepairWorker: resolve('src/main/services/epubRepairWorker.ts'),
-          epubPackageWorker: resolve('src/main/services/epubPackageWorker.ts')
+          epubPackageWorker: resolve('src/main/services/epubPackageWorker.ts'),
+          libraryHealthWorker: resolve('src/main/services/libraryHealthWorker.ts')
         }
       }
     }

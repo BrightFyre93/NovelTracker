@@ -165,7 +165,40 @@ function makeXhtml(
 ): string {
   const content: ChapterContentBlock[] =
     blocks ?? paragraphs.map((text) => ({ type: 'paragraph', text }))
-  const body = content
+  const body = renderChapterBlocks(
+    content,
+    imageHrefs,
+    skipImages,
+    imageSourceUrls,
+    includeImageAttribution
+  )
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(language)}" lang="${escapeXml(language)}">
+  <head>
+    <title>${escapeXml(title)}</title>
+    <link rel="stylesheet" type="text/css" href="../styles.css"/>
+  </head>
+  <body>
+    <h1>${escapeXml(title)}</h1>
+    ${body}
+  </body>
+</html>`
+}
+
+/** XHTML for text-only chapter blocks, written exactly like chapter pages. */
+export function renderChapterBlocksXhtml(blocks: ChapterContentBlock[]): string {
+  return renderChapterBlocks(blocks, [], false, [], false)
+}
+
+function renderChapterBlocks(
+  content: ChapterContentBlock[],
+  imageHrefs: string[],
+  skipImages: boolean,
+  imageSourceUrls: string[],
+  includeImageAttribution: boolean
+): string {
+  return content
     .map((block) => {
       if (block.type === 'paragraph') {
         return `<p>${renderInlineContent(block.inline, block.text)}</p>`
@@ -198,18 +231,6 @@ function makeXhtml(
       return `<figure>${attribution ? `<a href="${escapeXml(attribution)}">${image}</a>` : image}</figure>`
     })
     .join('\n')
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(language)}" lang="${escapeXml(language)}">
-  <head>
-    <title>${escapeXml(title)}</title>
-    <link rel="stylesheet" type="text/css" href="../styles.css"/>
-  </head>
-  <body>
-    <h1>${escapeXml(title)}</h1>
-    ${body}
-  </body>
-</html>`
 }
 
 function renderInlineContent(

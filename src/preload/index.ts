@@ -96,6 +96,11 @@ const api: NovelTrackerApi = {
   reverseDiscoveryQueueChapters: (id: string) =>
     invokeIpc('discovery-queue:reverse-chapters', id),
   copyDownloadSyncText: () => invokeIpc('library:copy-download-sync-text'),
+  getLibraryHealthStatus: () => invokeIpc('library:health-status'),
+  startLibraryHealthScan: () => invokeIpc('library:health-scan'),
+  startLibraryHealthRepair: (fileIds: string[]) =>
+    invokeIpc('library:health-repair', fileIds),
+  cancelLibraryHealth: () => invokeIpc('library:health-cancel'),
   copyQueueDownloadSyncText: (ids: string[]) =>
     invokeIpc('queue:copy-download-sync-text', ids),
   updateDiscoveryQueueChapterUrl: (id: string, chapterId: string, url: string) =>

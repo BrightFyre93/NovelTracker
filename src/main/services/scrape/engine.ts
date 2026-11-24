@@ -27,6 +27,12 @@ import { fetchHtml } from '../net/httpClient'
 import { fetchImageResource, imageMediaType } from '../net/imageFetcher'
 import { validateHttpUrl } from '../net/requestLimiter'
 import {
+  inlineNodesToMarkup,
+  looksLikeEscapedMarkup,
+  PAGE_CODE_PATTERN
+} from './escapedMarkup'
+import { blocksFromEscapedMarkup } from './escapedMarkupBlocks'
+import {
   BLOCKED_PAGE_PATTERN,
   CHAPTER_LABEL_PATTERN,
   CHAPTER_URL_PATTERN,
@@ -1164,6 +1170,12 @@ function extractChapterStructure(
       const inline = inlineNodesFromSelection($, selection, url)
       const paragraphText = inlineNodesText(inline)
       if (!paragraphText) continue
+      if (looksLikeEscapedMarkup(paragraphText)) {
+        // The page holds escaped page markup (advertisements, the footer, the
+        // rest of the story) as text: rebuild the paragraphs and drop the page code.
+        blocks.push(...blocksFromEscapedMarkup(inlineNodesToMarkup(inline)))
+        continue
+      }
       if (tagName === 'blockquote') {
         blocks.push({ type: 'blockquote', text: paragraphText, inline })
       } else if (tagName?.startsWith('h')) {
@@ -1249,7 +1261,18 @@ function extractChapterStructure(
   }
   const validatedBlocks = chapterContentBlocksSchema(
     imageReferences.length
-  ).parse(blocks)
+  ).parse(
+    blocks.filter(
+      (block) =>
+        // Safety net: page code is never story text.
+        !(
+          (block.type === 'paragraph' ||
+            block.type === 'blockquote' ||
+            block.type === 'heading') &&
+          PAGE_CODE_PATTERN.test(block.text)
+        )
+    )
+  )
   const readableParagraphs = validatedBlocks.flatMap((block) => {
     if (
       block.type === 'paragraph' ||

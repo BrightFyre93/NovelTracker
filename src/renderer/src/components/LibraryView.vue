@@ -16,6 +16,7 @@ import type {
 import { toMessage, unwrapResult } from '../../../shared/errors'
 import { analyzeLibraryCoverage } from '../../../shared/libraryCoverage'
 import { useLibraryStore } from '../stores/library'
+import LibraryHealthPanel from './LibraryHealthPanel.vue'
 
 const emit = defineEmits<{
   openConfiguration: []
@@ -52,6 +53,7 @@ const busy = computed(() =>
 const error = ref('')
 const success = ref('')
 const copyingSync = ref(false)
+const showHealth = ref(false)
 const syncFallbackText = ref('')
 const loadingNovelFiles = ref(false)
 const searchingNovels = ref(false)
@@ -819,6 +821,15 @@ function chapterRangeLabel(start: number, end: number): string {
             :loading="copyingSync"
             @click="copyDownloadCounts"
           />
+          <Button
+            icon="pi pi-wrench"
+            aria-label="Check the library for broken chapters"
+            :severity="showHealth ? 'primary' : 'secondary'"
+            outlined
+            title="Check the library for chapters that contain page code (advertisements, scripts), and repair them"
+            :disabled="!index"
+            @click="showHealth = !showHealth"
+          />
         </div>
       </div>
       <p class="help-text library-note">
@@ -829,6 +840,7 @@ function chapterRangeLabel(start: number, end: number): string {
         <div><strong>{{ index.fileCount.toLocaleString() }}</strong><span>indexed ebook files</span></div>
         <small>Last scan {{ new Date(index.scannedAt).toLocaleString() }} · {{ index.scanErrors.toLocaleString() }} issues</small>
       </div>
+      <LibraryHealthPanel v-if="showHealth" />
       <div v-if="syncFallbackText" class="library-note">
         <label class="field-label" for="download-sync-text">Download counts for the Android app</label>
         <textarea

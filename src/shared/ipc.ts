@@ -25,6 +25,7 @@ import type {
   LibraryProgress,
   DownloadedNovelLookupResult,
   DownloadSyncCopyResult,
+  LibraryHealthStatus,
   QueuedEpubJob,
   QueueEpubOverrides,
   Result,
@@ -253,6 +254,22 @@ export interface IpcMap {
   'library:copy-download-sync-text': {
     args: []
     result: Result<DownloadSyncCopyResult>
+  }
+  'library:health-status': {
+    args: []
+    result: Result<LibraryHealthStatus>
+  }
+  'library:health-scan': {
+    args: []
+    result: Result<LibraryHealthStatus>
+  }
+  'library:health-repair': {
+    args: [fileIds: string[]]
+    result: Result<LibraryHealthStatus>
+  }
+  'library:health-cancel': {
+    args: []
+    result: Result<LibraryHealthStatus>
   }
   'queue:copy-download-sync-text': {
     args: [ids: string[]]

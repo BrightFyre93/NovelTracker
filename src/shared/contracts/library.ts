@@ -171,6 +171,45 @@ export interface EpubRepairResult {
   repairedWebpImages: number
   upscaledCover: boolean
   fixedMimetype: boolean
+  /** Chapters that held escaped page markup (ads, footer, scripts) and were cleaned. */
+  repairedMarkupChapters: number
+  repairedMarkupParagraphs: number
+}
+
+/** One library EPUB whose chapters contain escaped page markup. */
+export interface LibraryHealthIssue {
+  fileId: string
+  filename: string
+  relativePath: string
+  folderState: LibraryFolderState
+  affectedChapters: number
+  /** Titles of the first affected chapters. */
+  examples: string[]
+  /** Set after a repaired copy was written next to the original. */
+  repairedPath?: string
+}
+
+export interface LibraryHealthRepairResult {
+  fileId: string
+  filename: string
+  ok: boolean
+  outputPath: string
+  repairedChapters: number
+  error: string
+}
+
+export interface LibraryHealthStatus {
+  phase: 'idle' | 'scanning' | 'repairing'
+  current: number
+  total: number
+  message: string
+  scannedAt: string | null
+  scannedFileCount: number
+  /** Files that cannot be checked (not EPUB files). */
+  skippedFileCount: number
+  issues: LibraryHealthIssue[]
+  errors: string[]
+  repairResults: LibraryHealthRepairResult[]
 }
 
 export interface EpubRepairProgress {

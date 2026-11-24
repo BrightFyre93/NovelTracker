@@ -32,7 +32,8 @@ import type {
   LibraryOperation,
   EpubRepairResponse,
   DownloadedNovelLookupResult,
-  DownloadSyncCopyResult
+  DownloadSyncCopyResult,
+  LibraryHealthStatus
 } from './library'
 
 export interface NovelTrackerApi {
@@ -90,6 +91,10 @@ export interface NovelTrackerApi {
   ): Promise<Result<void>>
   reverseDiscoveryQueueChapters(id: string): Promise<Result<void>>
   copyDownloadSyncText(): Promise<Result<DownloadSyncCopyResult>>
+  getLibraryHealthStatus(): Promise<Result<LibraryHealthStatus>>
+  startLibraryHealthScan(): Promise<Result<LibraryHealthStatus>>
+  startLibraryHealthRepair(fileIds: string[]): Promise<Result<LibraryHealthStatus>>
+  cancelLibraryHealth(): Promise<Result<LibraryHealthStatus>>
   copyQueueDownloadSyncText(ids: string[]): Promise<Result<DownloadSyncCopyResult>>
   updateDiscoveryQueueChapterUrl(
     id: string,

@@ -1,4 +1,5 @@
 import { createLibraryWorkflowCommands } from '../services/library/libraryWorkflowCommands'
+import { createLibraryHealthCommands } from '../services/library/libraryHealthCommands'
 import type { LibraryWorkflowContext } from '../services/library/libraryWorkflowCommands'
 import { z } from 'zod'
 import { clipboard } from 'electron'
@@ -17,6 +18,24 @@ export function registerLibraryIpcHandlers(
     libraryIndexRepository
   } = context
   const workflows = createLibraryWorkflowCommands(context)
+  const health = createLibraryHealthCommands(context)
+
+  // Library health: find EPUBs with broken chapters and repair them as copies.
+  handle('validated-result', 'library:health-status', z.tuple([]), async () =>
+    health.getLibraryHealthStatus()
+  )
+  handle('validated-result', 'library:health-scan', z.tuple([]), async () =>
+    health.startLibraryHealthScan()
+  )
+  handle(
+    'validated-result',
+    'library:health-repair',
+    z.tuple([z.array(z.string().max(200)).max(5000)]),
+    async (_event, fileIds) => health.startLibraryHealthRepair(fileIds)
+  )
+  handle('validated-result', 'library:health-cancel', z.tuple([]), async () =>
+    health.cancelLibraryHealth()
+  )
 
   handle(
     'validated-result',
