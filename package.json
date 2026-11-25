@@ -30,6 +30,7 @@
     "@types/node": "^24.0.0",
     "@types/yauzl": "^3.4.0",
     "@vitejs/plugin-vue": "^5.2.1",
+    "domhandler": "^6.0.1",
     "electron": "^45.3.0",
     "electron-builder": "^26.18.0",
     "electron-vite": "^3.0.0",
@@ -82,5 +83,9 @@
       "createStartMenuShortcut": true,
       "deleteAppDataOnUninstall": false
     }
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true
   }
 }
