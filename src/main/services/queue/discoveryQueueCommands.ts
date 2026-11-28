@@ -465,7 +465,7 @@ export function createDiscoveryQueueCommands(context: QueueCommandContext) {
       if (!wanted.has(item.id) || item.status !== 'completed') continue
       const failedUrls = new Set(item.failedChapters.map((chapter) => chapter.url))
       let downloaded = 0
-      await withChapters(item, async () => {
+      await withChapters(item, () => {
         for (const chapter of item.chapters) {
           if (!chapter.selected || failedUrls.has(chapter.url)) continue
           const number = parseChapterNumber(chapter.title)

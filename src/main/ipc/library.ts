@@ -94,7 +94,7 @@ export function registerLibraryIpcHandlers(
       }
       let copied = false
       try {
-        clipboard.writeText(sync.text)
+        await clipboard.writeText(sync.text)
         copied = true
       } catch (error) {
         console.warn('The download sync text could not be copied:', error)

@@ -1,5 +1,4 @@
 import { posix } from 'node:path'
-import type JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
 
 export type XmlObject = Record<string, unknown>
@@ -82,33 +81,4 @@ export function resolveArchivePath(
     throw new Error(messages.unsafePath)
   }
   return path
-}
-
-export async function readEntry(
-  entry: JSZip.JSZipObject,
-  limit: number,
-  limitLabel = 'safety limit'
-): Promise<Buffer> {
-  const stream = entry.nodeStream('nodebuffer') as NodeJS.ReadableStream & {
-    destroy(error?: Error): void
-  }
-  return new Promise<Buffer>((resolveEntry, rejectEntry) => {
-    const chunks: Buffer[] = []
-    let length = 0
-    stream.on('data', (value: Buffer | Uint8Array) => {
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-      length += chunk.byteLength
-      if (length > limit) {
-        stream.destroy(
-          new Error(
-            `An EPUB resource exceeds the ${limit.toLocaleString()} byte ${limitLabel}.`
-          )
-        )
-        return
-      }
-      chunks.push(chunk)
-    })
-    stream.once('error', rejectEntry)
-    stream.once('end', () => resolveEntry(Buffer.concat(chunks, length)))
-  })
 }

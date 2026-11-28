@@ -6,8 +6,7 @@ import type {
   LibraryIndexSummary,
   LibraryFileSearchPage,
   LibraryFileListItem,
-  LibraryNovelSummary,
-  LibraryNovelSearchPage
+  LibraryNovelSummary
 } from './contracts'
 import { analyzeLibraryCoverage } from './libraryCoverage'
 import { normalizeNovelTitleForGrouping } from './novelTitle'
@@ -72,35 +71,6 @@ export function summarizeLibraryIndexOverview(index: LibraryIndex): LibraryIndex
   }
 }
 
-export function searchLibraryNovelSummaries(
-  index: LibraryIndex,
-  query: string,
-  multipleFilesOnly: boolean,
-  offset: number,
-  limit: number,
-  selectedNovelKey?: string
-): LibraryNovelSearchPage {
-  const normalizedQuery = query.trim().toLocaleLowerCase()
-  const matchingNovels = summarizeLibraryIndex(index).novels.filter((novel) =>
-    (!multipleFilesOnly || novel.files.length > 1) &&
-    (
-      !normalizedQuery ||
-      novel.title.toLocaleLowerCase().includes(normalizedQuery) ||
-      novel.files.some((file) =>
-        file.filename.toLocaleLowerCase().includes(normalizedQuery)
-      )
-    )
-  )
-  return {
-    total: matchingNovels.length,
-    offset,
-    items: matchingNovels.slice(offset, offset + limit),
-    selectedNovel: selectedNovelKey
-      ? matchingNovels.find((novel) => novel.key === selectedNovelKey) ?? null
-      : null
-  }
-}
-
 export function searchLibraryFileSummaries(
   index: LibraryIndex,
   novelKey: string,
@@ -149,8 +119,4 @@ export function searchLibraryFileSummaries(
     offset,
     items
   }
-}
-
-export function invalidateLibraryIndexSummary(index: LibraryIndex): void {
-  summaryCache.delete(index)
 }

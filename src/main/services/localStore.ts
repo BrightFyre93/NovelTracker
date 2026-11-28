@@ -601,13 +601,6 @@ export async function readDiscoveryQueue(
   )
 }
 
-export function writeDiscoveryQueue(
-  dataDirectory: string,
-  items: DiscoveryQueueItem[]
-): Promise<void> {
-  return writeJson(join(dataDirectory, 'discovery-queue.json'), items)
-}
-
 export function discoveryQueueChaptersPath(
   dataDirectory: string,
   queueItemId: string
@@ -671,39 +664,6 @@ export async function readDiscoveryQueueItemChapters(
     ...chapter,
     selected: selectedIdSet.has(chapter.id)
   }))
-}
-
-export function writeDiscoveryQueueItemChapters(
-  dataDirectory: string,
-  queueItemId: string,
-  chapters: QueueChapter[]
-): Promise<void> {
-  const selectedIds = chapters
-    .filter((chapter) => chapter.selected)
-    .map((chapter) => chapter.id)
-  const chapterData = chapters.map(
-    ({ selected: _selected, ...chapter }) => chapter
-  )
-  return Promise.all([
-    writeJson(
-      discoveryQueueChaptersPath(dataDirectory, queueItemId),
-      chapterData
-    ),
-    writeJson(
-      discoveryQueueSelectionPath(dataDirectory, queueItemId),
-      selectedIds
-    )
-  ]).then(() => undefined)
-}
-
-export function writeDiscoveryQueueItemSelection(
-  dataDirectory: string,
-  queueItemId: string,
-  selectedChapterIds: string[]
-): Promise<void> {
-  return writeJson(discoveryQueueSelectionPath(dataDirectory, queueItemId), [
-    ...new Set(selectedChapterIds)
-  ])
 }
 
 function chapterArtifactPath(

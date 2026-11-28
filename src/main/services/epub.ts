@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -8,7 +8,6 @@ import JSZip from 'jszip'
 import { XMLValidator } from 'fast-xml-parser'
 import * as yauzl from 'yauzl'
 import type {
-  ChapterContent,
   ChapterContentBlock,
   ChapterImage,
   ChapterInlineNode,
@@ -24,7 +23,6 @@ import {
 } from '../../shared/errors'
 import {
   EPUB_IMAGE_TYPES,
-  DEFAULT_EPUB_CSS,
   EPUB_MIMETYPE,
   MAX_IMAGE_BYTES,
   MAX_TOTAL_EPUB_IMAGE_BYTES,
@@ -39,15 +37,12 @@ import { atomicWriteFile, atomicWriteStream } from './atomicFile'
 import {
   readCoverArtifact,
   readChapterArtifactDescriptor,
-  writeChapterArtifact,
-  writeCoverArtifact
 } from './localStore'
 import type {
   EpubPackagingInput,
   EpubPackagingProgress,
   EpubPackagingResult
 } from './epubPackaging'
-import { DEFAULT_EPUB_OUTPUT_OPTIONS } from '../../shared/epubOutputOptions'
 import { fileIdFromNovelId, novelIdFromSeed } from './novelIdentity'
 
 interface PackageIdentity {
@@ -751,17 +746,6 @@ async function publishEpub(
   return { outputPath, overwroteExistingFile }
 }
 
-function createDefaultEpubNovelMetadata(): EpubNovelMetadata {
-  return {
-    description: '',
-    alternativeNames: [],
-    genres: [],
-    source: '',
-    novelStatus: '',
-    sourceUrl: ''
-  }
-}
-
 async function writeEpubArchive(
   outputDirectory: string,
   filename: string,
@@ -822,64 +806,6 @@ async function writeEpubArchive(
     message: 'Writing complete.'
   })
   return result
-}
-
-export async function writeEpub(
-  outputDirectory: string,
-  title: string,
-  author: string,
-  language: string,
-  chapters: ChapterContent[],
-  requestedFilename?: string,
-  signal?: AbortSignal,
-  css = DEFAULT_EPUB_CSS,
-  metadata: EpubNovelMetadata = createDefaultEpubNovelMetadata(),
-  onProgress?: (progress: EpubMergeProgress) => void,
-  identifierSeed?: string,
-  appVersion?: string
-): Promise<{ outputPath: string; overwroteExistingFile: boolean }> {
-  if (chapters.length === 0) throw new Error('Select at least one chapter.')
-  const dataDirectory = await mkdtemp(
-    join(tmpdir(), 'novel-tracker-epub-source-')
-  )
-  const queueItemId = randomUUID()
-  try {
-    for (const chapter of chapters) {
-      if (signal?.aborted) {
-        throw new OperationCancelledError('EPUB creation was cancelled.')
-      }
-      await writeChapterArtifact(dataDirectory, queueItemId, chapter)
-    }
-    const metadataWithoutCover = { ...metadata }
-    delete metadataWithoutCover.cover
-    if (metadata.cover) {
-      await writeCoverArtifact(dataDirectory, queueItemId, metadata.cover)
-    }
-    return await writeEpubFromArtifactStore(
-      {
-        dataDirectory,
-        queueItemId,
-        chapters: chapters.map(({ title, url }) => ({ title, url })),
-        outputDirectory,
-        title,
-        author,
-        filename: requestedFilename ?? '',
-        outputOptions: {
-          ...DEFAULT_EPUB_OUTPUT_OPTIONS,
-          css,
-          language,
-          identifierSeed: identifierSeed ?? metadata.sourceUrl
-        },
-        appVersion,
-        includeCover: Boolean(metadata.cover),
-        metadata: metadataWithoutCover
-      },
-      signal,
-      onProgress
-    )
-  } finally {
-    await rm(dataDirectory, { recursive: true, force: true })
-  }
 }
 
 const MAX_VOLUME_SOURCE_IMAGE_BYTES = Math.floor(

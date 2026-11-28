@@ -361,9 +361,9 @@ export function createLibraryHealthCommands(context: LibraryWorkflowContext) {
       void runRepairs(issues, abort.signal)
       return { ok: true, value: snapshot() }
     },
-    cancelLibraryHealth: async (): Promise<Result<LibraryHealthStatus>> => {
+    cancelLibraryHealth: (): Promise<Result<LibraryHealthStatus>> => {
       abort?.abort()
-      return { ok: true, value: snapshot() }
+      return Promise.resolve({ ok: true, value: snapshot() })
     }
   }
 }

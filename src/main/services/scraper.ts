@@ -8,11 +8,6 @@ export { fetchImageResource } from './net/imageFetcher'
 export {
   discoverChapters,
   discoverChaptersUsingPageLoader,
-  discoverFromHtml,
-  extractChapterFromHtml,
   fetchChapterContent,
-  fetchChapterContentFromHtml,
-  parseNovelFullCatalogPage,
-  registerSiteExtractor
+  fetchChapterContentFromHtml
 } from './scrape/engine'
-export type { HtmlPageLoader, SiteExtractor } from './scrape/engine'

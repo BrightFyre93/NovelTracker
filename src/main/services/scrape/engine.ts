@@ -1305,15 +1305,6 @@ function extractChapterStructure(
   }
 }
 
-export function extractChapterFromHtml(
-  html: string,
-  pageUrl: string,
-  fallbackTitle: string
-): ChapterContent {
-  const { content } = extractChapterStructure(html, pageUrl, fallbackTitle)
-  return content
-}
-
 export async function fetchChapterContentFromHtml(
   chapter: ChapterLink,
   html: string,

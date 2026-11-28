@@ -5,6 +5,7 @@ import type {
   LibraryHealthIssue
 } from '../../shared/contracts'
 import { countEscapedMarkupParagraphs, readXhtmlTitle } from './escapedMarkupScan'
+import { toMessage } from '../../shared/errors'
 
 const MAX_CHAPTER_PAGE_BYTES = 8 * 1024 * 1024
 const MAX_EXAMPLES = 5
@@ -32,10 +33,10 @@ export interface LibraryHealthWorkerResult {
 
 async function readEntryText(archive: yauzl.ZipFile, entry: yauzl.Entry): Promise<string> {
   const stream = await archive.openReadStreamPromise(entry)
-  const chunks: Buffer[] = []
+  const chunks = []
   let length = 0
   for await (const chunk of stream) {
-    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    const data = Buffer.from(chunk as Uint8Array)
     length += data.length
     if (length > MAX_CHAPTER_PAGE_BYTES) throw new Error('A chapter page is too large to check.')
     chunks.push(data)
@@ -65,7 +66,7 @@ export async function scanEpubForEscapedMarkup(
         archive.off('entry', onEntry)
         archive.off('end', onEnd)
         archive.off('error', onError)
-        if (error) rejectScan(error instanceof Error ? error : new Error(String(error)))
+        if (error) rejectScan(error instanceof Error ? error : new Error(String(toMessage(error))))
         else resolveScan()
       }
       const onEnd = (): void => finish()
